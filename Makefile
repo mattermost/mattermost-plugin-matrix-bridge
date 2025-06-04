@@ -164,7 +164,7 @@ apply:
 ## Install go tools
 install-go-tools:
 	@echo Installing go tools
-	$(GO) install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.61.0
+	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
 	$(GO) install gotest.tools/gotestsum@v1.7.0
 
 ## Runs eslint and golangci-lint
@@ -410,5 +410,5 @@ help:
 mock:
 ifneq ($(HAS_SERVER),)
 	go install github.com/golang/mock/mockgen@v1.6.0
-	mockgen -destination=server/command/mocks/mock_commands.go -package=mocks github.com/mattermost/mattermost-plugin-starter-template/server/command Command
+	mockgen -destination=server/command/mocks/mock_commands.go -package=mocks github.com/wiggin77/mattermost-plugin-matrix-bridge/server/command Command
 endif

@@ -1,8 +1,8 @@
-module github.com/mattermost/mattermost-plugin-starter-template
+module github.com/wiggin77/mattermost-plugin-matrix-bridge
 
-go 1.22.0
+go 1.23.0
 
-toolchain go1.22.8
+toolchain go1.23.9
 
 require (
 	github.com/golang/mock v1.6.0

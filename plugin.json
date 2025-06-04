@@ -1,11 +1,11 @@
 {
-    "id": "com.mattermost.plugin-starter-template",
-    "name": "Plugin Starter Template",
-    "description": "This plugin serves as a starting point for writing a Mattermost plugin.",
-    "homepage_url": "https://github.com/mattermost/mattermost-plugin-starter-template",
-    "support_url": "https://github.com/mattermost/mattermost-plugin-starter-template/issues",
-    "icon_path": "assets/starter-template-icon.svg",
-    "min_server_version": "6.2.1",
+    "id": "com.mattermost.plugin-matrix-bridge",
+    "name": "Mattermost bridge for Matrix",
+    "description": "This plugin provides a bridge connecting Mattermost and Matrix servers.",
+    "homepage_url": "https://github.com/wiggin77/mattermost-plugin-matrix-bridge",
+    "support_url": "https://github.com/wiggin77/mattermost-plugin-matrix-bridge/issues",
+    "icon_path": "assets/matrix-bridge.svg",
+    "min_server_version": "10.7.1",
     "server": {
         "executables": {
             "linux-amd64": "server/dist/plugin-linux-amd64",
