@@ -19,8 +19,40 @@
         "bundle_path": "webapp/dist/main.js"
     },
     "settings_schema": {
-        "header": "",
-        "footer": "",
-        "settings": []
+        "header": "Configure Matrix bridge settings",
+        "footer": "For more information, see the [Matrix specification](https://spec.matrix.org/v1.14/)",
+        "settings": [
+            {
+                "key": "matrix_server_url",
+                "display_name": "Matrix Server URL",
+                "type": "text",
+                "help_text": "The URL of the Matrix homeserver (e.g., https://matrix.org)",
+                "placeholder": "https://matrix.example.com",
+                "default": ""
+            },
+            {
+                "key": "matrix_access_token",
+                "display_name": "Matrix Access Token",
+                "type": "text",
+                "help_text": "Access token for authenticating with the Matrix server",
+                "placeholder": "syt_...",
+                "default": ""
+            },
+            {
+                "key": "matrix_user_id",
+                "display_name": "Matrix User ID",
+                "type": "text",
+                "help_text": "The Matrix user ID for the bridge bot (e.g., @bridge:example.com)",
+                "placeholder": "@bridge:example.com",
+                "default": ""
+            },
+            {
+                "key": "enable_sync",
+                "display_name": "Enable Message Sync",
+                "type": "bool",
+                "help_text": "Enable syncing messages from Mattermost to Matrix",
+                "default": false
+            }
+        ]
     }
 }

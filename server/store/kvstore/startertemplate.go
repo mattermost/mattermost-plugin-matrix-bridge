@@ -27,3 +27,20 @@ func (kv Client) GetTemplateData(userID string) (string, error) {
 	}
 	return templateData, nil
 }
+
+func (kv Client) Get(key string) ([]byte, error) {
+	var data []byte
+	err := kv.client.KV.Get(key, &data)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get key from KV store")
+	}
+	return data, nil
+}
+
+func (kv Client) Set(key string, value []byte) error {
+	_, appErr := kv.client.KV.Set(key, value)
+	if appErr != nil {
+		return errors.Wrap(appErr, "failed to set key in KV store")
+	}
+	return nil
+}

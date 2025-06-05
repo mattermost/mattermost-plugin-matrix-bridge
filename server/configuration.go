@@ -18,6 +18,10 @@ import (
 // If you add non-reference types to your configuration struct, be sure to rewrite Clone as a deep
 // copy appropriate for your types.
 type configuration struct {
+	MatrixServerURL   string `json:"matrix_server_url"`
+	MatrixAccessToken string `json:"matrix_access_token"`
+	MatrixUserID      string `json:"matrix_user_id"`
+	EnableSync        bool   `json:"enable_sync"`
 }
 
 // Clone shallow copies the configuration. Your implementation may require a deep copy if
@@ -78,6 +82,8 @@ func (p *Plugin) OnConfigurationChange() error {
 	}
 
 	p.setConfiguration(configuration)
+
+	p.initMatrixClient()
 
 	return nil
 }
