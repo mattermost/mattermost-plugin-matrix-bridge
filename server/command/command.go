@@ -2,6 +2,7 @@ package command
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -10,10 +11,16 @@ import (
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
+// Configuration interface for accessing plugin configuration
+type Configuration interface {
+	GetMatrixServerURL() string
+}
+
 type Handler struct {
 	client       *pluginapi.Client
 	kvstore      kvstore.KVStore
 	matrixClient *matrix.Client
+	getConfig    func() Configuration // Function to get current plugin configuration
 }
 
 type Command interface {
@@ -26,7 +33,7 @@ const helloCommandTrigger = "hello"
 const matrixCommandTrigger = "matrix"
 
 // Register all your slash commands in the NewCommandHandler function.
-func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrixClient *matrix.Client) Command {
+func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrixClient *matrix.Client, getConfig func() Configuration) Command {
 	err := client.SlashCommand.Register(&model.Command{
 		Trigger:          helloCommandTrigger,
 		AutoComplete:     true,
@@ -60,6 +67,7 @@ func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrix
 		client:       client,
 		kvstore:      kvstore,
 		matrixClient: matrixClient,
+		getConfig:    getConfig,
 	}
 }
 
@@ -169,7 +177,9 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	topic := fmt.Sprintf("Matrix room for Mattermost channel: %s", channelName)
 
 	// Create the Matrix room
-	roomID, err := c.matrixClient.CreateRoom(roomName, topic)
+	// Extract server domain from Matrix server URL
+	serverDomain := c.extractServerDomain()
+	roomID, err := c.matrixClient.CreateRoom(roomName, topic, serverDomain)
 	if err != nil {
 		c.client.Log.Error("Failed to create Matrix room", "error", err, "room_name", roomName)
 		return &model.CommandResponse{
@@ -278,4 +288,35 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 			Text:         "Unknown subcommand. Use: test, create, map, list, or status",
 		}
 	}
+}
+
+// extractServerDomain extracts the domain from the Matrix server URL
+func (c *Handler) extractServerDomain() string {
+	// Get the current plugin configuration
+	config := c.getConfig()
+	if config == nil {
+		c.client.Log.Warn("Plugin configuration not available")
+		return "matrix.org" // fallback
+	}
+
+	serverURL := config.GetMatrixServerURL()
+	if serverURL == "" {
+		c.client.Log.Warn("Matrix server URL not configured")
+		return "matrix.org"
+	}
+
+	// Parse the URL to extract the hostname
+	parsedURL, err := url.Parse(serverURL)
+	if err != nil {
+		c.client.Log.Warn("Failed to parse Matrix server URL", "url", serverURL, "error", err)
+		return "matrix.org"
+	}
+
+	hostname := parsedURL.Hostname()
+	if hostname == "" {
+		c.client.Log.Warn("Could not extract hostname from Matrix server URL", "url", serverURL)
+		return "matrix.org"
+	}
+
+	return hostname
 }

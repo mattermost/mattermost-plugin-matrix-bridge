@@ -49,7 +49,7 @@ func (p *Plugin) OnActivate() error {
 
 	p.initMatrixClient()
 
-	p.commandClient = command.NewCommandHandler(p.client, p.kvstore, p.matrixClient)
+	p.commandClient = command.NewCommandHandler(p.client, p.kvstore, p.matrixClient, p.getConfigurationForCommand)
 
 	if err := p.registerForSharedChannels(); err != nil {
 		p.API.LogWarn("Failed to register for shared channels", "error", err)
@@ -91,7 +91,7 @@ func (p *Plugin) ExecuteCommand(c *plugin.Context, args *model.CommandArgs) (*mo
 
 func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
-	p.matrixClient = matrix.NewClientWithAppService(config.MatrixServerURL, config.MatrixAccessToken, config.MatrixUserID, config.MatrixASToken)
+	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken)
 }
 
 func (p *Plugin) registerForSharedChannels() error {
@@ -166,7 +166,7 @@ func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
 	}
 
 	// Test Matrix connection health
-	if config.MatrixServerURL != "" && config.MatrixAccessToken != "" {
+	if config.MatrixServerURL != "" && config.MatrixASToken != "" {
 		if err := p.matrixClient.TestConnection(); err != nil {
 			p.API.LogWarn("Ping failed - Matrix connection test failed", "error", err)
 			return false
@@ -287,6 +287,11 @@ func (p *Plugin) getOrCreateGhostUser(mattermostUserID, mattermostUsername strin
 
 	p.API.LogInfo("Created new ghost user", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID)
 	return ghostUser.UserID, nil
+}
+
+// getConfigurationForCommand returns the configuration as the interface expected by command package
+func (p *Plugin) getConfigurationForCommand() command.Configuration {
+	return p.getConfiguration()
 }
 
 func (p *Plugin) getMatrixRoomID(channelID string) (string, error) {

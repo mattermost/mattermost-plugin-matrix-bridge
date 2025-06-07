@@ -16,11 +16,9 @@ import (
 )
 
 type Client struct {
-	serverURL   string
-	accessToken string
-	userID      string
-	httpClient  *http.Client
-	asToken     string // Application Service token for ghost users
+	serverURL  string
+	asToken    string // Application Service token for all operations
+	httpClient *http.Client
 }
 
 type MessageContent struct {
@@ -34,23 +32,10 @@ type SendEventResponse struct {
 	EventID string `json:"event_id"`
 }
 
-func NewClient(serverURL, accessToken, userID string) *Client {
+func NewClient(serverURL, asToken string) *Client {
 	return &Client{
-		serverURL:   serverURL,
-		accessToken: accessToken,
-		userID:      userID,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}
-}
-
-func NewClientWithAppService(serverURL, accessToken, userID, asToken string) *Client {
-	return &Client{
-		serverURL:   serverURL,
-		accessToken: accessToken,
-		userID:      userID,
-		asToken:     asToken,
+		serverURL: serverURL,
+		asToken:   asToken,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -58,7 +43,7 @@ func NewClientWithAppService(serverURL, accessToken, userID, asToken string) *Cl
 }
 
 func (c *Client) SendMessage(roomID, message string) (*SendEventResponse, error) {
-	if c.serverURL == "" || c.accessToken == "" {
+	if c.serverURL == "" || c.asToken == "" {
 		return nil, errors.New("matrix client not configured")
 	}
 
@@ -71,7 +56,7 @@ func (c *Client) SendMessage(roomID, message string) (*SendEventResponse, error)
 }
 
 func (c *Client) SendFormattedMessage(roomID, textBody, htmlBody string) (*SendEventResponse, error) {
-	if c.serverURL == "" || c.accessToken == "" {
+	if c.serverURL == "" || c.asToken == "" {
 		return nil, errors.New("matrix client not configured")
 	}
 
@@ -101,7 +86,7 @@ func (c *Client) sendEvent(roomID, eventType string, content interface{}) (*Send
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -127,7 +112,7 @@ func (c *Client) sendEvent(roomID, eventType string, content interface{}) (*Send
 }
 
 func (c *Client) TestConnection() error {
-	if c.serverURL == "" || c.accessToken == "" {
+	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
 	}
 
@@ -138,7 +123,7 @@ func (c *Client) TestConnection() error {
 		return errors.Wrap(err, "failed to create request")
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -155,7 +140,7 @@ func (c *Client) TestConnection() error {
 }
 
 func (c *Client) JoinRoom(roomIdentifier string) error {
-	if c.serverURL == "" || c.accessToken == "" {
+	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
 	}
 
@@ -175,7 +160,7 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -195,26 +180,17 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 	return nil
 }
 
-func (c *Client) CreateRoom(name, topic string) (string, error) {
-	if c.serverURL == "" || c.accessToken == "" {
+func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
+	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
-	}
-
-	// Extract server name from user ID
-	serverName := ""
-	if c.userID != "" && strings.Contains(c.userID, ":") {
-		parts := strings.Split(c.userID, ":")
-		if len(parts) > 1 {
-			serverName = parts[1]
-		}
 	}
 
 	// Create room alias from name
 	alias := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
 	alias = strings.ReplaceAll(alias, "_", "-")
 	roomAlias := ""
-	if serverName != "" {
-		roomAlias = "#" + alias + ":" + serverName
+	if serverDomain != "" {
+		roomAlias = "#" + alias + ":" + serverDomain
 	}
 
 	roomData := map[string]interface{}{
@@ -224,7 +200,7 @@ func (c *Client) CreateRoom(name, topic string) (string, error) {
 		"visibility": "public",
 	}
 
-	// Add room alias if we have a server name
+	// Add room alias if we have a server domain
 	if roomAlias != "" {
 		roomData["room_alias_name"] = alias // Just the local part for room_alias_name
 	}
@@ -242,7 +218,7 @@ func (c *Client) CreateRoom(name, topic string) (string, error) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -423,7 +399,7 @@ func (c *Client) sendEventAsUser(roomID, eventType string, content interface{}, 
 }
 
 func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
-	if c.serverURL == "" || c.accessToken == "" {
+	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
 	}
 
@@ -441,7 +417,7 @@ func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
 		return "", errors.Wrap(err, "failed to create alias resolution request")
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

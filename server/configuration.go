@@ -18,12 +18,10 @@ import (
 // If you add non-reference types to your configuration struct, be sure to rewrite Clone as a deep
 // copy appropriate for your types.
 type configuration struct {
-	MatrixServerURL   string `json:"matrix_server_url"`
-	MatrixAccessToken string `json:"matrix_access_token"`
-	MatrixUserID      string `json:"matrix_user_id"`
-	MatrixASToken     string `json:"matrix_as_token"`
-	MatrixHSToken     string `json:"matrix_hs_token"`
-	EnableSync        bool   `json:"enable_sync"`
+	MatrixServerURL string `json:"matrix_server_url"`
+	MatrixASToken   string `json:"matrix_as_token"`
+	MatrixHSToken   string `json:"matrix_hs_token"`
+	EnableSync      bool   `json:"enable_sync"`
 }
 
 // Clone shallow copies the configuration. Your implementation may require a deep copy if
@@ -101,15 +99,17 @@ func (p *Plugin) validateConfiguration(config *configuration) error {
 		if config.MatrixServerURL == "" {
 			return errors.New("Matrix Server URL is required when sync is enabled")
 		}
-		if config.MatrixAccessToken == "" {
-			return errors.New("Matrix Access Token is required when sync is enabled")
-		}
-		if config.MatrixUserID == "" {
-			return errors.New("Matrix User ID is required when sync is enabled")
-		}
 		if config.MatrixASToken == "" {
 			return errors.New("Matrix Application Service Token is required when sync is enabled")
 		}
+		if config.MatrixHSToken == "" {
+			return errors.New("Matrix Homeserver Token is required when sync is enabled")
+		}
 	}
 	return nil
+}
+
+// GetMatrixServerURL implements the Configuration interface for command package
+func (c *configuration) GetMatrixServerURL() string {
+	return c.MatrixServerURL
 }

@@ -22,15 +22,15 @@ const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
 
     useEffect(() => {
         const checkValues = () => {
-            // Get current values from form inputs
-            const serverUrlInput = document.querySelector('input[name="matrix_server_url"]') as HTMLInputElement;
-            const asTokenInput = document.querySelector('input[name="matrix_as_token"]') as HTMLInputElement;
-            const hsTokenInput = document.querySelector('input[name="matrix_hs_token"]') as HTMLInputElement;
+            // Get current values - input for text fields, div for generated fields
+            const serverUrlInput = document.querySelector('input[id$="matrix_server_url"]') as HTMLInputElement;
+            const asTokenDiv = document.querySelector('div[id$="matrix_as_token"]') as HTMLDivElement;
+            const hsTokenDiv = document.querySelector('div[id$="matrix_hs_token"]') as HTMLDivElement;
 
             const values = {
                 matrix_server_url: serverUrlInput?.value || config?.matrix_server_url || '',
-                matrix_as_token: asTokenInput?.value || config?.matrix_as_token || '',
-                matrix_hs_token: hsTokenInput?.value || config?.matrix_hs_token || '',
+                matrix_as_token: asTokenDiv?.textContent || config?.matrix_as_token || '',
+                matrix_hs_token: hsTokenDiv?.textContent || config?.matrix_hs_token || '',
             };
 
             setCurrentValues(values);
@@ -45,7 +45,7 @@ const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
 
         // Check initially and then periodically
         checkValues();
-        const interval = setInterval(checkValues, 1000);
+        const interval = setInterval(checkValues, 500);
 
         return () => clearInterval(interval);
     }, [config]);

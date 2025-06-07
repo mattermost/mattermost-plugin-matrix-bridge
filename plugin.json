@@ -31,22 +31,6 @@
                 "default": ""
             },
             {
-                "key": "matrix_access_token",
-                "display_name": "Matrix Access Token",
-                "type": "text",
-                "help_text": "Access token for authenticating with the Matrix server (use admin user token for auto-join capabilities)",
-                "placeholder": "syt_...",
-                "default": "syt_bWF0dGVybW9zdC1icmlkZ2UtYWRtaW4_uEITgajMtorxLJCljYhX_1wYSA2"
-            },
-            {
-                "key": "matrix_user_id",
-                "display_name": "Matrix User ID",
-                "type": "text",
-                "help_text": "The Matrix user ID for the bridge bot (use admin user for elevated privileges)",
-                "placeholder": "@bridge:example.com",
-                "default": "@mattermost-bridge-admin:synapse-wiggin77.ngrok.io"
-            },
-            {
                 "key": "matrix_as_token",
                 "display_name": "Matrix Application Service Token",
                 "type": "generated",
