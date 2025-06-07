@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -48,9 +47,9 @@ func (p *Plugin) OnActivate() error {
 
 	p.kvstore = kvstore.NewKVStore(p.client)
 
-	p.commandClient = command.NewCommandHandler(p.client, p.kvstore)
-
 	p.initMatrixClient()
+
+	p.commandClient = command.NewCommandHandler(p.client, p.kvstore, p.matrixClient)
 
 	if err := p.registerForSharedChannels(); err != nil {
 		p.API.LogWarn("Failed to register for shared channels", "error", err)
@@ -92,7 +91,7 @@ func (p *Plugin) ExecuteCommand(c *plugin.Context, args *model.CommandArgs) (*mo
 
 func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
-	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixAccessToken, config.MatrixUserID)
+	p.matrixClient = matrix.NewClientWithAppService(config.MatrixServerURL, config.MatrixAccessToken, config.MatrixUserID, config.MatrixASToken)
 }
 
 func (p *Plugin) registerForSharedChannels() error {
@@ -216,14 +215,20 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, rc *model
 }
 
 func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
-	matrixRoomID, err := p.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := p.getMatrixRoomID(channelID)
 	if err != nil {
-		return errors.Wrap(err, "failed to get Matrix room ID")
+		return errors.Wrap(err, "failed to get Matrix room identifier")
 	}
 
-	if matrixRoomID == "" {
+	if matrixRoomIdentifier == "" {
 		p.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
 		return nil
+	}
+
+	// Resolve room alias to room ID if needed
+	matrixRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		return errors.Wrap(err, "failed to resolve Matrix room identifier")
 	}
 
 	user, appErr := p.API.GetUser(post.UserId)
@@ -231,15 +236,57 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 		return errors.Wrap(appErr, "failed to get user")
 	}
 
-	messageText := fmt.Sprintf("**%s**: %s", user.GetDisplayName(""), post.Message)
-
-	_, err = p.matrixClient.SendMessage(matrixRoomID, messageText)
+	// Send message as ghost user
+	err = p.syncPostAsGhostUser(post, matrixRoomID, user)
 	if err != nil {
-		return errors.Wrap(err, "failed to send message to Matrix")
+		return err
 	}
 
-	p.API.LogDebug("Successfully synced post to Matrix", "post_id", post.Id, "matrix_room", matrixRoomID)
+	p.API.LogDebug("Successfully synced post to Matrix", "post_id", post.Id, "matrix_room_id", matrixRoomID, "matrix_room_identifier", matrixRoomIdentifier)
 	return nil
+}
+
+func (p *Plugin) syncPostAsGhostUser(post *model.Post, matrixRoomID string, user *model.User) error {
+	// Get or create ghost user
+	ghostUserID, err := p.getOrCreateGhostUser(user.Id, user.Username)
+	if err != nil {
+		return errors.Wrap(err, "failed to get or create ghost user")
+	}
+
+	// Send message as ghost user (no display name prefix needed since it appears from the user directly)
+	_, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, post.Message, ghostUserID)
+	if err != nil {
+		return errors.Wrap(err, "failed to send message as ghost user")
+	}
+
+	p.API.LogDebug("Successfully synced post as ghost user", "post_id", post.Id, "ghost_user_id", ghostUserID)
+	return nil
+}
+
+func (p *Plugin) getOrCreateGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+	// Check if we already have this ghost user cached
+	ghostUserKey := "ghost_user_" + mattermostUserID
+	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
+	if err == nil && len(ghostUserIDBytes) > 0 {
+		// Ghost user already exists
+		return string(ghostUserIDBytes), nil
+	}
+
+	// Create new ghost user
+	ghostUser, err := p.matrixClient.CreateGhostUser(mattermostUserID, mattermostUsername)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create ghost user")
+	}
+
+	// Cache the ghost user ID
+	err = p.kvstore.Set(ghostUserKey, []byte(ghostUser.UserID))
+	if err != nil {
+		p.API.LogWarn("Failed to cache ghost user ID", "error", err, "ghost_user_id", ghostUser.UserID)
+		// Continue anyway, the ghost user was created successfully
+	}
+
+	p.API.LogInfo("Created new ghost user", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID)
+	return ghostUser.UserID, nil
 }
 
 func (p *Plugin) getMatrixRoomID(channelID string) (string, error) {

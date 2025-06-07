@@ -34,17 +34,31 @@
                 "key": "matrix_access_token",
                 "display_name": "Matrix Access Token",
                 "type": "text",
-                "help_text": "Access token for authenticating with the Matrix server",
+                "help_text": "Access token for authenticating with the Matrix server (use admin user token for auto-join capabilities)",
                 "placeholder": "syt_...",
-                "default": ""
+                "default": "syt_bWF0dGVybW9zdC1icmlkZ2UtYWRtaW4_uEITgajMtorxLJCljYhX_1wYSA2"
             },
             {
                 "key": "matrix_user_id",
                 "display_name": "Matrix User ID",
                 "type": "text",
-                "help_text": "The Matrix user ID for the bridge bot (e.g., @bridge:example.com)",
+                "help_text": "The Matrix user ID for the bridge bot (use admin user for elevated privileges)",
                 "placeholder": "@bridge:example.com",
-                "default": ""
+                "default": "@mattermost-bridge-admin:synapse-wiggin77.ngrok.io"
+            },
+            {
+                "key": "matrix_as_token",
+                "display_name": "Matrix Application Service Token",
+                "type": "generated",
+                "help_text": "Application Service token for creating ghost users (required for proper user attribution). Copy this token to your Matrix homeserver registration file as 'as_token'.",
+                "regenerate_help_text": "Generate a new secure token (remember to update your Matrix homeserver registration file)"
+            },
+            {
+                "key": "matrix_hs_token",
+                "display_name": "Matrix Homeserver Token",
+                "type": "generated",
+                "help_text": "Homeserver token for Matrix Application Service registration. Copy this token to your Matrix homeserver registration file as 'hs_token'.",
+                "regenerate_help_text": "Generate a new secure token (remember to update your Matrix homeserver registration file)"
             },
             {
                 "key": "enable_sync",
@@ -52,6 +66,12 @@
                 "type": "bool",
                 "help_text": "Enable syncing messages from Mattermost to Matrix",
                 "default": false
+            },
+            {
+                "key": "registration_download",
+                "display_name": "Matrix Application Service Registration",
+                "type": "custom",
+                "help_text": "Download the registration file for your Matrix homeserver. This file contains the tokens generated above and must be registered with your Matrix homeserver to enable ghost users."
             }
         ]
     }

@@ -21,6 +21,8 @@ type configuration struct {
 	MatrixServerURL   string `json:"matrix_server_url"`
 	MatrixAccessToken string `json:"matrix_access_token"`
 	MatrixUserID      string `json:"matrix_user_id"`
+	MatrixASToken     string `json:"matrix_as_token"`
+	MatrixHSToken     string `json:"matrix_hs_token"`
 	EnableSync        bool   `json:"enable_sync"`
 }
 
@@ -81,9 +83,33 @@ func (p *Plugin) OnConfigurationChange() error {
 		return errors.Wrap(err, "failed to load plugin configuration")
 	}
 
+	// Validate required configuration
+	if err := p.validateConfiguration(configuration); err != nil {
+		return errors.Wrap(err, "invalid plugin configuration")
+	}
+
 	p.setConfiguration(configuration)
 
 	p.initMatrixClient()
 
+	return nil
+}
+
+// validateConfiguration checks that required configuration fields are present
+func (p *Plugin) validateConfiguration(config *configuration) error {
+	if config.EnableSync {
+		if config.MatrixServerURL == "" {
+			return errors.New("Matrix Server URL is required when sync is enabled")
+		}
+		if config.MatrixAccessToken == "" {
+			return errors.New("Matrix Access Token is required when sync is enabled")
+		}
+		if config.MatrixUserID == "" {
+			return errors.New("Matrix User ID is required when sync is enabled")
+		}
+		if config.MatrixASToken == "" {
+			return errors.New("Matrix Application Service Token is required when sync is enabled")
+		}
+	}
 	return nil
 }

@@ -63,6 +63,7 @@
   "dependencies": {
     "core-js": "3.26.0",
     "mattermost-redux": "10.8.0",
+    "process": "0.11.10",
     "react": "17.0.2",
     "react-redux": "8.0.2",
     "redux": "4.2.0",
