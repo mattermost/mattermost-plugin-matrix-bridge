@@ -322,8 +322,8 @@ type GhostUser struct {
 	Username string `json:"username"`
 }
 
-// CreateGhostUser creates a ghost user for a Mattermost user with display name and avatar
-func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayName, avatarURL string) (*GhostUser, error) {
+// CreateGhostUser creates a ghost user for a Mattermost user with display name and avatar data
+func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayName string, avatarData []byte, avatarContentType string) (*GhostUser, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
 	}
@@ -400,12 +400,22 @@ func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayNa
 		}
 	}
 
-	// Set avatar URL for the ghost user if provided
-	if avatarURL != "" {
-		err = c.SetAvatarURL(ghostUserID, avatarURL)
+	// Upload and set avatar for the ghost user if provided
+	if len(avatarData) > 0 {
+		// Upload avatar to Matrix
+		mxcURI, err := c.UploadAvatarFromData(avatarData, avatarContentType)
+		if err != nil {
+			// Don't fail user creation if avatar upload fails
+			return &GhostUser{
+				UserID:   ghostUserID,
+				Username: ghostUsername,
+			}, errors.Wrap(err, "ghost user created but failed to upload avatar")
+		}
+		
+		// Set the uploaded avatar
+		err = c.SetAvatarURL(ghostUserID, mxcURI)
 		if err != nil {
 			// Don't fail user creation if avatar setting fails
-			// Log the error but continue
 			return &GhostUser{
 				UserID:   ghostUserID,
 				Username: ghostUsername,
@@ -510,6 +520,107 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to set avatar URL: %d %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// UploadMedia uploads media content to the Matrix server and returns the mxc:// URI
+func (c *Client) UploadMedia(data []byte, filename, contentType string) (string, error) {
+	if c.asToken == "" {
+		return "", errors.New("application service token not configured")
+	}
+
+	// Use the media upload endpoint
+	requestURL := c.serverURL + "/_matrix/media/v3/upload"
+	if filename != "" {
+		requestURL += "?filename=" + url.QueryEscape(filename)
+	}
+
+	req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer(data))
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create media upload request")
+	}
+
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send media upload request")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read media upload response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to upload media: %d %s", resp.StatusCode, string(body))
+	}
+
+	var response struct {
+		ContentURI string `json:"content_uri"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", errors.Wrap(err, "failed to unmarshal media upload response")
+	}
+
+	return response.ContentURI, nil
+}
+
+// UploadAvatarFromData uploads avatar image data to Matrix and returns mxc:// URI
+func (c *Client) UploadAvatarFromData(imageData []byte, contentType string) (string, error) {
+	if len(imageData) == 0 {
+		return "", errors.New("image data is empty")
+	}
+
+	// Determine content type if not provided
+	if contentType == "" {
+		contentType = "application/octet-stream" // fallback
+	}
+
+	// Generate filename based on content type
+	var filename string
+	switch contentType {
+	case "image/jpeg":
+		filename = "avatar.jpg"
+	case "image/png":
+		filename = "avatar.png"
+	case "image/gif":
+		filename = "avatar.gif"
+	case "image/webp":
+		filename = "avatar.webp"
+	default:
+		filename = "avatar"
+	}
+
+	// Upload to Matrix
+	mxcURI, err := c.UploadMedia(imageData, filename, contentType)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to upload avatar to Matrix")
+	}
+
+	return mxcURI, nil
+}
+
+// UpdateGhostUserAvatar uploads new avatar data and updates the ghost user's avatar
+func (c *Client) UpdateGhostUserAvatar(userID string, avatarData []byte, avatarContentType string) error {
+	if len(avatarData) == 0 {
+		return errors.New("avatar data is empty")
+	}
+
+	// Upload avatar to Matrix
+	mxcURI, err := c.UploadAvatarFromData(avatarData, avatarContentType)
+	if err != nil {
+		return errors.Wrap(err, "failed to upload avatar")
+	}
+	
+	// Set the uploaded avatar
+	err = c.SetAvatarURL(userID, mxcURI)
+	if err != nil {
+		return errors.Wrap(err, "failed to set avatar URL")
 	}
 
 	return nil
