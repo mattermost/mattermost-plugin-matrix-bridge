@@ -207,33 +207,81 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 }
 
 func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.CommandResponse {
-	// Get the current channel's mapping as an example
-	currentChannelKey := "channel_mapping_" + args.ChannelId
-	currentRoomID, err := c.kvstore.Get(currentChannelKey)
-	
 	var responseText strings.Builder
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
 	
-	if err != nil || len(currentRoomID) == 0 {
-		responseText.WriteString("**Current Channel:** No mapping found\n")
-	} else {
-		// Get channel info
-		channel, appErr := c.client.Channel.Get(args.ChannelId)
-		channelName := args.ChannelId
-		if appErr == nil {
-			channelName = channel.DisplayName
-			if channelName == "" {
-				channelName = channel.Name
-			}
+	// Use ListKeys to get all channel mapping keys
+	keys, err := c.kvstore.ListKeys(0, 1000) // Get up to 1000 mappings
+	if err != nil {
+		c.client.Log.Error("Failed to list KV store keys", "error", err)
+		responseText.WriteString("❌ Failed to retrieve mappings. Check plugin logs for details.\n")
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         responseText.String(),
 		}
-		responseText.WriteString(fmt.Sprintf("**Current Channel:** %s → `%s`\n", channelName, string(currentRoomID)))
 	}
 	
-	responseText.WriteString("\n*Note: Currently only showing current channel mapping.*\n")
-	responseText.WriteString("*Full listing requires KV store key enumeration.*\n\n")
-	responseText.WriteString("**Commands:**\n")
-	responseText.WriteString("• `/matrix map [room_id]` - Map current channel to Matrix room\n")
-	responseText.WriteString("• `/matrix status` - Check bridge status")
+	// Filter for channel mapping keys and build mappings
+	mappings := make(map[string]string)
+	channelMappingPrefix := "channel_mapping_"
+	
+	for _, key := range keys {
+		if strings.HasPrefix(key, channelMappingPrefix) {
+			channelID := strings.TrimPrefix(key, channelMappingPrefix)
+			roomIDBytes, err := c.kvstore.Get(key)
+			if err == nil && len(roomIDBytes) > 0 {
+				mappings[channelID] = string(roomIDBytes)
+			}
+		}
+	}
+	
+	if len(mappings) == 0 {
+		responseText.WriteString("No channel mappings found.\n\n")
+		responseText.WriteString("**Get Started:**\n")
+		responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room and map to current channel\n")
+		responseText.WriteString("• `/matrix map [room_alias|room_id]` - Map current channel to existing Matrix room\n")
+	} else {
+		// Show current channel first if it has a mapping
+		currentChannelMapping := mappings[args.ChannelId]
+		if currentChannelMapping != "" {
+			channel, appErr := c.client.Channel.Get(args.ChannelId)
+			channelName := args.ChannelId
+			if appErr == nil {
+				channelName = channel.DisplayName
+				if channelName == "" {
+					channelName = channel.Name
+				}
+			}
+			responseText.WriteString(fmt.Sprintf("**Current Channel:** %s → `%s`\n\n", channelName, currentChannelMapping))
+		}
+		
+		// Show all mappings
+		responseText.WriteString(fmt.Sprintf("**All Mappings (%d total):**\n", len(mappings)))
+		for channelID, roomID := range mappings {
+			// Get channel info
+			channel, appErr := c.client.Channel.Get(channelID)
+			channelName := channelID
+			if appErr == nil {
+				channelName = channel.DisplayName
+				if channelName == "" {
+					channelName = channel.Name
+				}
+			}
+			
+			// Mark current channel
+			currentMarker := ""
+			if channelID == args.ChannelId {
+				currentMarker = " *(current)*"
+			}
+			
+			responseText.WriteString(fmt.Sprintf("• %s → `%s`%s\n", channelName, roomID, currentMarker))
+		}
+	}
+	
+	responseText.WriteString("\n**Commands:**\n")
+	responseText.WriteString("• `/matrix map [room_alias|room_id]` - Map current channel to Matrix room\n")
+	responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room and map to current channel\n")
+	responseText.WriteString("• `/matrix status` - Check bridge status\n")
 	
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,

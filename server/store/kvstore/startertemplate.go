@@ -44,3 +44,11 @@ func (kv Client) Set(key string, value []byte) error {
 	}
 	return nil
 }
+
+func (kv Client) ListKeys(page, perPage int) ([]string, error) {
+	keys, appErr := kv.client.KV.ListKeys(page, perPage)
+	if appErr != nil {
+		return nil, errors.Wrap(appErr, "failed to list keys from KV store")
+	}
+	return keys, nil
+}
