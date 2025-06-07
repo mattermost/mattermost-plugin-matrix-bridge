@@ -45,6 +45,14 @@ func (kv Client) Set(key string, value []byte) error {
 	return nil
 }
 
+func (kv Client) Delete(key string) error {
+	appErr := kv.client.KV.Delete(key)
+	if appErr != nil {
+		return errors.Wrap(appErr, "failed to delete key from KV store")
+	}
+	return nil
+}
+
 func (kv Client) ListKeys(page, perPage int) ([]string, error) {
 	keys, appErr := kv.client.KV.ListKeys(page, perPage)
 	if appErr != nil {

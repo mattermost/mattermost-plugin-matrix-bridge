@@ -111,6 +111,24 @@ func (c *Client) sendEvent(roomID, eventType string, content interface{}) (*Send
 	return &response, nil
 }
 
+// SendReactionAsGhost sends a reaction to a message as a ghost user
+func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string) (*SendEventResponse, error) {
+	if c.asToken == "" {
+		return nil, errors.New("application service token not configured")
+	}
+
+	// Matrix reaction content structure
+	content := map[string]interface{}{
+		"m.relates_to": map[string]interface{}{
+			"rel_type": "m.annotation",
+			"event_id": eventID,
+			"key":      emoji,
+		},
+	}
+
+	return c.sendEventAsUser(roomID, "m.reaction", content, ghostUserID)
+}
+
 func (c *Client) TestConnection() error {
 	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
@@ -655,6 +673,30 @@ func (c *Client) SendFormattedMessageAsGhost(roomID, textBody, htmlBody, ghostUs
 
 	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
 }
+
+// EditMessageAsGhost edits an existing message as a ghost user
+func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, ghostUserID string) (*SendEventResponse, error) {
+	if c.asToken == "" {
+		return nil, errors.New("application service token not configured")
+	}
+
+	// Matrix edit event content structure
+	content := map[string]interface{}{
+		"msgtype": "m.text",
+		"body":    " * " + newMessage, // Fallback for clients that don't support edits
+		"m.new_content": map[string]interface{}{
+			"msgtype": "m.text",
+			"body":    newMessage,
+		},
+		"m.relates_to": map[string]interface{}{
+			"rel_type": "m.replace",
+			"event_id": eventID,
+		},
+	}
+
+	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
+}
+
 
 // sendEventAsUser sends an event as a specific user (using application service impersonation)
 func (c *Client) sendEventAsUser(roomID, eventType string, content interface{}, userID string) (*SendEventResponse, error) {

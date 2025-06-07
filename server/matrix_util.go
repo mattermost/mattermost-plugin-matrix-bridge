@@ -1,6 +1,9 @@
 package main
 
 import (
+	"net/url"
+	"strings"
+	
 	"github.com/pkg/errors"
 )
 
@@ -77,3 +80,61 @@ func (p *Plugin) getMatrixRoomID(channelID string) (string, error) {
 	}
 	return string(roomID), nil
 }
+
+// extractServerDomain extracts the hostname from a Matrix server URL
+func (p *Plugin) extractServerDomain(serverURL string) string {
+	if serverURL == "" {
+		return "unknown"
+	}
+
+	parsedURL, err := url.Parse(serverURL)
+	if err != nil {
+		p.API.LogWarn("Failed to parse Matrix server URL", "url", serverURL, "error", err)
+		return "unknown"
+	}
+
+	hostname := parsedURL.Hostname()
+	if hostname == "" {
+		p.API.LogWarn("Could not extract hostname from Matrix server URL", "url", serverURL)
+		return "unknown"
+	}
+
+	// Replace dots and colons to make it safe for use in property keys
+	return strings.ReplaceAll(strings.ReplaceAll(hostname, ".", "_"), ":", "_")
+}
+
+// convertEmojiForMatrix converts Mattermost emoji names to Matrix reaction format
+func (p *Plugin) convertEmojiForMatrix(emojiName string) string {
+	// Map common Mattermost emoji names to Unicode equivalents for Matrix
+	emojiMap := map[string]string{
+		"+1":        "👍",
+		"-1":        "👎", 
+		"heart":     "❤️",
+		"smile":     "😄",
+		"laughing":  "😆",
+		"confused":  "😕",
+		"frowning":  "😦",
+		"heart_eyes": "😍",
+		"rage":      "😡",
+		"slightly_smiling_face": "🙂",
+		"white_check_mark": "✅",
+		"x":         "❌",
+		"heavy_check_mark": "✔️",
+		"fire":      "🔥",
+		"clap":      "👏",
+		"eyes":      "👀",
+		"thinking_face": "🤔",
+		"tada":      "🎉",
+		"rocket":    "🚀",
+	}
+
+	// Check if we have a mapping for this emoji
+	if unicode, exists := emojiMap[emojiName]; exists {
+		return unicode
+	}
+
+	// For custom emojis or unmapped emojis, return the name as-is
+	// Matrix clients can handle custom emoji names
+	return ":" + emojiName + ":"
+}
+

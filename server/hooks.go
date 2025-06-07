@@ -33,6 +33,14 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 		}
 	}
 
+	// Finally process reaction sync events
+	for _, reaction := range msg.Reactions {
+		if err := p.syncReactionToMatrix(reaction, msg.ChannelId); err != nil {
+			p.API.LogError("Failed to sync reaction to Matrix", "error", err, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName)
+			continue
+		}
+	}
+
 	return model.SyncResponse{}, nil
 }
 
