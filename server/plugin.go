@@ -135,20 +135,4 @@ func (p *Plugin) getConfigurationForCommand() command.Configuration {
 	return p.getConfiguration()
 }
 
-func (p *Plugin) getMatrixRoomID(channelID string) (string, error) {
-	roomID, err := p.kvstore.Get("channel_mapping_" + channelID)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to get room mapping from store")
-	}
-	return string(roomID), nil
-}
-
-func (p *Plugin) setMatrixRoomMapping(channelID, roomID string) error {
-	err := p.kvstore.Set("channel_mapping_"+channelID, []byte(roomID))
-	if err != nil {
-		return errors.Wrap(err, "failed to set room mapping in store")
-	}
-	return nil
-}
-
 // See https://developers.mattermost.com/extend/plugins/server/reference/
