@@ -17,6 +17,15 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 		return model.SyncResponse{}, errors.New("matrix client not initialized")
 	}
 
+	// Process user sync events first (display name changes, etc.)
+	for _, user := range msg.Users {
+		if err := p.syncUserToMatrix(user); err != nil {
+			p.API.LogError("Failed to sync user to Matrix", "error", err, "user_id", user.Id, "username", user.Username)
+			continue
+		}
+	}
+
+	// Then process post sync events
 	for _, post := range msg.Posts {
 		if err := p.syncPostToMatrix(post, msg.ChannelId); err != nil {
 			p.API.LogError("Failed to sync post to Matrix", "error", err, "post_id", post.Id)
@@ -85,12 +94,69 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, rc *model
 		return nil
 	}
 
+	if p.matrixClient == nil {
+		return errors.New("matrix client not initialized")
+	}
+
 	p.API.LogDebug("Received profile image sync", "user_id", user.Id, "username", user.Username)
 	
-	// For now, we'll log the profile image sync but not implement it
-	// TODO: Implement Matrix avatar sync for user profile images
-	p.API.LogInfo("Profile image sync not yet implemented", "username", user.Username)
+	// Check if we have a ghost user for this Mattermost user
+	ghostUserKey := "ghost_user_" + user.Id
+	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
+	if err != nil || len(ghostUserIDBytes) == 0 {
+		p.API.LogDebug("No ghost user found for profile image sync", "user_id", user.Id, "username", user.Username)
+		return nil // No ghost user exists yet, nothing to update
+	}
+
+	ghostUserID := string(ghostUserIDBytes)
+	p.API.LogDebug("Found ghost user for profile image sync", "user_id", user.Id, "ghost_user_id", ghostUserID)
+
+	// Build new avatar URL
+	var avatarURL string
+	if siteURL := p.API.GetConfig().ServiceSettings.SiteURL; siteURL != nil && *siteURL != "" {
+		avatarURL = *siteURL + "/api/v4/users/" + user.Id + "/image"
+	} else {
+		p.API.LogWarn("SiteURL not configured, cannot update ghost user avatar", "user_id", user.Id)
+		return nil
+	}
+
+	// Update the avatar for the ghost user
+	err = p.matrixClient.SetAvatarURL(ghostUserID, avatarURL)
+	if err != nil {
+		p.API.LogError("Failed to update ghost user avatar", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID, "avatar_url", avatarURL)
+		return errors.Wrap(err, "failed to update ghost user avatar on Matrix")
+	}
+
+	p.API.LogInfo("Successfully updated ghost user avatar", "user_id", user.Id, "username", user.Username, "ghost_user_id", ghostUserID)
+	return nil
+}
+
+// syncUserToMatrix handles syncing user changes (like display name) to Matrix ghost users
+func (p *Plugin) syncUserToMatrix(user *model.User) error {
+	p.API.LogDebug("Syncing user to Matrix", "user_id", user.Id, "username", user.Username)
 	
+	// Check if we have a ghost user for this Mattermost user
+	ghostUserKey := "ghost_user_" + user.Id
+	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
+	if err != nil || len(ghostUserIDBytes) == 0 {
+		p.API.LogDebug("No ghost user found for user sync", "user_id", user.Id, "username", user.Username)
+		return nil // No ghost user exists yet, nothing to update
+	}
+
+	ghostUserID := string(ghostUserIDBytes)
+	p.API.LogDebug("Found ghost user for user sync", "user_id", user.Id, "ghost_user_id", ghostUserID)
+
+	// Update display name
+	displayName := user.GetDisplayName(model.ShowFullName)
+	if displayName != "" {
+		err = p.matrixClient.SetDisplayName(ghostUserID, displayName)
+		if err != nil {
+			p.API.LogError("Failed to update ghost user display name", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID, "display_name", displayName)
+			return errors.Wrap(err, "failed to update ghost user display name on Matrix")
+		}
+		p.API.LogInfo("Updated ghost user display name", "user_id", user.Id, "ghost_user_id", ghostUserID, "display_name", displayName)
+	}
+
 	return nil
 }
 
@@ -129,9 +195,16 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 
 // syncPostAsGhostUser sends a post to Matrix as a ghost user representing the Mattermost user
 func (p *Plugin) syncPostAsGhostUser(post *model.Post, matrixRoomID string, user *model.User) error {
-	// Get or create ghost user with display name
+	// Get or create ghost user with display name and avatar
 	displayName := user.GetDisplayName(model.ShowFullName)
-	ghostUserID, err := p.getOrCreateGhostUser(user.Id, user.Username, displayName)
+	
+	// Build avatar URL if we have a site URL configured
+	var avatarURL string
+	if siteURL := p.API.GetConfig().ServiceSettings.SiteURL; siteURL != nil && *siteURL != "" {
+		avatarURL = *siteURL + "/api/v4/users/" + user.Id + "/image"
+	}
+	
+	ghostUserID, err := p.getOrCreateGhostUser(user.Id, user.Username, displayName, avatarURL)
 	if err != nil {
 		return errors.Wrap(err, "failed to get or create ghost user")
 	}
@@ -153,7 +226,7 @@ func (p *Plugin) syncPostAsGhostUser(post *model.Post, matrixRoomID string, user
 }
 
 // getOrCreateGhostUser retrieves or creates a Matrix ghost user for a Mattermost user
-func (p *Plugin) getOrCreateGhostUser(mattermostUserID, mattermostUsername, displayName string) (string, error) {
+func (p *Plugin) getOrCreateGhostUser(mattermostUserID, mattermostUsername, displayName, avatarURL string) (string, error) {
 	// Check if we already have this ghost user cached
 	ghostUserKey := "ghost_user_" + mattermostUserID
 	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
@@ -162,8 +235,8 @@ func (p *Plugin) getOrCreateGhostUser(mattermostUserID, mattermostUsername, disp
 		return string(ghostUserIDBytes), nil
 	}
 
-	// Create new ghost user with display name
-	ghostUser, err := p.matrixClient.CreateGhostUser(mattermostUserID, mattermostUsername, displayName)
+	// Create new ghost user with display name and avatar
+	ghostUser, err := p.matrixClient.CreateGhostUser(mattermostUserID, mattermostUsername, displayName, avatarURL)
 	if err != nil {
 		// Check if this is a display name error (user was created but display name failed)
 		if ghostUser != nil && ghostUser.UserID != "" {

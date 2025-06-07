@@ -322,8 +322,8 @@ type GhostUser struct {
 	Username string `json:"username"`
 }
 
-// CreateGhostUser creates a ghost user for a Mattermost user with display name
-func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayName string) (*GhostUser, error) {
+// CreateGhostUser creates a ghost user for a Mattermost user with display name and avatar
+func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayName, avatarURL string) (*GhostUser, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
 	}
@@ -400,6 +400,19 @@ func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayNa
 		}
 	}
 
+	// Set avatar URL for the ghost user if provided
+	if avatarURL != "" {
+		err = c.SetAvatarURL(ghostUserID, avatarURL)
+		if err != nil {
+			// Don't fail user creation if avatar setting fails
+			// Log the error but continue
+			return &GhostUser{
+				UserID:   ghostUserID,
+				Username: ghostUsername,
+			}, errors.Wrap(err, "ghost user created but failed to set avatar")
+		}
+	}
+
 	return &GhostUser{
 		UserID:   ghostUserID,
 		Username: ghostUsername,
@@ -449,6 +462,54 @@ func (c *Client) SetDisplayName(userID, displayName string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to set display name: %d %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// SetAvatarURL sets the avatar URL for a user (using application service impersonation)
+func (c *Client) SetAvatarURL(userID, avatarURL string) error {
+	if c.asToken == "" {
+		return errors.New("application service token not configured")
+	}
+
+	// Content for the avatar URL event
+	content := map[string]interface{}{
+		"avatar_url": avatarURL,
+	}
+
+	jsonData, err := json.Marshal(content)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal avatar URL content")
+	}
+
+	// Use the profile API endpoint with user impersonation
+	requestURL := c.serverURL + "/_matrix/client/v3/profile/" + url.PathEscape(userID) + "/avatar_url"
+	if userID != "" {
+		requestURL += "?user_id=" + url.QueryEscape(userID)
+	}
+
+	req, err := http.NewRequest("PUT", requestURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return errors.Wrap(err, "failed to create avatar URL request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send avatar URL request")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read avatar URL response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set avatar URL: %d %s", resp.StatusCode, string(body))
 	}
 
 	return nil
