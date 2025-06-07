@@ -55,7 +55,7 @@
                 "key": "registration_download",
                 "display_name": "Matrix Application Service Registration",
                 "type": "custom",
-                "help_text": "Download the registration file for your Matrix homeserver. This file contains the tokens generated above and must be registered with your Matrix homeserver to enable ghost users."
+                "help_text": "Download the registration file for your Matrix homeserver.\n \n**Setup Instructions:**\n1. Download the file using the button above\n2. Copy it to your Matrix homeserver\n3. Add the file path to your homeserver.yaml under 'app_service_config_files'\n4. Restart your Matrix homeserver\n\nSee the [Matrix Application Service spec](https://spec.matrix.org/v1.14/application-service-api/) for details."
             }
         ]
     }
