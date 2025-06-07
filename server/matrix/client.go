@@ -180,6 +180,53 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 	return nil
 }
 
+// JoinRoomAsUser joins a room as a specific user (using application service impersonation)
+func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	var requestURL string
+	if strings.HasPrefix(roomIdentifier, "#") {
+		// For room aliases, use the /join endpoint with URL-encoded alias
+		encodedAlias := url.PathEscape(roomIdentifier)
+		requestURL = c.serverURL + "/_matrix/client/v3/join/" + encodedAlias
+	} else {
+		// For room IDs, use the original endpoint
+		requestURL = c.serverURL + "/_matrix/client/v3/rooms/" + roomIdentifier + "/join"
+	}
+
+	// Add user_id query parameter for impersonation
+	if userID != "" {
+		requestURL += "?user_id=" + url.QueryEscape(userID)
+	}
+
+	req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return errors.Wrap(err, "failed to create join request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken) // Use AS token for impersonation
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send join request")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read join response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to join room as user: %d %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
@@ -249,6 +296,25 @@ func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 	return response.RoomID, nil
 }
 
+// extractServerDomain extracts the hostname from the Matrix server URL
+func (c *Client) extractServerDomain() (string, error) {
+	if c.serverURL == "" {
+		return "", errors.New("server URL not configured")
+	}
+
+	parsedURL, err := url.Parse(c.serverURL)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to parse server URL")
+	}
+
+	hostname := parsedURL.Hostname()
+	if hostname == "" {
+		return "", errors.New("could not extract hostname from server URL")
+	}
+
+	return hostname, nil
+}
+
 // Ghost user management functions
 
 type GhostUser struct {
@@ -256,15 +322,21 @@ type GhostUser struct {
 	Username string `json:"username"`
 }
 
-// CreateGhostUser creates a ghost user for a Mattermost user
-func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername string) (*GhostUser, error) {
+// CreateGhostUser creates a ghost user for a Mattermost user with display name
+func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayName string) (*GhostUser, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
 	}
 
+	// Extract server domain from serverURL
+	serverDomain, err := c.extractServerDomain()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to extract server domain")
+	}
+
 	// Generate ghost user ID following the namespace pattern
 	ghostUsername := fmt.Sprintf("_mattermost_%s", mattermostUserID)
-	ghostUserID := fmt.Sprintf("@%s:synapse-wiggin77.ngrok.io", ghostUsername)
+	ghostUserID := fmt.Sprintf("@%s:%s", ghostUsername, serverDomain)
 
 	// Registration data
 	regData := map[string]interface{}{
@@ -315,10 +387,71 @@ func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername string) (*
 		}
 	}
 
+	// Set display name for the ghost user if provided
+	if displayName != "" {
+		err = c.SetDisplayName(ghostUserID, displayName)
+		if err != nil {
+			// Don't fail user creation if display name setting fails
+			// Return the error info in a way the caller can log it
+			return &GhostUser{
+				UserID:   ghostUserID,
+				Username: ghostUsername,
+			}, errors.Wrap(err, "ghost user created but failed to set display name")
+		}
+	}
+
 	return &GhostUser{
 		UserID:   ghostUserID,
 		Username: ghostUsername,
 	}, nil
+}
+
+// SetDisplayName sets the display name for a user (using application service impersonation)
+func (c *Client) SetDisplayName(userID, displayName string) error {
+	if c.asToken == "" {
+		return errors.New("application service token not configured")
+	}
+
+	// Content for the display name event
+	content := map[string]interface{}{
+		"displayname": displayName,
+	}
+
+	jsonData, err := json.Marshal(content)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal display name content")
+	}
+
+	// Use the profile API endpoint with user impersonation
+	requestURL := c.serverURL + "/_matrix/client/v3/profile/" + url.PathEscape(userID) + "/displayname"
+	if userID != "" {
+		requestURL += "?user_id=" + url.QueryEscape(userID)
+	}
+
+	req, err := http.NewRequest("PUT", requestURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return errors.Wrap(err, "failed to create display name request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send display name request")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read display name response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set display name: %d %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 // SendMessageAsGhost sends a message as a ghost user
