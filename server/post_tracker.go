@@ -7,19 +7,26 @@ import (
 	"github.com/pkg/errors"
 )
 
+const (
+	// DefaultPostTrackerMaxEntries is the default maximum number of entries in PostTracker
+	DefaultPostTrackerMaxEntries = 10000
+)
+
 // PostTracker tracks post creation timestamps in memory to detect redundant edits
 type PostTracker struct {
 	mutex       sync.RWMutex
 	entries     map[string]int64 // postID -> UpdateAt timestamp
 	putCounter  int              // Counter for triggering cleanup
 	cleanupFreq int              // Cleanup every N puts
+	maxEntries  int              // Maximum number of entries allowed
 }
 
-// NewPostTracker creates a new PostTracker instance
-func NewPostTracker() *PostTracker {
+// NewPostTracker creates a new PostTracker instance with the specified maximum entries
+func NewPostTracker(maxEntries int) *PostTracker {
 	return &PostTracker{
 		entries:     make(map[string]int64),
 		cleanupFreq: 100, // Cleanup every 100 puts
+		maxEntries:  maxEntries,
 	}
 }
 
@@ -30,12 +37,12 @@ func (pt *PostTracker) Put(postID string, updateAt int64) error {
 	defer pt.mutex.Unlock()
 	
 	// Check if we're at capacity before adding
-	if len(pt.entries) >= 10000 {
+	if len(pt.entries) >= pt.maxEntries {
 		// Try to clean up old entries first
 		pt.cleanupOldEntries()
 		
 		// If still at capacity after cleanup, reject the new entry
-		if len(pt.entries) >= 10000 {
+		if len(pt.entries) >= pt.maxEntries {
 			return errors.New("post tracker at capacity - cannot add new entry")
 		}
 	}

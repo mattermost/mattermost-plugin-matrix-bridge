@@ -129,6 +129,105 @@ func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string)
 	return c.sendEventAsUser(roomID, "m.reaction", content, ghostUserID)
 }
 
+// RedactEventAsGhost redacts (removes) an event as a ghost user
+func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendEventResponse, error) {
+	if c.asToken == "" {
+		return nil, errors.New("application service token not configured")
+	}
+
+	// Empty content for redaction
+	content := map[string]interface{}{}
+	
+	txnID := uuid.New().String()
+	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "redact", eventID, txnID)
+	reqURL := c.serverURL + endpoint
+	
+	// Add user_id query parameter for impersonation
+	if ghostUserID != "" {
+		reqURL += "?user_id=" + url.QueryEscape(ghostUserID)
+	}
+
+	jsonData, err := json.Marshal(content)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to marshal redaction content")
+	}
+
+	req, err := http.NewRequest("PUT", reqURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create redaction request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to send redaction request")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read redaction response body")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("matrix redaction API error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var response SendEventResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal redaction response")
+	}
+
+	return &response, nil
+}
+
+// GetEventRelationsAsUser retrieves events related to a specific event (like reactions) as a specific user
+func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[string]interface{}, error) {
+	if c.serverURL == "" || c.asToken == "" {
+		return nil, errors.New("matrix client not configured")
+	}
+
+	requestURL := c.serverURL + "/_matrix/client/v1/rooms/" + url.PathEscape(roomID) + "/relations/" + url.PathEscape(eventID)
+	
+	// Add user_id query parameter for impersonation
+	if userID != "" {
+		requestURL += "?user_id=" + url.QueryEscape(userID)
+	}
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create relations request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to send relations request")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read relations response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get event relations: %d %s", resp.StatusCode, string(body))
+	}
+
+	var response struct {
+		Chunk []map[string]interface{} `json:"chunk"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal relations response")
+	}
+
+	return response.Chunk, nil
+}
+
 func (c *Client) TestConnection() error {
 	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")

@@ -7,7 +7,7 @@ import (
 )
 
 func TestPostTracker_PutAndGet(t *testing.T) {
-	tracker := NewPostTracker()
+	tracker := NewPostTracker(DefaultPostTrackerMaxEntries)
 	
 	// Test Put and Get
 	postID := "test_post_123"
@@ -29,7 +29,7 @@ func TestPostTracker_PutAndGet(t *testing.T) {
 }
 
 func TestPostTracker_Delete(t *testing.T) {
-	tracker := NewPostTracker()
+	tracker := NewPostTracker(DefaultPostTrackerMaxEntries)
 	
 	postID := "test_post_456"
 	updateAt := time.Now().UnixMilli()
@@ -48,7 +48,7 @@ func TestPostTracker_Delete(t *testing.T) {
 }
 
 func TestPostTracker_MaxEntries(t *testing.T) {
-	tracker := NewPostTracker()
+	tracker := NewPostTracker(DefaultPostTrackerMaxEntries)
 	
 	// Add exactly 10,000 entries (should not trigger capacity check)
 	for i := 0; i < 10000; i++ {
@@ -80,7 +80,7 @@ func TestPostTracker_MaxEntries(t *testing.T) {
 }
 
 func TestPostTracker_CleanupOldEntries(t *testing.T) {
-	tracker := NewPostTracker()
+	tracker := NewPostTracker(DefaultPostTrackerMaxEntries)
 	
 	// Add an old entry (older than 1 hour)
 	oldPostID := "old_post"
@@ -118,5 +118,39 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	_, recentExists := tracker.Get(recentPostID)
 	if !recentExists {
 		t.Fatalf("Expected recent entry to still exist")
+	}
+}
+
+func TestPostTracker_CustomMaxEntries(t *testing.T) {
+	// Test with a smaller limit to verify configurability
+	customLimit := 5
+	tracker := NewPostTracker(customLimit)
+	
+	// Add entries up to the limit
+	for i := 0; i < customLimit; i++ {
+		postID := fmt.Sprintf("test_post_%d", i)
+		updateAt := time.Now().UnixMilli()
+		err := tracker.Put(postID, updateAt)
+		if err != nil {
+			t.Fatalf("Unexpected error adding entry %d: %v", i, err)
+		}
+	}
+	
+	// Should have exactly the custom limit of entries
+	size := tracker.Size()
+	if size != customLimit {
+		t.Fatalf("Expected tracker size to be %d, got %d", customLimit, size)
+	}
+	
+	// Try to add one more entry - should fail
+	err := tracker.Put("should_fail", time.Now().UnixMilli())
+	if err == nil {
+		t.Fatalf("Expected Put to fail when at custom capacity limit")
+	}
+	
+	// Size should still be the custom limit
+	sizeAfterFailure := tracker.Size()
+	if sizeAfterFailure != customLimit {
+		t.Fatalf("Expected tracker size to remain %d after failed Put, got %d", customLimit, sizeAfterFailure)
 	}
 }

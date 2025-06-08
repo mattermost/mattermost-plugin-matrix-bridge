@@ -50,7 +50,7 @@ func (p *Plugin) OnActivate() error {
 
 	p.kvstore = kvstore.NewKVStore(p.client)
 
-	p.postTracker = NewPostTracker()
+	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	p.initMatrixClient()
 
