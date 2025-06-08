@@ -251,9 +251,13 @@ func convertLinks(content string) string {
 	})
 }
 
-// convertLineBreaks converts \n to <br> for HTML
+// convertLineBreaks converts line breaks with reduced spacing for Matrix compatibility
 func convertLineBreaks(content string) string {
-	return strings.ReplaceAll(content, "\n", "<br>")
+	// Convert double newlines (paragraph breaks) to single <br> to reduce spacing in Matrix
+	content = strings.ReplaceAll(content, "\n\n", "<br>")
+	// Convert remaining single newlines to <br>
+	content = strings.ReplaceAll(content, "\n", "<br>")
+	return content
 }
 
 // convertHeadings converts # Heading to <h1>Heading</h1>, ## to <h2>, etc.

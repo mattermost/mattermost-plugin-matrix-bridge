@@ -61,6 +61,11 @@ func TestConvertMarkdownToHTML(t *testing.T) {
 			expected: "Line 1<br>Line 2",
 		},
 		{
+			name:     "paragraph breaks (reduced spacing)",
+			input:    "Paragraph 1\n\nParagraph 2",
+			expected: "Paragraph 1<br>Paragraph 2",
+		},
+		{
 			name:     "mixed formatting",
 			input:    "**Bold** and *italic* with `code`",
 			expected: "<strong>Bold</strong> and <em>italic</em> with <code>code</code>",
@@ -138,7 +143,7 @@ func TestConvertMarkdownToHTML(t *testing.T) {
 		{
 			name:     "comprehensive markdown features",
 			input:    "# Main Title\n\nThis is **bold text** and *italic text* with ~~strikethrough~~.\n\n## Code Examples\n\nInline `code snippet` and a code block:\n\n```javascript\nconsole.log('Hello World');\n```\n\n### Links and Tables\n\nCheck out [this link](https://example.com) for more info.\n\n| Feature | Status | Notes |\n|---------|--------|---------|\n| **Bold** | ✅ | *Working* |\n| `Code` | ✅ | ~~Fixed~~ Done |\n\nEnd of document.",
-			expected: "<h1>Main Title</h1><br><br>This is <strong>bold text</strong> and <em>italic text</em> with <del>strikethrough</del>.<br><br><h2>Code Examples</h2><br><br>Inline <code>code snippet</code> and a code block:<br><br><pre><code class=\"language-javascript\">console.log(&#39;Hello World&#39;);<br></code></pre><br><br><h3>Links and Tables</h3><br><br>Check out <a href=\"https://example.com\">this link</a> for more info.<br><br><table><thead><tr><th>Feature</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><strong>Bold</strong></td><td>✅</td><td><em>Working</em></td></tr><tr><td><code>Code</code></td><td>✅</td><td><del>Fixed</del> Done</td></tr></tbody></table><br><br>End of document.",
+			expected: "<h1>Main Title</h1><br>This is <strong>bold text</strong> and <em>italic text</em> with <del>strikethrough</del>.<br><h2>Code Examples</h2><br>Inline <code>code snippet</code> and a code block:<br><pre><code class=\"language-javascript\">console.log(&#39;Hello World&#39;);<br></code></pre><br><h3>Links and Tables</h3><br>Check out <a href=\"https://example.com\">this link</a> for more info.<br><table><thead><tr><th>Feature</th><th>Status</th><th>Notes</th></tr></thead><tbody><tr><td><strong>Bold</strong></td><td>✅</td><td><em>Working</em></td></tr><tr><td><code>Code</code></td><td>✅</td><td><del>Fixed</del> Done</td></tr></tbody></table><br>End of document.",
 		},
 	}
 
@@ -199,7 +204,7 @@ func TestConvertMattermostToMatrix(t *testing.T) {
 			name:         "comprehensive markdown in convertMattermostToMatrix",
 			input:        "# Documentation\n\n**Important:** This shows *all* features:\n\n- `inline code`\n- [Links](https://example.com)\n- ~~Deprecated~~ items\n\n```go\nfmt.Println(\"Hello\")\n```\n\n| Feature | Working |\n|---------|----------|\n| **All** | *Yes* |",
 			expectedText: "# Documentation\n\n**Important:** This shows *all* features:\n\n- `inline code`\n- [Links](https://example.com)\n- ~~Deprecated~~ items\n\n```go\nfmt.Println(\"Hello\")\n```\n\n| Feature | Working |\n|---------|----------|\n| **All** | *Yes* |",
-			expectedHTML: "<h1>Documentation</h1><br><br><strong>Important:</strong> This shows <em>all</em> features:<br><br>- <code>inline code</code><br>- <a href=\"https://example.com\">Links</a><br>- <del>Deprecated</del> items<br><br><pre><code class=\"language-go\">fmt.Println(&#34;Hello&#34;)<br></code></pre><br><br><table><thead><tr><th>Feature</th><th>Working</th></tr></thead><tbody><tr><td><strong>All</strong></td><td><em>Yes</em></td></tr></tbody></table>",
+			expectedHTML: "<h1>Documentation</h1><br><strong>Important:</strong> This shows <em>all</em> features:<br>- <code>inline code</code><br>- <a href=\"https://example.com\">Links</a><br>- <del>Deprecated</del> items<br><pre><code class=\"language-go\">fmt.Println(&#34;Hello&#34;)<br></code></pre><br><table><thead><tr><th>Feature</th><th>Working</th></tr></thead><tbody><tr><td><strong>All</strong></td><td><em>Yes</em></td></tr></tbody></table>",
 		},
 	}
 
