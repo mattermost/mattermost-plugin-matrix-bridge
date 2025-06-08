@@ -3,7 +3,6 @@ package main
 import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 // syncUserToMatrix handles syncing user changes (like display name) to Matrix ghost users
@@ -153,34 +152,10 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 		}
 	}
 
-	// Send message as ghost user (formatted if HTML content exists)
-	var sendResponse *matrix.SendEventResponse
-	if threadEventID != "" {
-		// Send as threaded message
-		if htmlContent != "" {
-			sendResponse, err = p.matrixClient.SendFormattedThreadedMessageAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID)
-			if err != nil {
-				return errors.Wrap(err, "failed to send formatted threaded message as ghost user")
-			}
-		} else {
-			sendResponse, err = p.matrixClient.SendThreadedMessageAsGhost(matrixRoomID, plainText, threadEventID, ghostUserID)
-			if err != nil {
-				return errors.Wrap(err, "failed to send threaded message as ghost user")
-			}
-		}
-	} else {
-		// Send as regular message
-		if htmlContent != "" {
-			sendResponse, err = p.matrixClient.SendFormattedMessageAsGhost(matrixRoomID, plainText, htmlContent, ghostUserID)
-			if err != nil {
-				return errors.Wrap(err, "failed to send formatted message as ghost user")
-			}
-		} else {
-			sendResponse, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, plainText, ghostUserID)
-			if err != nil {
-				return errors.Wrap(err, "failed to send message as ghost user")
-			}
-		}
+	// Send message as ghost user (formatted if HTML content exists, threaded if threadEventID is provided)
+	sendResponse, err := p.matrixClient.SendMessageAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID)
+	if err != nil {
+		return errors.Wrap(err, "failed to send message as ghost user")
 	}
 
 	// Store the Matrix event ID as a post property for reaction mapping

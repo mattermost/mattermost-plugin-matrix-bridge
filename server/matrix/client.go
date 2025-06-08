@@ -743,69 +743,30 @@ func (c *Client) UpdateGhostUserAvatar(userID string, avatarData []byte, avatarC
 	return nil
 }
 
-// SendMessageAsGhost sends a message as a ghost user
-func (c *Client) SendMessageAsGhost(roomID, message, ghostUserID string) (*SendEventResponse, error) {
+// SendMessageAsGhost sends a message as a ghost user, with optional HTML formatting and optional threading
+func (c *Client) SendMessageAsGhost(roomID, message, htmlMessage, threadEventID, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
 	}
 
-	content := MessageContent{
-		MsgType: "m.text",
-		Body:    message,
-	}
-
-	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
-}
-
-// SendFormattedMessageAsGhost sends a formatted message as a ghost user
-func (c *Client) SendFormattedMessageAsGhost(roomID, textBody, htmlBody, ghostUserID string) (*SendEventResponse, error) {
-	if c.asToken == "" {
-		return nil, errors.New("application service token not configured")
-	}
-
-	content := MessageContent{
-		MsgType:       "m.text",
-		Body:          textBody,
-		Format:        "org.matrix.custom.html",
-		FormattedBody: htmlBody,
-	}
-
-	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
-}
-
-// SendThreadedMessageAsGhost sends a threaded message as a ghost user
-func (c *Client) SendThreadedMessageAsGhost(roomID, message, threadEventID, ghostUserID string) (*SendEventResponse, error) {
-	if c.asToken == "" {
-		return nil, errors.New("application service token not configured")
-	}
-
+	// Use map for content to support threading
 	content := map[string]interface{}{
 		"msgtype": "m.text",
 		"body":    message,
-		"m.relates_to": map[string]interface{}{
-			"rel_type": "m.thread",
-			"event_id": threadEventID,
-		},
 	}
 
-	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
-}
-
-// SendFormattedThreadedMessageAsGhost sends a formatted threaded message as a ghost user
-func (c *Client) SendFormattedThreadedMessageAsGhost(roomID, textBody, htmlBody, threadEventID, ghostUserID string) (*SendEventResponse, error) {
-	if c.asToken == "" {
-		return nil, errors.New("application service token not configured")
+	// Add HTML formatting if provided
+	if htmlMessage != "" {
+		content["format"] = "org.matrix.custom.html"
+		content["formatted_body"] = htmlMessage
 	}
 
-	content := map[string]interface{}{
-		"msgtype":        "m.text",
-		"body":           textBody,
-		"format":         "org.matrix.custom.html",
-		"formatted_body": htmlBody,
-		"m.relates_to": map[string]interface{}{
+	// Add threading if threadEventID is provided
+	if threadEventID != "" {
+		content["m.relates_to"] = map[string]interface{}{
 			"rel_type": "m.thread",
 			"event_id": threadEventID,
-		},
+		}
 	}
 
 	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
