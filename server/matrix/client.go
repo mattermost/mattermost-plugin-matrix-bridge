@@ -773,6 +773,44 @@ func (c *Client) SendFormattedMessageAsGhost(roomID, textBody, htmlBody, ghostUs
 	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
 }
 
+// SendThreadedMessageAsGhost sends a threaded message as a ghost user
+func (c *Client) SendThreadedMessageAsGhost(roomID, message, threadEventID, ghostUserID string) (*SendEventResponse, error) {
+	if c.asToken == "" {
+		return nil, errors.New("application service token not configured")
+	}
+
+	content := map[string]interface{}{
+		"msgtype": "m.text",
+		"body":    message,
+		"m.relates_to": map[string]interface{}{
+			"rel_type": "m.thread",
+			"event_id": threadEventID,
+		},
+	}
+
+	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
+}
+
+// SendFormattedThreadedMessageAsGhost sends a formatted threaded message as a ghost user
+func (c *Client) SendFormattedThreadedMessageAsGhost(roomID, textBody, htmlBody, threadEventID, ghostUserID string) (*SendEventResponse, error) {
+	if c.asToken == "" {
+		return nil, errors.New("application service token not configured")
+	}
+
+	content := map[string]interface{}{
+		"msgtype":        "m.text",
+		"body":           textBody,
+		"format":         "org.matrix.custom.html",
+		"formatted_body": htmlBody,
+		"m.relates_to": map[string]interface{}{
+			"rel_type": "m.thread",
+			"event_id": threadEventID,
+		},
+	}
+
+	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
+}
+
 // EditMessageAsGhost edits an existing message as a ghost user
 func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {

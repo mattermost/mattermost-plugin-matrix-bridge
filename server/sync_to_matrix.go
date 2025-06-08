@@ -131,17 +131,55 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
+	// Check if this is a threaded post (reply to another post)
+	var threadEventID string
+	if post.RootId != "" {
+		// This is a reply - find the Matrix event ID of the root post
+		rootPost, appErr := p.API.GetPost(post.RootId)
+		if appErr != nil {
+			p.API.LogWarn("Failed to get root post for thread", "error", appErr, "post_id", post.Id, "root_id", post.RootId)
+			// Continue without threading - send as regular message
+		} else {
+			// Get Matrix event ID from root post properties
+			if rootPost.Props != nil {
+				if eventID, ok := rootPost.Props[propertyKey].(string); ok {
+					threadEventID = eventID
+				}
+			}
+			if threadEventID == "" {
+				p.API.LogWarn("Root post has no Matrix event ID for threading", "post_id", post.Id, "root_id", post.RootId)
+				// Continue without threading - send as regular message
+			}
+		}
+	}
+
 	// Send message as ghost user (formatted if HTML content exists)
 	var sendResponse *matrix.SendEventResponse
-	if htmlContent != "" {
-		sendResponse, err = p.matrixClient.SendFormattedMessageAsGhost(matrixRoomID, plainText, htmlContent, ghostUserID)
-		if err != nil {
-			return errors.Wrap(err, "failed to send formatted message as ghost user")
+	if threadEventID != "" {
+		// Send as threaded message
+		if htmlContent != "" {
+			sendResponse, err = p.matrixClient.SendFormattedThreadedMessageAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID)
+			if err != nil {
+				return errors.Wrap(err, "failed to send formatted threaded message as ghost user")
+			}
+		} else {
+			sendResponse, err = p.matrixClient.SendThreadedMessageAsGhost(matrixRoomID, plainText, threadEventID, ghostUserID)
+			if err != nil {
+				return errors.Wrap(err, "failed to send threaded message as ghost user")
+			}
 		}
 	} else {
-		sendResponse, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, plainText, ghostUserID)
-		if err != nil {
-			return errors.Wrap(err, "failed to send message as ghost user")
+		// Send as regular message
+		if htmlContent != "" {
+			sendResponse, err = p.matrixClient.SendFormattedMessageAsGhost(matrixRoomID, plainText, htmlContent, ghostUserID)
+			if err != nil {
+				return errors.Wrap(err, "failed to send formatted message as ghost user")
+			}
+		} else {
+			sendResponse, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, plainText, ghostUserID)
+			if err != nil {
+				return errors.Wrap(err, "failed to send message as ghost user")
+			}
 		}
 	}
 
