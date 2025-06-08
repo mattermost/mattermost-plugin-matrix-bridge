@@ -146,4 +146,188 @@ func (p *Plugin) isMatrixContentUnchanged(eventID, newContent string) bool {
 	return false
 }
 
+// findAndDeleteFileMessage finds and deletes file attachment messages that are replies to the main post
+func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, mimetype, postEventID string) error {
+	// Get all reply messages to the main post event
+	relations, err := p.matrixClient.GetEventRelationsAsUser(matrixRoomID, postEventID, ghostUserID)
+	if err != nil {
+		return errors.Wrap(err, "failed to get event relations from Matrix")
+	}
+
+	// Find file messages that are replies to this post
+	var fileEventID string
+	for _, event := range relations {
+		// Check if this is a message event
+		eventType, ok := event["type"].(string)
+		if !ok || eventType != "m.room.message" {
+			continue
+		}
+
+		// Check if this event is from our ghost user
+		sender, ok := event["sender"].(string)
+		if !ok || sender != ghostUserID {
+			continue
+		}
+
+		// Check if this is a reply relationship
+		content, ok := event["content"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		relatesTo, ok := content["m.relates_to"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		inReplyTo, ok := relatesTo["m.in_reply_to"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		replyEventID, hasEventID := inReplyTo["event_id"].(string)
+		if !hasEventID || replyEventID != postEventID {
+			continue
+		}
+
+		// Check if this is a file message with the matching filename
+		msgType, ok := content["msgtype"].(string)
+		if !ok {
+			continue
+		}
+
+		// File messages have msgtype of m.file, m.image, m.video, or m.audio
+		if msgType != "m.file" && msgType != "m.image" && msgType != "m.video" && msgType != "m.audio" {
+			continue
+		}
+
+		// Check if the filename matches
+		body, ok := content["body"].(string)
+		if ok && body == filename {
+			// Found the matching file message
+			eventID, ok := event["event_id"].(string)
+			if ok {
+				fileEventID = eventID
+				break
+			}
+		}
+	}
+
+	if fileEventID == "" {
+		p.API.LogWarn("No matching file message found to delete", "filename", filename, "post_event_id", postEventID)
+		return nil
+	}
+
+	// Redact the file message
+	_, err = p.matrixClient.RedactEventAsGhost(matrixRoomID, fileEventID, ghostUserID)
+	if err != nil {
+		return errors.Wrap(err, "failed to redact file message in Matrix")
+	}
+
+	p.API.LogInfo("Successfully deleted file message from Matrix", "filename", filename, "file_event_id", fileEventID, "post_event_id", postEventID)
+	return nil
+}
+
+// deleteAllFileReplies finds and deletes all file attachment messages using custom metadata
+func (p *Plugin) deleteAllFileReplies(matrixRoomID, postEventID, ghostUserID string) error {
+	// Look for the file metadata event that contains the file attachment event IDs
+	fileEventIDs, err := p.getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUserID)
+	if err != nil {
+		p.API.LogWarn("Failed to get file event IDs from metadata", "error", err, "post_event_id", postEventID)
+		return nil // Don't fail - the main message will still be deleted
+	}
+
+	if len(fileEventIDs) == 0 {
+		p.API.LogDebug("No file attachments found in metadata for post deletion", "post_event_id", postEventID)
+		return nil
+	}
+
+	p.API.LogDebug("Found file attachments from metadata", "post_event_id", postEventID, "file_count", len(fileEventIDs))
+
+	var deletedCount int
+	var firstError error
+
+	// Delete each file attachment event
+	for _, fileEventID := range fileEventIDs {
+		_, err := p.matrixClient.RedactEventAsGhost(matrixRoomID, fileEventID, ghostUserID)
+		if err != nil {
+			p.API.LogWarn("Failed to delete file attachment", "error", err, "file_event_id", fileEventID, "post_event_id", postEventID)
+			if firstError == nil {
+				firstError = err
+			}
+		} else {
+			deletedCount++
+			p.API.LogDebug("Deleted file attachment", "file_event_id", fileEventID, "post_event_id", postEventID)
+		}
+	}
+
+	if deletedCount > 0 {
+		p.API.LogInfo("Deleted file attachments using metadata", "count", deletedCount, "post_event_id", postEventID)
+	}
+
+	return firstError
+}
+
+// getFileEventIDsFromMetadata retrieves file attachment event IDs from custom metadata
+func (p *Plugin) getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUserID string) ([]string, error) {
+	// Get relations to find the metadata event
+	relations, err := p.matrixClient.GetEventRelationsAsUser(matrixRoomID, postEventID, ghostUserID)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get event relations from Matrix")
+	}
+
+	p.API.LogDebug("Searching for file metadata", "post_event_id", postEventID, "relations_count", len(relations))
+
+	// Look for our custom metadata event
+	for _, event := range relations {
+		p.API.LogDebug("Processing relation for metadata search", "event_type", event["type"], "sender", event["sender"])
+		eventType, ok := event["type"].(string)
+		if !ok || eventType != "m.mattermost.file_metadata" {
+			continue
+		}
+
+		// Check if this event is from our ghost user
+		sender, ok := event["sender"].(string)
+		if !ok || sender != ghostUserID {
+			continue
+		}
+
+		// Get the content
+		content, ok := event["content"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check if this metadata is for our message
+		relatedMessage, ok := content["relates_to_message"].(string)
+		if !ok || relatedMessage != postEventID {
+			continue
+		}
+
+		// Extract file attachment event IDs
+		fileAttachmentsRaw, ok := content["file_attachments"]
+		if !ok {
+			continue
+		}
+
+		fileAttachments, ok := fileAttachmentsRaw.([]interface{})
+		if !ok {
+			continue
+		}
+
+		var fileEventIDs []string
+		for _, attachment := range fileAttachments {
+			if eventID, ok := attachment.(string); ok {
+				fileEventIDs = append(fileEventIDs, eventID)
+			}
+		}
+
+		p.API.LogDebug("Found file metadata", "post_event_id", postEventID, "file_event_ids", fileEventIDs)
+		return fileEventIDs, nil
+	}
+
+	return nil, errors.New("no file metadata found")
+}
+
+
 

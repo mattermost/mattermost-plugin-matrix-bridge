@@ -34,6 +34,9 @@ type Plugin struct {
 	// postTracker tracks post creation timestamps to detect redundant edits
 	postTracker *PostTracker
 
+	// pendingFiles tracks uploaded files awaiting their posts
+	pendingFiles *PendingFileTracker
+
 	backgroundJob *cluster.Job
 
 	// configurationLock synchronizes access to the configuration.
@@ -51,6 +54,7 @@ func (p *Plugin) OnActivate() error {
 	p.kvstore = kvstore.NewKVStore(p.client)
 
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	p.pendingFiles = NewPendingFileTracker()
 
 	p.initMatrixClient()
 

@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
+	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 // syncUserToMatrix handles syncing user changes (like display name) to Matrix ghost users
@@ -152,10 +153,35 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 		}
 	}
 
+	// Check for pending file attachments for this post
+	pendingFiles := p.pendingFiles.GetFiles(post.Id)
+	
 	// Send message as ghost user (formatted if HTML content exists, threaded if threadEventID is provided)
-	sendResponse, err := p.matrixClient.SendMessageAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID)
-	if err != nil {
-		return errors.Wrap(err, "failed to send message as ghost user")
+	var sendResponse *matrix.SendEventResponse
+	if len(pendingFiles) > 0 {
+		// Convert pending files to the format expected by SendMessageWithFilesAsGhost
+		var files []map[string]interface{}
+		for _, file := range pendingFiles {
+			files = append(files, map[string]interface{}{
+				"filename": file.Filename,
+				"mxc_uri":  file.MxcURI,
+				"mimetype": file.MimeType,
+				"size":     file.Size,
+			})
+		}
+		
+		sendResponse, err = p.matrixClient.SendMessageWithFilesAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID, files)
+		if err != nil {
+			return errors.Wrap(err, "failed to send message with files as ghost user")
+		}
+		
+		p.API.LogInfo("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
+	} else {
+		// No files, send regular message
+		sendResponse, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID)
+		if err != nil {
+			return errors.Wrap(err, "failed to send message as ghost user")
+		}
 	}
 
 	// Store the Matrix event ID as a post property for reaction mapping
@@ -267,13 +293,20 @@ func (p *Plugin) deletePostFromMatrix(post *model.Post, channelID string) error 
 		return nil // Can't delete a message from a user that doesn't have a ghost user
 	}
 
-	// Redact the message event
+	// First, find and delete any file attachment replies to this message
+	err = p.deleteAllFileReplies(matrixRoomID, matrixEventID, ghostUserID)
+	if err != nil {
+		p.API.LogWarn("Failed to delete file attachment replies", "error", err, "post_id", post.Id, "matrix_event_id", matrixEventID)
+		// Continue anyway - we'll still delete the main message
+	}
+
+	// Redact the main message event
 	_, err = p.matrixClient.RedactEventAsGhost(matrixRoomID, matrixEventID, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to redact post in Matrix")
 	}
 
-	p.API.LogDebug("Successfully deleted post from Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "matrix_event_id", matrixEventID)
+	p.API.LogDebug("Successfully deleted post and file attachments from Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "matrix_event_id", matrixEventID)
 	return nil
 }
 
