@@ -208,14 +208,8 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
-	// Send edit as ghost user (Matrix edit API doesn't support formatted content in the same way)
-	// We'll use the formatted content if available, otherwise plain text
-	editContent := plainText
-	if htmlContent != "" {
-		editContent = htmlContent
-	}
-
-	_, err = p.matrixClient.EditMessageAsGhost(matrixRoomID, eventID, editContent, ghostUserID)
+	// Send edit as ghost user with proper HTML formatting support
+	_, err = p.matrixClient.EditMessageAsGhost(matrixRoomID, eventID, plainText, htmlContent, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to edit message as ghost user")
 	}

@@ -772,20 +772,28 @@ func (c *Client) SendMessageAsGhost(roomID, message, htmlMessage, threadEventID,
 	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
 }
 
-// EditMessageAsGhost edits an existing message as a ghost user
-func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, ghostUserID string) (*SendEventResponse, error) {
+// EditMessageAsGhost edits an existing message as a ghost user, with optional HTML formatting
+func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
 	}
 
 	// Matrix edit event content structure
+	newContent := map[string]interface{}{
+		"msgtype": "m.text",
+		"body":    newMessage,
+	}
+
+	// Add HTML formatting to new content if provided
+	if htmlMessage != "" {
+		newContent["format"] = "org.matrix.custom.html"
+		newContent["formatted_body"] = htmlMessage
+	}
+
 	content := map[string]interface{}{
 		"msgtype": "m.text",
 		"body":    " * " + newMessage, // Fallback for clients that don't support edits
-		"m.new_content": map[string]interface{}{
-			"msgtype": "m.text",
-			"body":    newMessage,
-		},
+		"m.new_content": newContent,
 		"m.relates_to": map[string]interface{}{
 			"rel_type": "m.replace",
 			"event_id": eventID,
