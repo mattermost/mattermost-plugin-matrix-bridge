@@ -124,38 +124,26 @@ func (p *Plugin) extractServerDomain(serverURL string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(hostname, ".", "_"), ":", "_")
 }
 
-// convertEmojiForMatrix converts Mattermost emoji names to Matrix reaction format
-func (p *Plugin) convertEmojiForMatrix(emojiName string) string {
-	// Map common Mattermost emoji names to Unicode equivalents for Matrix
-	emojiMap := map[string]string{
-		"+1":        "👍",
-		"-1":        "👎", 
-		"heart":     "❤️",
-		"smile":     "😄",
-		"laughing":  "😆",
-		"confused":  "😕",
-		"frowning":  "😦",
-		"heart_eyes": "😍",
-		"rage":      "😡",
-		"slightly_smiling_face": "🙂",
-		"white_check_mark": "✅",
-		"x":         "❌",
-		"heavy_check_mark": "✔️",
-		"fire":      "🔥",
-		"clap":      "👏",
-		"eyes":      "👀",
-		"thinking_face": "🤔",
-		"tada":      "🎉",
-		"rocket":    "🚀",
-	}
 
-	// Check if we have a mapping for this emoji
-	if unicode, exists := emojiMap[emojiName]; exists {
-		return unicode
+// isMatrixContentUnchanged compares Matrix event content with new content to avoid redundant edits
+func (p *Plugin) isMatrixContentUnchanged(eventID, newContent string) bool {
+	if eventID == "" {
+		return false
 	}
-
-	// For custom emojis or unmapped emojis, return the name as-is
-	// Matrix clients can handle custom emoji names
-	return ":" + emojiName + ":"
+	
+	// Get the current Matrix event content
+	event, err := p.matrixClient.GetEvent(eventID)
+	if err != nil {
+		p.API.LogWarn("Failed to get Matrix event for content comparison", "event_id", eventID, "error", err)
+		return false
+	}
+	
+	// Extract body content from the event
+	if content, ok := event.Content["body"].(string); ok {
+		return content == newContent
+	}
+	
+	return false
 }
+
 

@@ -2,6 +2,7 @@ bin/
 dist/
 webapp/src/manifest.ts
 server/manifest.go
+tools/emoji_generator
 
 # Mac
 .DS_Store

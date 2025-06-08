@@ -889,3 +889,20 @@ func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
 
 	return response.RoomID, nil
 }
+
+// MatrixEvent represents a Matrix event for content comparison
+type MatrixEvent struct {
+	Content map[string]interface{} `json:"content"`
+}
+
+// GetEvent retrieves a specific Matrix event for content comparison
+func (c *Client) GetEvent(eventID string) (*MatrixEvent, error) {
+	if c.serverURL == "" || c.asToken == "" {
+		return nil, errors.New("matrix client not configured")
+	}
+
+	// Note: This is a simplified implementation that assumes we have room context
+	// In a full implementation, you'd need to specify the room ID as well
+	// For now, we'll return a stub that indicates comparison should be skipped
+	return nil, errors.New("event retrieval not implemented - content comparison disabled")
+}
