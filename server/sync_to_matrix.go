@@ -10,20 +10,18 @@ func (p *Plugin) syncUserToMatrix(user *model.User) error {
 	p.API.LogDebug("Syncing user to Matrix", "user_id", user.Id, "username", user.Username)
 	
 	// Check if we have a ghost user for this Mattermost user
-	ghostUserKey := "ghost_user_" + user.Id
-	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
-	if err != nil || len(ghostUserIDBytes) == 0 {
+	ghostUserID, exists := p.getGhostUser(user.Id)
+	if !exists {
 		p.API.LogDebug("No ghost user found for user sync", "user_id", user.Id, "username", user.Username)
 		return nil // No ghost user exists yet, nothing to update
 	}
 
-	ghostUserID := string(ghostUserIDBytes)
 	p.API.LogDebug("Found ghost user for user sync", "user_id", user.Id, "ghost_user_id", ghostUserID)
 
 	// Update display name
 	displayName := user.GetDisplayName(model.ShowFullName)
 	if displayName != "" {
-		err = p.matrixClient.SetDisplayName(ghostUserID, displayName)
+		err := p.matrixClient.SetDisplayName(ghostUserID, displayName)
 		if err != nil {
 			p.API.LogError("Failed to update ghost user display name", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID, "display_name", displayName)
 			return errors.Wrap(err, "failed to update ghost user display name on Matrix")
@@ -106,24 +104,20 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 
 // createPostInMatrix creates a new post in Matrix and stores the event ID
 func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user *model.User, propertyKey string) error {
-	// Get or create ghost user with display name and avatar
-	displayName := user.GetDisplayName(model.ShowFullName)
+	// Check if ghost user already exists
+	ghostUserID, exists := p.getGhostUser(user.Id)
 	
-	// Get user's avatar image data
-	var avatarData []byte
-	var avatarContentType string
-	if imageData, appErr := p.API.GetProfileImage(user.Id); appErr == nil {
-		avatarData = imageData
-		avatarContentType = "image/png" // Mattermost typically returns PNG
-	}
-	
-	ghostUserID, err := p.getOrCreateGhostUser(user.Id, user.Username, displayName, avatarData, avatarContentType)
-	if err != nil {
-		return errors.Wrap(err, "failed to get or create ghost user")
+	// If ghost user doesn't exist, create it
+	if !exists {
+		var err error
+		ghostUserID, err = p.createGhostUser(user.Id, user.Username)
+		if err != nil {
+			return errors.Wrap(err, "failed to create ghost user")
+		}
 	}
 
 	// Ensure ghost user is joined to the room
-	err = p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
+	err := p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
 	if err != nil {
 		return errors.Wrap(err, "failed to ensure ghost user is in room")
 	}
@@ -163,24 +157,20 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 
 // updatePostInMatrix updates an existing post in Matrix
 func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, eventID string, user *model.User) error {
-	// Get or create ghost user for the update
-	displayName := user.GetDisplayName(model.ShowFullName)
+	// Check if ghost user already exists
+	ghostUserID, exists := p.getGhostUser(user.Id)
 	
-	// Get user's avatar image data
-	var avatarData []byte
-	var avatarContentType string
-	if imageData, appErr := p.API.GetProfileImage(user.Id); appErr == nil {
-		avatarData = imageData
-		avatarContentType = "image/png"
-	}
-	
-	ghostUserID, err := p.getOrCreateGhostUser(user.Id, user.Username, displayName, avatarData, avatarContentType)
-	if err != nil {
-		return errors.Wrap(err, "failed to get or create ghost user")
+	// If ghost user doesn't exist, create it
+	if !exists {
+		var err error
+		ghostUserID, err = p.createGhostUser(user.Id, user.Username)
+		if err != nil {
+			return errors.Wrap(err, "failed to create ghost user")
+		}
 	}
 
 	// Ensure ghost user is still in the room
-	err = p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
+	err := p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
 	if err != nil {
 		return errors.Wrap(err, "failed to ensure ghost user is in room")
 	}
@@ -254,18 +244,16 @@ func (p *Plugin) addReactionToMatrix(reaction *model.Reaction, channelID string)
 		return errors.Wrap(appErr, "failed to get user for reaction")
 	}
 
-	// Get or create ghost user
-	displayName := user.GetDisplayName(model.ShowFullName)
-	var avatarData []byte
-	var avatarContentType string
-	if imageData, appErr := p.API.GetProfileImage(user.Id); appErr == nil {
-		avatarData = imageData
-		avatarContentType = "image/png"
-	}
+	// Check if ghost user already exists
+	ghostUserID, exists := p.getGhostUser(user.Id)
 	
-	ghostUserID, err := p.getOrCreateGhostUser(user.Id, user.Username, displayName, avatarData, avatarContentType)
-	if err != nil {
-		return errors.Wrap(err, "failed to get or create ghost user for reaction")
+	// If ghost user doesn't exist, create it
+	if !exists {
+		var err error
+		ghostUserID, err = p.createGhostUser(user.Id, user.Username)
+		if err != nil {
+			return errors.Wrap(err, "failed to create ghost user for reaction")
+		}
 	}
 
 	// Ensure ghost user is in the room
@@ -335,18 +323,11 @@ func (p *Plugin) removeReactionFromMatrix(reaction *model.Reaction, channelID st
 		return errors.Wrap(appErr, "failed to get user for reaction removal")
 	}
 
-	// Get or create ghost user (needed for determining which reaction to remove)
-	displayName := user.GetDisplayName(model.ShowFullName)
-	var avatarData []byte
-	var avatarContentType string
-	if imageData, appErr := p.API.GetProfileImage(user.Id); appErr == nil {
-		avatarData = imageData
-		avatarContentType = "image/png"
-	}
-	
-	ghostUserID, err := p.getOrCreateGhostUser(user.Id, user.Username, displayName, avatarData, avatarContentType)
-	if err != nil {
-		return errors.Wrap(err, "failed to get or create ghost user for reaction removal")
+	// Check if ghost user exists (needed for determining which reaction to remove)
+	ghostUserID, exists := p.getGhostUser(user.Id)
+	if !exists {
+		p.API.LogWarn("No ghost user found for reaction removal", "user_id", reaction.UserId, "post_id", reaction.PostId)
+		return nil // Can't remove a reaction from a user that doesn't have a ghost user
 	}
 
 	// Convert Mattermost emoji name to Matrix reaction format for matching

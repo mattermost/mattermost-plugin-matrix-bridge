@@ -109,14 +109,12 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, rc *model
 	p.API.LogDebug("Received profile image sync", "user_id", user.Id, "username", user.Username)
 	
 	// Check if we have a ghost user for this Mattermost user
-	ghostUserKey := "ghost_user_" + user.Id
-	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
-	if err != nil || len(ghostUserIDBytes) == 0 {
+	ghostUserID, exists := p.getGhostUser(user.Id)
+	if !exists {
 		p.API.LogDebug("No ghost user found for profile image sync", "user_id", user.Id, "username", user.Username)
 		return nil // No ghost user exists yet, nothing to update
 	}
 
-	ghostUserID := string(ghostUserIDBytes)
 	p.API.LogDebug("Found ghost user for profile image sync", "user_id", user.Id, "ghost_user_id", ghostUserID)
 
 	// Get user's new avatar image data
@@ -132,7 +130,7 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, rc *model
 	}
 
 	// Update the avatar for the ghost user (upload and set)
-	err = p.matrixClient.UpdateGhostUserAvatar(ghostUserID, avatarData, "image/png")
+	err := p.matrixClient.UpdateGhostUserAvatar(ghostUserID, avatarData, "image/png")
 	if err != nil {
 		p.API.LogError("Failed to update ghost user avatar", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID)
 		return errors.Wrap(err, "failed to update ghost user avatar on Matrix")

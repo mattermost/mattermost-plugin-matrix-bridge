@@ -4,17 +4,37 @@ import (
 	"net/url"
 	"strings"
 	
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 )
 
-// getOrCreateGhostUser retrieves or creates a Matrix ghost user for a Mattermost user
-func (p *Plugin) getOrCreateGhostUser(mattermostUserID, mattermostUsername, displayName string, avatarData []byte, avatarContentType string) (string, error) {
-	// Check if we already have this ghost user cached
+// getGhostUser retrieves the Matrix ghost user ID for a Mattermost user if it exists
+func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
 	ghostUserKey := "ghost_user_" + mattermostUserID
 	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
 	if err == nil && len(ghostUserIDBytes) > 0 {
-		// Ghost user already exists
-		return string(ghostUserIDBytes), nil
+		return string(ghostUserIDBytes), true
+	}
+	return "", false
+}
+
+// createGhostUser creates a new Matrix ghost user for a Mattermost user
+func (p *Plugin) createGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+	// Get the Mattermost user to fetch display name and avatar
+	user, appErr := p.API.GetUser(mattermostUserID)
+	if appErr != nil {
+		return "", errors.Wrap(appErr, "failed to get Mattermost user for ghost user creation")
+	}
+
+	// Get display name
+	displayName := user.GetDisplayName(model.ShowFullName)
+	
+	// Get user's avatar image data
+	var avatarData []byte
+	var avatarContentType string
+	if imageData, appErr := p.API.GetProfileImage(mattermostUserID); appErr == nil {
+		avatarData = imageData
+		avatarContentType = "image/png" // Mattermost typically returns PNG
 	}
 
 	// Create new ghost user with display name and avatar
@@ -30,6 +50,7 @@ func (p *Plugin) getOrCreateGhostUser(mattermostUserID, mattermostUsername, disp
 	}
 
 	// Cache the ghost user ID
+	ghostUserKey := "ghost_user_" + mattermostUserID
 	err = p.kvstore.Set(ghostUserKey, []byte(ghostUser.UserID))
 	if err != nil {
 		p.API.LogWarn("Failed to cache ghost user ID", "error", err, "ghost_user_id", ghostUser.UserID)
