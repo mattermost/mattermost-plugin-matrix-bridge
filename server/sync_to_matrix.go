@@ -9,7 +9,7 @@ import (
 // syncUserToMatrix handles syncing user changes (like display name) to Matrix ghost users
 func (p *Plugin) syncUserToMatrix(user *model.User) error {
 	p.API.LogDebug("Syncing user to Matrix", "user_id", user.Id, "username", user.Username)
-	
+
 	// Check if we have a ghost user for this Mattermost user
 	ghostUserID, exists := p.getGhostUser(user.Id)
 	if !exists {
@@ -35,6 +35,11 @@ func (p *Plugin) syncUserToMatrix(user *model.User) error {
 
 // syncPostToMatrix handles syncing a single post from Mattermost to Matrix
 func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
+	// Check if this is a post deletion
+	if post.DeleteAt != 0 {
+		return p.deletePostFromMatrix(post, channelID)
+	}
+
 	matrixRoomIdentifier, err := p.getMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier")
@@ -60,7 +65,7 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 	config := p.getConfiguration()
 	serverDomain := p.extractServerDomain(config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
-	
+
 	var existingEventID string
 	if post.Props != nil {
 		if eventID, ok := post.Props[propertyKey].(string); ok {
@@ -107,7 +112,7 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user *model.User, propertyKey string) error {
 	// Check if ghost user already exists
 	ghostUserID, exists := p.getGhostUser(user.Id)
-	
+
 	// If ghost user doesn't exist, create it
 	if !exists {
 		var err error
@@ -125,7 +130,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
-	
+
 	// Send message as ghost user (formatted if HTML content exists)
 	var sendResponse *matrix.SendEventResponse
 	if htmlContent != "" {
@@ -146,7 +151,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 			post.Props = make(map[string]interface{})
 		}
 		post.Props[propertyKey] = sendResponse.EventID
-		
+
 		updatedPost, appErr := p.API.UpdatePost(post)
 		if appErr != nil {
 			p.API.LogWarn("Failed to update post with Matrix event ID", "error", appErr, "post_id", post.Id, "event_id", sendResponse.EventID)
@@ -171,7 +176,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, eventID string, user *model.User) error {
 	// Check if ghost user already exists
 	ghostUserID, exists := p.getGhostUser(user.Id)
-	
+
 	// If ghost user doesn't exist, create it
 	if !exists {
 		var err error
@@ -189,14 +194,14 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
-	
+
 	// Send edit as ghost user (Matrix edit API doesn't support formatted content in the same way)
 	// We'll use the formatted content if available, otherwise plain text
 	editContent := plainText
 	if htmlContent != "" {
 		editContent = htmlContent
 	}
-	
+
 	_, err = p.matrixClient.EditMessageAsGhost(matrixRoomID, eventID, editContent, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to edit message as ghost user")
@@ -206,13 +211,72 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 	return nil
 }
 
+// deletePostFromMatrix handles deleting a post from Matrix by redacting the Matrix message
+func (p *Plugin) deletePostFromMatrix(post *model.Post, channelID string) error {
+	// Get Matrix room identifier
+	matrixRoomIdentifier, err := p.getMatrixRoomID(channelID)
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix room identifier for post deletion")
+	}
+
+	if matrixRoomIdentifier == "" {
+		p.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+		return nil
+	}
+
+	// Resolve room alias to room ID if needed
+	matrixRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		return errors.Wrap(err, "failed to resolve Matrix room identifier for post deletion")
+	}
+
+	// Get Matrix event ID from post properties
+	config := p.getConfiguration()
+	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	propertyKey := "matrix_event_id_" + serverDomain
+
+	var matrixEventID string
+	if post.Props != nil {
+		if eventID, ok := post.Props[propertyKey].(string); ok {
+			matrixEventID = eventID
+		}
+	}
+
+	if matrixEventID == "" {
+		p.API.LogWarn("No Matrix event ID found for post deletion", "post_id", post.Id, "property_key", propertyKey)
+		return nil // Can't delete a message that wasn't synced to Matrix
+	}
+
+	// Get user for ghost user lookup
+	user, appErr := p.API.GetUser(post.UserId)
+	if appErr != nil {
+		return errors.Wrap(appErr, "failed to get user for post deletion")
+	}
+
+	// Check if ghost user exists (needed for redaction)
+	ghostUserID, exists := p.getGhostUser(user.Id)
+	if !exists {
+		p.API.LogWarn("No ghost user found for post deletion", "user_id", post.UserId, "post_id", post.Id)
+		return nil // Can't delete a message from a user that doesn't have a ghost user
+	}
+
+	// Redact the message event
+	_, err = p.matrixClient.RedactEventAsGhost(matrixRoomID, matrixEventID, ghostUserID)
+	if err != nil {
+		return errors.Wrap(err, "failed to redact post in Matrix")
+	}
+
+	p.API.LogDebug("Successfully deleted post from Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "matrix_event_id", matrixEventID)
+	return nil
+}
+
 // syncReactionToMatrix handles syncing a reaction from Mattermost to Matrix
 func (p *Plugin) syncReactionToMatrix(reaction *model.Reaction, channelID string) error {
 	// Check if this is a reaction deletion
 	if reaction.DeleteAt != 0 {
 		return p.removeReactionFromMatrix(reaction, channelID)
 	}
-	
+
 	// This is a new reaction - add it to Matrix
 	return p.addReactionToMatrix(reaction, channelID)
 }
@@ -246,7 +310,7 @@ func (p *Plugin) addReactionToMatrix(reaction *model.Reaction, channelID string)
 	config := p.getConfiguration()
 	serverDomain := p.extractServerDomain(config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
-	
+
 	var matrixEventID string
 	if post.Props != nil {
 		if eventID, ok := post.Props[propertyKey].(string); ok {
@@ -267,7 +331,7 @@ func (p *Plugin) addReactionToMatrix(reaction *model.Reaction, channelID string)
 
 	// Check if ghost user already exists
 	ghostUserID, exists := p.getGhostUser(user.Id)
-	
+
 	// If ghost user doesn't exist, create it
 	if !exists {
 		var err error
@@ -325,7 +389,7 @@ func (p *Plugin) removeReactionFromMatrix(reaction *model.Reaction, channelID st
 	config := p.getConfiguration()
 	serverDomain := p.extractServerDomain(config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
-	
+
 	var matrixEventID string
 	if post.Props != nil {
 		if eventID, ok := post.Props[propertyKey].(string); ok {
