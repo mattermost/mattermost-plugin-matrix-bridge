@@ -71,14 +71,19 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 
 	if existingEventID != "" {
 		// Check if this is a redundant edit from adding the Matrix event ID property
-		createdKey := "post_created_id_" + post.Id
-		_, err := p.kvstore.Get(createdKey)
-		if err == nil {
-			// This post was just created and got its Matrix event ID property added
-			// Delete the tracking key and skip this sync to avoid redundant edit
-			p.kvstore.Delete(createdKey)
-			p.API.LogDebug("Skipping redundant edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID)
-			return nil
+		if storedUpdateAt, exists := p.postTracker.Get(post.Id); exists {
+			if post.UpdateAt == storedUpdateAt {
+				// This post's UpdateAt matches the timestamp we stored when adding Matrix event ID
+				// This is the redundant edit from adding the Matrix event ID property
+				p.postTracker.Delete(post.Id)
+				p.API.LogDebug("Skipping redundant edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
+				return nil
+			} else {
+				// This is a genuine edit that happened after we added the Matrix event ID
+				// Remove the tracking entry since we're processing a real edit now
+				p.postTracker.Delete(post.Id)
+				p.API.LogDebug("Processing genuine edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
+			}
 		}
 
 		// This is a genuine post edit - update the existing Matrix message
@@ -136,20 +141,19 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 		}
 		post.Props[propertyKey] = sendResponse.EventID
 		
-		// Mark this post as newly created to skip redundant edit sync
-		createdKey := "post_created_id_" + post.Id
-		err = p.kvstore.Set(createdKey, []byte("1"))
-		if err != nil {
-			p.API.LogWarn("Failed to set post creation tracking key", "error", err, "post_id", post.Id)
-			// Continue anyway, this is just optimization
-		}
-		
-		_, appErr := p.API.UpdatePost(post)
+		updatedPost, appErr := p.API.UpdatePost(post)
 		if appErr != nil {
 			p.API.LogWarn("Failed to update post with Matrix event ID", "error", appErr, "post_id", post.Id, "event_id", sendResponse.EventID)
-			// If the update failed, clean up the tracking key since no redundant sync will occur
-			p.kvstore.Delete(createdKey)
 			// Continue anyway, the message was sent successfully
+		} else {
+			// Store the UpdateAt timestamp in memory to detect redundant edits
+			err = p.postTracker.Put(post.Id, updatedPost.UpdateAt)
+			if err != nil {
+				p.API.LogWarn("Failed to store post tracking for redundant edit detection", "error", err, "post_id", post.Id, "update_at", updatedPost.UpdateAt)
+				// Continue anyway - this is just an optimization to avoid redundant edits
+			} else {
+				p.API.LogDebug("Stored post tracking for redundant edit detection", "post_id", post.Id, "update_at", updatedPost.UpdateAt)
+			}
 		}
 	}
 

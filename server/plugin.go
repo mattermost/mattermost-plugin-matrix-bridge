@@ -31,6 +31,9 @@ type Plugin struct {
 	// matrixClient is the client used to communicate with Matrix servers.
 	matrixClient *matrix.Client
 
+	// postTracker tracks post creation timestamps to detect redundant edits
+	postTracker *PostTracker
+
 	backgroundJob *cluster.Job
 
 	// configurationLock synchronizes access to the configuration.
@@ -46,6 +49,8 @@ func (p *Plugin) OnActivate() error {
 	p.client = pluginapi.NewClient(p.API, p.Driver)
 
 	p.kvstore = kvstore.NewKVStore(p.client)
+
+	p.postTracker = NewPostTracker()
 
 	p.initMatrixClient()
 
