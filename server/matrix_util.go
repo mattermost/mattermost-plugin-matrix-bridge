@@ -125,26 +125,6 @@ func (p *Plugin) extractServerDomain(serverURL string) string {
 }
 
 
-// isMatrixContentUnchanged compares Matrix event content with new content to avoid redundant edits
-func (p *Plugin) isMatrixContentUnchanged(eventID, newContent string) bool {
-	if eventID == "" {
-		return false
-	}
-	
-	// Get the current Matrix event content
-	event, err := p.matrixClient.GetEvent(eventID)
-	if err != nil {
-		p.API.LogWarn("Failed to get Matrix event for content comparison", "event_id", eventID, "error", err)
-		return false
-	}
-	
-	// Extract body content from the event
-	if content, ok := event.Content["body"].(string); ok {
-		return content == newContent
-	}
-	
-	return false
-}
 
 // findAndDeleteFileMessage finds and deletes file attachment messages that are replies to the main post
 func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, mimetype, postEventID string) error {

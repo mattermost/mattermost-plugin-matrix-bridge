@@ -5,9 +5,9 @@ import type {Store, Action} from 'redux';
 
 import type {GlobalState} from '@mattermost/types/store';
 
+import RegistrationDownload from '@/components/admin_console_settings/registration_download';
 import manifest from '@/manifest';
 import type {PluginRegistry} from '@/types/mattermost-webapp';
-import RegistrationDownload from '@/components/admin_console_settings/registration_download';
 
 export default class Plugin {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars, @typescript-eslint/no-empty-function

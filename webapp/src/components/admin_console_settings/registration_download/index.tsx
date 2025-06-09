@@ -1,3 +1,6 @@
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
+
 import React, {useEffect, useState} from 'react';
 
 interface Props {
@@ -38,7 +41,7 @@ const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
             const hasAllValues = Boolean(
                 values.matrix_server_url?.trim() &&
                 values.matrix_as_token?.trim() &&
-                values.matrix_hs_token?.trim()
+                values.matrix_hs_token?.trim(),
             );
             setIsDownloadEnabled(hasAllValues);
         };
@@ -58,10 +61,12 @@ const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
         // Extract domain from server URL for namespace
         let domain = 'matrix.org';
         try {
-            const url = new URL(currentValues.matrix_server_url);
-            domain = url.hostname;
+            if (currentValues.matrix_server_url) {
+                const url = new URL(currentValues.matrix_server_url);
+                domain = url.hostname;
+            }
         } catch (e) {
-            console.warn('Could not parse server URL, using default domain');
+            // Could not parse server URL, using default domain
         }
 
         const registrationYaml = `id: "mattermost-bridge"
@@ -106,13 +111,13 @@ protocols: ["mattermost"]`;
     };
 
     return (
-        <div className="form-group">
-            <label className="control-label col-sm-4">
+        <div className='form-group'>
+            <label className='control-label col-sm-4'>
                 {label}
             </label>
-            <div className="col-sm-8">
+            <div className='col-sm-8'>
                 <button
-                    type="button"
+                    type='button'
                     style={buttonStyle}
                     onClick={generateRegistrationFile}
                     disabled={!isDownloadEnabled}
@@ -120,13 +125,16 @@ protocols: ["mattermost"]`;
                     {'Download Registration File'}
                 </button>
                 {helpText && (
-                    <div className="help-text">
+                    <div className='help-text'>
                         {helpText}
                     </div>
                 )}
                 {!isDownloadEnabled && (
-                    <div className="help-text" style={{color: '#999', marginTop: '8px'}}>
-                        Please fill in all Matrix configuration fields to enable download.
+                    <div
+                        className='help-text'
+                        style={{color: '#999', marginTop: '8px'}}
+                    >
+                        {'Please fill in all Matrix configuration fields to enable download.'}
                     </div>
                 )}
             </div>
