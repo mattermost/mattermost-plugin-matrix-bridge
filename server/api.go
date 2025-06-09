@@ -1,3 +1,4 @@
+// Package main implements the Mattermost Matrix Bridge plugin server component.
 package main
 
 import (
@@ -22,6 +23,7 @@ func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Req
 	router.ServeHTTP(w, r)
 }
 
+// MattermostAuthorizationRequired is a middleware that requires users to be logged in.
 func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Header.Get("Mattermost-User-ID")
@@ -34,6 +36,7 @@ func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler
 	})
 }
 
+// HelloWorld handles GET requests to /hello endpoint.
 func (p *Plugin) HelloWorld(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write([]byte("Hello, world!")); err != nil {
 		p.API.LogError("Failed to write response", "error", err)

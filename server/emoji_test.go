@@ -47,21 +47,21 @@ func TestEmojiConversion(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Remove colons if present
 			cleanName := strings.Trim(tt.input, ":")
-			
+
 			// Get emoji index from name
 			index, exists := emojiNameToIndex[cleanName]
 			if !exists {
 				t.Errorf("Emoji name %q not found in mapping", cleanName)
 				return
 			}
-			
+
 			// Get Unicode code point from index
 			unicodeHex, exists := emojiIndexToUnicode[index]
 			if !exists {
 				t.Errorf("Unicode mapping for index %d not found", index)
 				return
 			}
-			
+
 			// Convert hex string to Unicode character
 			result := hexToUnicode(unicodeHex)
 			if result != tt.expected {

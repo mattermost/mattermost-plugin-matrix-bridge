@@ -89,7 +89,7 @@ func (p *Plugin) OnDeactivate() error {
 	return nil
 }
 
-// This will execute the commands that were registered in the NewCommandHandler function.
+// ExecuteCommand executes the commands that were registered in the NewCommandHandler function.
 func (p *Plugin) ExecuteCommand(c *plugin.Context, args *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
 	response, err := p.commandClient.Handle(args)
 	if err != nil {
@@ -137,7 +137,6 @@ func (p *Plugin) registerForSharedChannels() error {
 	p.API.LogInfo("Successfully registered plugin for shared channels", "remote_id", remoteID)
 	return nil
 }
-
 
 // getConfigurationForCommand returns the configuration as the interface expected by command package
 func (p *Plugin) getConfigurationForCommand() command.Configuration {

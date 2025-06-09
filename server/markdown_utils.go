@@ -33,12 +33,12 @@ func convertMarkdownToHTML(markdown string) string {
 func convertTablesWithFormatting(content string) string {
 	// First convert tables structure
 	content = convertTables(content)
-	
+
 	// Then apply formatting to content inside table cells
 	content = convertBold(content)
 	content = convertItalic(content)
 	content = convertStrikethrough(content)
-	
+
 	return content
 }
 
@@ -52,7 +52,7 @@ func convertTables(content string) string {
 
 	for i, line := range lines {
 		line = strings.TrimSpace(line)
-		
+
 		// Skip empty lines
 		if line == "" {
 			if inTable {
@@ -65,7 +65,7 @@ func convertTables(content string) string {
 			result = append(result, line)
 			continue
 		}
-		
+
 		// Check if this is a table separator line
 		if isTableSeparator(line) {
 			if inTable {
@@ -74,7 +74,7 @@ func convertTables(content string) string {
 			}
 			continue // Skip separator lines
 		}
-		
+
 		// Check if this line looks like a table row (contains |)
 		if strings.Contains(line, "|") && len(line) > 1 {
 			// Check if next line is a separator to determine if current row is header
@@ -86,14 +86,14 @@ func convertTables(content string) string {
 					isHeaderTable = true
 				}
 			}
-			
+
 			// Start new table if not in one
 			if !inTable {
 				inTable = true
 				tableRows = []string{}
 				isHeaderTable = false
 			}
-			
+
 			// Add the row
 			tableRows = append(tableRows, processTableRow(line, isHeader))
 		} else {
@@ -107,12 +107,12 @@ func convertTables(content string) string {
 			result = append(result, line)
 		}
 	}
-	
+
 	// Handle case where content ends with a table
 	if inTable && len(tableRows) > 0 {
 		result = append(result, buildHTMLTable(tableRows, isHeaderTable))
 	}
-	
+
 	return strings.Join(result, "<br>")
 }
 
@@ -121,13 +121,13 @@ func isTableSeparator(line string) bool {
 	if !strings.Contains(line, "|") {
 		return false
 	}
-	
+
 	// Remove | characters and check if remaining chars are only - : and spaces
 	cleaned := strings.ReplaceAll(line, "|", "")
 	cleaned = strings.ReplaceAll(cleaned, " ", "")
 	cleaned = strings.ReplaceAll(cleaned, "-", "")
 	cleaned = strings.ReplaceAll(cleaned, ":", "")
-	
+
 	return len(cleaned) == 0 && strings.Contains(line, "-")
 }
 
@@ -136,18 +136,18 @@ func processTableRow(line string, isHeader bool) string {
 	// Remove leading/trailing pipes and split
 	line = strings.Trim(line, " |")
 	cells := strings.Split(line, "|")
-	
+
 	var htmlCells []string
 	tag := "td"
 	if isHeader {
 		tag = "th"
 	}
-	
+
 	for _, cell := range cells {
 		cell = strings.TrimSpace(cell)
 		htmlCells = append(htmlCells, "<"+tag+">"+cell+"</"+tag+">")
 	}
-	
+
 	return "<tr>" + strings.Join(htmlCells, "") + "</tr>"
 }
 
@@ -156,11 +156,11 @@ func buildHTMLTable(rows []string, hasHeader bool) string {
 	if len(rows) == 0 {
 		return ""
 	}
-	
+
 	var thead, tbody string
 	var tbodyRows []string
 	var headerRows []string
-	
+
 	// Separate header and body rows
 	for _, row := range rows {
 		if strings.Contains(row, "<th>") {
@@ -169,17 +169,17 @@ func buildHTMLTable(rows []string, hasHeader bool) string {
 			tbodyRows = append(tbodyRows, row)
 		}
 	}
-	
+
 	// Build thead if we have header rows
 	if len(headerRows) > 0 {
 		thead = "<thead>" + strings.Join(headerRows, "") + "</thead>"
 	}
-	
+
 	// Build tbody if we have data rows
 	if len(tbodyRows) > 0 {
 		tbody = "<tbody>" + strings.Join(tbodyRows, "") + "</tbody>"
 	}
-	
+
 	return "<table>" + thead + tbody + "</table>"
 }
 
@@ -221,10 +221,10 @@ func convertItalic(content string) string {
 	// Single asterisks - only match if not adjacent to other asterisks
 	// This regex matches single asterisks that don't have asterisks immediately before/after
 	content = regexp.MustCompile(`(^|[^\*])\*([^\*\n]+)\*([^\*]|$)`).ReplaceAllString(content, "$1<em>$2</em>$3")
-	
+
 	// Single underscores for italic (avoiding double underscores which are bold)
 	content = regexp.MustCompile(`(^|[^_])_([^_\n]+)_([^_]|$)`).ReplaceAllString(content, "$1<em>$2</em>$3")
-	
+
 	return content
 }
 
@@ -264,10 +264,10 @@ func convertLineBreaks(content string) string {
 func convertHeadings(content string) string {
 	lines := strings.Split(content, "<br>")
 	var result []string
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		
+
 		// Check if line starts with # (heading)
 		if strings.HasPrefix(line, "#") {
 			// Count the number of # characters
@@ -275,23 +275,23 @@ func convertHeadings(content string) string {
 			for i := 0; i < len(line) && line[i] == '#' && headingLevel < 6; i++ {
 				headingLevel++
 			}
-			
+
 			// Check if there's a space after the # characters (proper heading format)
 			if headingLevel > 0 && headingLevel < len(line) && line[headingLevel] == ' ' {
 				// Extract heading text (everything after "### ")
 				headingText := strings.TrimSpace(line[headingLevel+1:])
 				if headingText != "" {
 					// Convert to HTML heading
-					result = append(result, "<h"+string(rune('0'+headingLevel))+ ">"+headingText+"</h"+string(rune('0'+headingLevel))+">")
+					result = append(result, "<h"+string(rune('0'+headingLevel))+">"+headingText+"</h"+string(rune('0'+headingLevel))+">")
 					continue
 				}
 			}
 		}
-		
+
 		// Not a heading, add line as-is
 		result = append(result, line)
 	}
-	
+
 	return strings.Join(result, "<br>")
 }
 
@@ -300,7 +300,7 @@ func isValidURL(url string) bool {
 	if url == "" {
 		return false
 	}
-	
+
 	// Allow http, https, ftp, and mailto protocols
 	validProtocols := []string{"http://", "https://", "ftp://", "mailto:"}
 	for _, protocol := range validProtocols {
@@ -308,7 +308,7 @@ func isValidURL(url string) bool {
 			return true
 		}
 	}
-	
+
 	// Allow relative URLs that don't start with javascript: or other dangerous protocols
 	dangerousProtocols := []string{"javascript:", "data:", "vbscript:", "file:"}
 	urlLower := strings.ToLower(url)
@@ -317,7 +317,7 @@ func isValidURL(url string) bool {
 			return false
 		}
 	}
-	
+
 	// If it doesn't have a protocol but isn't dangerous, assume it's relative
 	return !strings.Contains(url, ":")
 }
@@ -327,15 +327,15 @@ func isValidURL(url string) bool {
 func convertMattermostToMatrix(mattermostContent string) (plainText string, htmlContent string) {
 	// Plain text is the original content with some cleanup
 	plainText = strings.TrimSpace(mattermostContent)
-	
+
 	// Convert to HTML
 	htmlContent = convertMarkdownToHTML(mattermostContent)
-	
-	// If HTML conversion resulted in the same as plain text (no formatting), 
+
+	// If HTML conversion resulted in the same as plain text (no formatting),
 	// return empty HTML to use plain text only
 	if htmlContent == html.EscapeString(plainText) {
 		htmlContent = ""
 	}
-	
+
 	return plainText, htmlContent
 }

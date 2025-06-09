@@ -1,3 +1,4 @@
+// Package command implements slash command handlers for the Matrix Bridge plugin.
 package command
 
 import (
@@ -54,6 +55,7 @@ func sanitizeShareName(name string) string {
 	return result
 }
 
+// Handler implements slash command processing for the Matrix Bridge plugin.
 type Handler struct {
 	client       *pluginapi.Client
 	kvstore      kvstore.KVStore
@@ -62,6 +64,7 @@ type Handler struct {
 	pluginAPI    plugin.API           // Access to plugin API methods like ShareChannel
 }
 
+// Command defines the interface for handling Matrix Bridge slash commands.
 type Command interface {
 	Handle(args *model.CommandArgs) (*model.CommandResponse, error)
 	executeHelloCommand(args *model.CommandArgs) *model.CommandResponse
@@ -71,7 +74,7 @@ type Command interface {
 const helloCommandTrigger = "hello"
 const matrixCommandTrigger = "matrix"
 
-// Register all your slash commands in the NewCommandHandler function.
+// NewCommandHandler creates and registers all slash commands for the Matrix Bridge plugin.
 func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrixClient *matrix.Client, getConfig func() Configuration, pluginAPI plugin.API) Command {
 	err := client.SlashCommand.Register(&model.Command{
 		Trigger:          helloCommandTrigger,
@@ -111,7 +114,7 @@ func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrix
 	}
 }
 
-// ExecuteCommand hook calls this method to execute the commands that were registered in the NewCommandHandler function.
+// Handle processes slash commands registered by the Matrix Bridge plugin.
 func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error) {
 	trigger := strings.TrimPrefix(strings.Fields(args.Command)[0], "/")
 	switch trigger {
@@ -420,7 +423,7 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 		// Handle different argument patterns:
 		// /matrix create
 		// /matrix create true/false
-		// /matrix create publish=true/false  
+		// /matrix create publish=true/false
 		// /matrix create "room name"
 		// /matrix create "room name" true/false
 		// /matrix create "room name" publish=true/false

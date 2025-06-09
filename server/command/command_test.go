@@ -70,7 +70,7 @@ func TestHelloCommand(t *testing.T) {
 	mockGetConfig := func() Configuration {
 		return &mockConfiguration{serverURL: "http://test.com"}
 	}
-	
+
 	cmdHandler := NewCommandHandler(env.client, mockKVStore, mockMatrixClient, mockGetConfig, env.api)
 
 	args := &model.CommandArgs{
@@ -246,7 +246,7 @@ func TestMatrixCreateCommandParsing(t *testing.T) {
 				assert.True(createCalled, "create command should have been called")
 				assert.Equal(tt.expectedRoomName, capturedRoomName, "room name should match expected")
 				assert.Equal(tt.expectedPublish, capturedPublish, "publish flag should match expected")
-				
+
 				// If room name is empty, the handler should use the channel name
 				if tt.expectedRoomName == "" {
 					assert.Contains(response.Text, "Matrix client not configured", "should fail gracefully when no matrix client")
@@ -272,7 +272,7 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 		getConfig:    originalHandler.getConfig,
 		pluginAPI:    originalHandler.pluginAPI,
 	}
-	
+
 	// Parse the command to extract create parameters
 	fields := strings.Fields(args.Command)
 	if len(fields) >= 2 && fields[1] == "create" {
@@ -309,12 +309,12 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 				roomName = strings.Join(fields[2:], " ")
 			}
 		}
-		
+
 		if t.onCreateRoom != nil {
 			t.onCreateRoom(roomName, publish)
 		}
 	}
-	
+
 	return originalHandler.Handle(args)
 }
 
@@ -328,7 +328,7 @@ func setupCommandRegistration(env *env) {
 		AutocompleteData: model.NewAutocompleteData("hello", "[@username]", "Username to say hello to"),
 	}).Return(nil)
 
-	// Matrix command registration  
+	// Matrix command registration
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
 	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix connection"))
 	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
@@ -502,22 +502,22 @@ func TestChannelNameFallback(t *testing.T) {
 
 	// Test with different channel configurations
 	testCases := []struct {
-		displayName    string
-		name          string
-		expectedName  string
+		displayName  string
+		name         string
+		expectedName string
 	}{
 		{
-			displayName:   "My Display Name",
+			displayName:  "My Display Name",
 			name:         "channel-name",
 			expectedName: "My Display Name",
 		},
 		{
-			displayName:   "",
+			displayName:  "",
 			name:         "channel-name",
 			expectedName: "channel-name",
 		},
 		{
-			displayName:   "",
+			displayName:  "",
 			name:         "",
 			expectedName: "test-channel-id", // Falls back to channel ID
 		},
@@ -554,7 +554,7 @@ func TestChannelNameFallback(t *testing.T) {
 
 		_, err := testHandler.Handle(args)
 		assert.Nil(err)
-		
+
 		// The captured room name should be empty (meaning use channel name)
 		// The actual room name resolution happens in executeCreateRoomCommand
 		assert.Equal("", capturedRoomName)

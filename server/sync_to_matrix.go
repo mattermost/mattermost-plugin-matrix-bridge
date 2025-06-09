@@ -82,12 +82,11 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 				p.postTracker.Delete(post.Id)
 				p.API.LogDebug("Skipping redundant edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 				return nil
-			} else {
-				// This is a genuine edit that happened after we added the Matrix event ID
-				// Remove the tracking entry since we're processing a real edit now
-				p.postTracker.Delete(post.Id)
-				p.API.LogDebug("Processing genuine edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 			}
+			// This is a genuine edit that happened after we added the Matrix event ID
+			// Remove the tracking entry since we're processing a real edit now
+			p.postTracker.Delete(post.Id)
+			p.API.LogDebug("Processing genuine edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 		}
 
 		// This is a genuine post edit - update the existing Matrix message
@@ -155,7 +154,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 
 	// Check for pending file attachments for this post
 	pendingFiles := p.pendingFiles.GetFiles(post.Id)
-	
+
 	// Send message as ghost user (formatted if HTML content exists, threaded if threadEventID is provided)
 	var sendResponse *matrix.SendEventResponse
 	if len(pendingFiles) > 0 {
@@ -169,12 +168,12 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 				"size":     file.Size,
 			})
 		}
-		
+
 		sendResponse, err = p.matrixClient.SendMessageWithFilesAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID, files)
 		if err != nil {
 			return errors.Wrap(err, "failed to send message with files as ghost user")
 		}
-		
+
 		p.API.LogInfo("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
 	} else {
 		// No files, send regular message

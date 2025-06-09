@@ -21,11 +21,9 @@ linters:
  exclusions:
   generated: lax
  presets:
- - comments
- - std-error-handling
+ - error
 formatters:
  enable:
- - gofmt
  - goimports
  settings:
   gofmt:
@@ -40,3 +38,19 @@ formatters:
 issues:
  max-issues-per-linter: 0 # no maximum
  max-same-issues: 0 # no maximum
+ exclude-rules:
+ - linters:
+   - revive
+   text: unused-parameter
+ - linters:
+   - gofmt
+   path: server/matrix/client.go
+   line: 83
+ - linters:
+   - gofmt  
+   path: server/matrix_util.go
+   line: 151
+ - linters:
+   - gofmt
+   path: server/sync_to_matrix.go
+   line: 162

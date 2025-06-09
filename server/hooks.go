@@ -47,7 +47,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 // OnSharedChannelsPing is called to check if the bridge is healthy and ready to process messages
 func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
 	config := p.getConfiguration()
-	
+
 	// If sync is disabled, we're still "healthy" but not actively processing
 	if !config.EnableSync {
 		p.API.LogDebug("Ping received but sync is disabled")
@@ -87,12 +87,12 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 
 	p.API.LogDebug("Received attachment sync", "file_id", fi.Id, "post_id", post.Id, "filename", fi.Name)
-	
+
 	// Check if this is a file deletion
 	if fi.DeleteAt != 0 {
 		return p.deleteFileFromMatrix(fi, post)
 	}
-	
+
 	// Get the Matrix room identifier for this channel
 	matrixRoomIdentifier, err := p.getMatrixRoomID(post.ChannelId)
 	if err != nil {
@@ -133,7 +133,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 // deleteFileFromMatrix handles deleting a file attachment from Matrix
 func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) error {
 	p.API.LogDebug("Deleting file attachment from Matrix", "file_id", fi.Id, "post_id", post.Id, "filename", fi.Name)
-	
+
 	// First, try to remove from pending files (if the post hasn't been synced yet)
 	if p.pendingFiles.RemoveFile(post.Id, fi.Id) {
 		p.API.LogInfo("Removed file from pending uploads", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
@@ -162,7 +162,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 	config := p.getConfiguration()
 	serverDomain := p.extractServerDomain(config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
-	
+
 	var postEventID string
 	if post.Props != nil {
 		if eventID, ok := post.Props[propertyKey].(string); ok {
@@ -210,7 +210,7 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, rc *model
 	}
 
 	p.API.LogDebug("Received profile image sync", "user_id", user.Id, "username", user.Username)
-	
+
 	// Check if we have a ghost user for this Mattermost user
 	ghostUserID, exists := p.getGhostUser(user.Id)
 	if !exists {

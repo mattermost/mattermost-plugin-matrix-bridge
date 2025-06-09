@@ -1,3 +1,4 @@
+// Package matrix provides Matrix client functionality for the Mattermost bridge.
 package matrix
 
 import (
@@ -16,6 +17,7 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Client represents a Matrix HTTP client for communicating with Matrix servers.
 type Client struct {
 	serverURL  string
 	asToken    string // Application Service token for all operations
@@ -23,6 +25,7 @@ type Client struct {
 	api        plugin.API
 }
 
+// MessageContent represents the content structure for Matrix messages.
 type MessageContent struct {
 	MsgType       string `json:"msgtype"`
 	Body          string `json:"body"`
@@ -30,10 +33,12 @@ type MessageContent struct {
 	FormattedBody string `json:"formatted_body,omitempty"`
 }
 
+// SendEventResponse represents the response from Matrix when sending events.
 type SendEventResponse struct {
 	EventID string `json:"event_id"`
 }
 
+// NewClient creates a new Matrix client with the given server URL and application service token.
 func NewClient(serverURL, asToken string, api plugin.API) *Client {
 	return &Client{
 		serverURL: serverURL,
@@ -45,6 +50,7 @@ func NewClient(serverURL, asToken string, api plugin.API) *Client {
 	}
 }
 
+// SendMessage sends a plain text message to a Matrix room.
 func (c *Client) SendMessage(roomID, message string) (*SendEventResponse, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return nil, errors.New("matrix client not configured")
@@ -58,6 +64,7 @@ func (c *Client) SendMessage(roomID, message string) (*SendEventResponse, error)
 	return c.sendEvent(roomID, "m.room.message", content)
 }
 
+// SendFormattedMessage sends a message with both plain text and HTML formatting to a Matrix room.
 func (c *Client) SendFormattedMessage(roomID, textBody, htmlBody string) (*SendEventResponse, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return nil, errors.New("matrix client not configured")
@@ -95,7 +102,7 @@ func (c *Client) sendEvent(roomID, eventType string, content interface{}) (*Send
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to send request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -167,7 +174,7 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to send redaction request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -210,7 +217,7 @@ func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to send relations request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -231,6 +238,7 @@ func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[
 	return response.Chunk, nil
 }
 
+// TestConnection verifies that the Matrix client can connect to the server.
 func (c *Client) TestConnection() error {
 	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
@@ -249,7 +257,7 @@ func (c *Client) TestConnection() error {
 	if err != nil {
 		return errors.Wrap(err, "failed to send request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -259,6 +267,7 @@ func (c *Client) TestConnection() error {
 	return nil
 }
 
+// JoinRoom joins a Matrix room using either a room ID or room alias.
 func (c *Client) JoinRoom(roomIdentifier string) error {
 	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
@@ -286,7 +295,7 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to send join request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -333,7 +342,7 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to send join request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -347,6 +356,8 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	return nil
 }
 
+// CreateRoom creates a new Matrix room with the specified name, topic, and settings.
+// Returns the room ID or alias on success.
 func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
@@ -423,7 +434,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 	if err != nil {
 		return "", errors.Wrap(err, "failed to send room creation request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -491,6 +502,7 @@ func (c *Client) extractServerDomain() (string, error) {
 
 // Ghost user management functions
 
+// GhostUser represents a Matrix user created by the application service to represent a Mattermost user.
 type GhostUser struct {
 	UserID   string `json:"user_id"`
 	Username string `json:"username"`
@@ -537,7 +549,7 @@ func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayNa
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to send registration request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -554,11 +566,10 @@ func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayNa
 		var errorResp struct {
 			Errcode string `json:"errcode"`
 		}
-		if err := json.Unmarshal(body, &errorResp); err == nil && errorResp.Errcode == "M_USER_IN_USE" {
-			// User already exists, that's fine
-		} else {
+		if err := json.Unmarshal(body, &errorResp); err != nil || errorResp.Errcode != "M_USER_IN_USE" {
 			return nil, fmt.Errorf("failed to create ghost user: %d %s", resp.StatusCode, string(body))
 		}
+		// User already exists, that's fine - continue with profile setup
 	}
 
 	// Set display name for the ghost user if provided
@@ -637,7 +648,7 @@ func (c *Client) SetDisplayName(userID, displayName string) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to send display name request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -685,7 +696,7 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to send avatar URL request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -723,7 +734,7 @@ func (c *Client) UploadMedia(data []byte, filename, contentType string) (string,
 	if err != nil {
 		return "", errors.Wrap(err, "failed to send media upload request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1030,7 +1041,7 @@ func (c *Client) sendEventAsUser(roomID, eventType string, content interface{}, 
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to send request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1049,6 +1060,7 @@ func (c *Client) sendEventAsUser(roomID, eventType string, content interface{}, 
 	return &response, nil
 }
 
+// ResolveRoomAlias resolves a Matrix room alias to its room ID.
 func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
@@ -1074,7 +1086,7 @@ func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
 	if err != nil {
 		return "", errors.Wrap(err, "failed to send alias resolution request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1095,8 +1107,8 @@ func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
 	return response.RoomID, nil
 }
 
-// MatrixEvent represents a Matrix event for content comparison
-type MatrixEvent struct {
+// MatrixEvent represents a Matrix event for content comparison.
+type MatrixEvent struct { //nolint:revive // MatrixEvent is clear and descriptive despite package name
 	Content map[string]interface{} `json:"content"`
 	Type    string                 `json:"type"`
 	Sender  string                 `json:"sender"`
@@ -1134,7 +1146,7 @@ func (c *Client) GetEventInRoom(roomID, eventID string) (*MatrixEvent, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to send event request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1185,7 +1197,7 @@ func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to send directory visibility request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1256,7 +1268,7 @@ func (c *Client) sendCustomEventAsUser(roomID, eventType string, content interfa
 	if err != nil {
 		return errors.Wrap(err, "failed to send request")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

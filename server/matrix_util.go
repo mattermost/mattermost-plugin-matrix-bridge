@@ -3,7 +3,7 @@ package main
 import (
 	"net/url"
 	"strings"
-	
+
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 )
@@ -28,7 +28,7 @@ func (p *Plugin) createGhostUser(mattermostUserID, mattermostUsername string) (s
 
 	// Get display name
 	displayName := user.GetDisplayName(model.ShowFullName)
-	
+
 	// Get user's avatar image data
 	var avatarData []byte
 	var avatarContentType string
@@ -123,8 +123,6 @@ func (p *Plugin) extractServerDomain(serverURL string) string {
 	// Replace dots and colons to make it safe for use in property keys
 	return strings.ReplaceAll(strings.ReplaceAll(hostname, ".", "_"), ":", "_")
 }
-
-
 
 // findAndDeleteFileMessage finds and deletes file attachment messages that are replies to the main post
 func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, mimetype, postEventID string) error {
@@ -308,6 +306,3 @@ func (p *Plugin) getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUse
 
 	return nil, errors.New("no file metadata found")
 }
-
-
-
