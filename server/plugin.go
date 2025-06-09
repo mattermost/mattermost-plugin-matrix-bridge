@@ -58,7 +58,7 @@ func (p *Plugin) OnActivate() error {
 
 	p.initMatrixClient()
 
-	p.commandClient = command.NewCommandHandler(p.client, p.kvstore, p.matrixClient, p.getConfigurationForCommand)
+	p.commandClient = command.NewCommandHandler(p.client, p.kvstore, p.matrixClient, p.getConfigurationForCommand, p.API)
 
 	if err := p.registerForSharedChannels(); err != nil {
 		p.API.LogWarn("Failed to register for shared channels", "error", err)
@@ -100,7 +100,7 @@ func (p *Plugin) ExecuteCommand(c *plugin.Context, args *model.CommandArgs) (*mo
 
 func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
-	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken)
+	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken, p.API)
 }
 
 func (p *Plugin) registerForSharedChannels() error {

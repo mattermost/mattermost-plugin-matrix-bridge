@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mattermost/mattermost/server/public/model"
+	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
@@ -16,11 +17,49 @@ type Configuration interface {
 	GetMatrixServerURL() string
 }
 
+// sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
+func sanitizeShareName(name string) string {
+	// Convert to lowercase and replace spaces with hyphens
+	shareName := strings.ToLower(name)
+	shareName = strings.ReplaceAll(shareName, " ", "-")
+	
+	// Remove any characters that aren't lowercase letters, numbers, hyphens, or underscores
+	var validShareName strings.Builder
+	for _, r := range shareName {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			validShareName.WriteRune(r)
+		}
+	}
+	
+	result := validShareName.String()
+	if result == "" {
+		return "matrixbridge" // fallback if no valid characters
+	}
+	
+	// Ensure it starts with alphanumeric
+	for len(result) > 0 && (result[0] == '-' || result[0] == '_') {
+		result = result[1:]
+	}
+	
+	// Ensure it ends with alphanumeric
+	for len(result) > 0 && (result[len(result)-1] == '-' || result[len(result)-1] == '_') {
+		result = result[:len(result)-1]
+	}
+	
+	// Final fallback check
+	if result == "" {
+		return "matrixbridge"
+	}
+	
+	return result
+}
+
 type Handler struct {
 	client       *pluginapi.Client
 	kvstore      kvstore.KVStore
 	matrixClient *matrix.Client
 	getConfig    func() Configuration // Function to get current plugin configuration
+	pluginAPI    plugin.API            // Access to plugin API methods like ShareChannel
 }
 
 type Command interface {
@@ -33,7 +72,7 @@ const helloCommandTrigger = "hello"
 const matrixCommandTrigger = "matrix"
 
 // Register all your slash commands in the NewCommandHandler function.
-func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrixClient *matrix.Client, getConfig func() Configuration) Command {
+func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrixClient *matrix.Client, getConfig func() Configuration, pluginAPI plugin.API) Command {
 	err := client.SlashCommand.Register(&model.Command{
 		Trigger:          helloCommandTrigger,
 		AutoComplete:     true,
@@ -68,6 +107,7 @@ func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrix
 		kvstore:      kvstore,
 		matrixClient: matrixClient,
 		getConfig:    getConfig,
+		pluginAPI:    pluginAPI,
 	}
 }
 
@@ -150,9 +190,35 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	
 	c.client.Log.Info("Channel mapping saved", "channel_id", args.ChannelId, "channel_name", channelName, "room_identifier", roomIdentifier)
 	
+	// Automatically share the channel to enable sync
+	shareStatus := ""
+	sharedChannel := &model.SharedChannel{
+		ChannelId: args.ChannelId,
+		TeamId: args.TeamId,
+		Home: true,
+		ReadOnly: false,
+		ShareName: sanitizeShareName(channelName),
+		ShareDisplayName: channelName,
+		SharePurpose: fmt.Sprintf("Mapped to Matrix room: %s", roomIdentifier),
+		ShareHeader: "",
+		CreatorId: args.UserId,
+		CreateAt: model.GetMillis(),
+		UpdateAt: model.GetMillis(),
+		RemoteId: "",
+	}
+	
+	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
+	if shareErr != nil {
+		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
+		shareStatus = "\n\n⚠️ **Note:** Failed to automatically enable channel sharing. You may need to manually enable shared channels for this channel to start syncing."
+	} else {
+		c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
+		shareStatus = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
+	}
+	
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
-		Text:         fmt.Sprintf("✅ **Mapping Saved**\n\n**Channel:** %s\n**Matrix Room:** `%s`%s\n\nMessages from this channel will now sync to Matrix when shared channels are enabled.", channelName, roomIdentifier, joinStatus),
+		Text:         fmt.Sprintf("✅ **Mapping Saved**\n\n**Channel:** %s\n**Matrix Room:** `%s`%s%s", channelName, roomIdentifier, joinStatus, shareStatus),
 	}
 }
 
@@ -188,7 +254,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		}
 	}
 
-	c.client.Log.Info("Created Matrix room", "room_id", roomID, "room_name", roomName)
+	c.client.Log.Info("Created Matrix room and published to directory", "room_id", roomID, "room_name", roomName)
 
 	// Automatically map the created room to this channel
 	mappingKey := "channel_mapping_" + args.ChannelId
@@ -200,9 +266,35 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		}
 	}
 
+	// Automatically share the channel to enable sync
+	shareStatus := ""
+	sharedChannel := &model.SharedChannel{
+		ChannelId: args.ChannelId,
+		TeamId: args.TeamId,
+		Home: true,
+		ReadOnly: false,
+		ShareName: sanitizeShareName(channelName),
+		ShareDisplayName: channelName,
+		SharePurpose: topic,
+		ShareHeader: "",
+		CreatorId: args.UserId,
+		CreateAt: model.GetMillis(),
+		UpdateAt: model.GetMillis(),
+		RemoteId: "",
+	}
+	
+	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
+	if shareErr != nil {
+		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_id", roomID)
+		shareStatus = "\n\n⚠️ **Note:** Failed to automatically enable channel sharing. You may need to manually enable shared channels for this channel to start syncing."
+	} else {
+		c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId, "room_id", roomID)
+		shareStatus = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
+	}
+
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
-		Text:         fmt.Sprintf("✅ **Matrix Room Created & Mapped**\n\n**Room Name:** %s\n**Room ID:** `%s`\n**Channel:** %s\n\nThe bridge user is automatically joined as the room creator. Messages from this channel will now sync to Matrix when shared channels are enabled.", roomName, roomID, channelName),
+		Text:         fmt.Sprintf("✅ **Matrix Room Created & Mapped**\n\n**Room Name:** %s\n**Room ID:** `%s`\n**Channel:** %s\n\nThe bridge user is automatically joined as the room creator.%s", roomName, roomID, channelName, shareStatus),
 	}
 }
 

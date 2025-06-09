@@ -76,6 +76,8 @@ namespaces:
   aliases:
     - exclusive: true
       regex: "#_mattermost_.*:${domain}"
+    - exclusive: false
+      regex: "#[a-z0-9-]+:${domain}"
   rooms: []
 rate_limited: false
 protocols: ["mattermost"]`;

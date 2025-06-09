@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/pkg/errors"
 )
 
@@ -19,6 +20,7 @@ type Client struct {
 	serverURL  string
 	asToken    string // Application Service token for all operations
 	httpClient *http.Client
+	api        plugin.API
 }
 
 type MessageContent struct {
@@ -32,13 +34,14 @@ type SendEventResponse struct {
 	EventID string `json:"event_id"`
 }
 
-func NewClient(serverURL, asToken string) *Client {
+func NewClient(serverURL, asToken string, api plugin.API) *Client {
 	return &Client{
 		serverURL: serverURL,
 		asToken:   asToken,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		api: api,
 	}
 }
 
@@ -349,9 +352,12 @@ func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 		return "", errors.New("matrix client not configured")
 	}
 
-	// Create room alias from name
+	c.api.LogDebug("Creating Matrix room", "name", name, "topic", topic, "server_domain", serverDomain)
+
+	// Create room alias without namespace prefix for public discoverability
 	alias := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
 	alias = strings.ReplaceAll(alias, "_", "-")
+	// Use clean alias for public room directory appearance
 	roomAlias := ""
 	if serverDomain != "" {
 		roomAlias = "#" + alias + ":" + serverDomain
@@ -362,6 +368,27 @@ func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 		"topic":      topic,
 		"preset":     "public_chat",
 		"visibility": "public",
+		// Explicitly set room version and directory visibility
+		"room_version": "10",
+		"initial_state": []map[string]interface{}{
+			{
+				"type":      "m.room.guest_access",
+				"state_key": "",
+				"content": map[string]interface{}{
+					"guest_access": "can_join",
+				},
+			},
+			{
+				"type":      "m.room.history_visibility",
+				"state_key": "",
+				"content": map[string]interface{}{
+					"history_visibility": "world_readable",
+				},
+			},
+		},
+		"creation_content": map[string]interface{}{
+			"m.federate": true,
+		},
 	}
 
 	// Add room alias if we have a server domain
@@ -396,6 +423,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		c.api.LogError("Matrix room creation failed", "status_code", resp.StatusCode, "response", string(body), "room_name", name)
 		return "", fmt.Errorf("failed to create room: %d %s", resp.StatusCode, string(body))
 	}
 
@@ -405,6 +433,21 @@ func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", errors.Wrap(err, "failed to unmarshal room creation response")
 	}
+
+	// Explicitly publish the room to the public directory for discoverability
+	if err := c.PublishRoomToDirectory(response.RoomID, true); err != nil {
+		// Log warning but don't fail room creation - the room was created successfully
+		c.api.LogWarn("Failed to publish room to public directory", "room_id", response.RoomID, "error", err)
+	} else {
+		c.api.LogDebug("Successfully published room to public directory", "room_id", response.RoomID)
+	}
+
+	// Log successful room creation
+	returnValue := response.RoomID
+	if roomAlias != "" {
+		returnValue = roomAlias
+	}
+	c.api.LogInfo("Matrix room created successfully", "room_id", response.RoomID, "room_alias", roomAlias, "return_value", returnValue)
 
 	// Return the room alias if we created one, otherwise return the room ID
 	if roomAlias != "" {
@@ -886,6 +929,8 @@ func (c *Client) SendMessageWithFilesAsGhost(roomID, message, htmlMessage, threa
 		return nil, errors.New("application service token not configured")
 	}
 
+	c.api.LogDebug("Sending message with files as ghost user", "room_id", roomID, "ghost_user_id", ghostUserID, "file_count", len(files), "has_text", message != "" || htmlMessage != "")
+
 	// If no files, just send regular message
 	if len(files) == 0 {
 		return c.SendMessageAsGhost(roomID, message, htmlMessage, threadEventID, ghostUserID)
@@ -1095,6 +1140,52 @@ func (c *Client) GetEventInRoom(roomID, eventID string) (*MatrixEvent, error) {
 	return &event, nil
 }
 
+// PublishRoomToDirectory explicitly publishes a room to the public directory
+func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
+	if c.asToken == "" {
+		return errors.New("application service token not configured")
+	}
+
+	requestURL := c.serverURL + "/_matrix/client/v3/directory/list/room/" + url.PathEscape(roomID)
+	
+	content := map[string]interface{}{
+		"visibility": "public",
+	}
+	if !publish {
+		content["visibility"] = "private"
+	}
+
+	jsonData, err := json.Marshal(content)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal directory visibility content")
+	}
+
+	req, err := http.NewRequest("PUT", requestURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return errors.Wrap(err, "failed to create directory visibility request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send directory visibility request")
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read directory visibility response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set directory visibility: %d %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 // AddFileMetadataToMessage adds custom metadata to a message containing file attachment event IDs
 func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEventIDs []string, ghostUserID string) error {
 	if c.asToken == "" {
@@ -1119,8 +1210,8 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 		return errors.Wrapf(err, "failed to send file metadata event for message %s with %d files", messageEventID, len(fileEventIDs))
 	}
 	
-	// Log successful metadata creation (using fmt.Printf for immediate visibility)
-	fmt.Printf("DEBUG: Successfully created file metadata event for message %s with file event IDs: %v\n", messageEventID, fileEventIDs)
+	// Log successful metadata creation
+	c.api.LogDebug("Successfully created file metadata event", "message_event_id", messageEventID, "file_count", len(fileEventIDs), "file_event_ids", fileEventIDs)
 	return nil
 }
 

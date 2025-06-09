@@ -65,12 +65,12 @@ func TestHelloCommand(t *testing.T) {
 
 	// Create mock dependencies
 	mockKVStore := kvstore.NewKVStore(env.client)
-	mockMatrixClient := matrix.NewClient("http://test.com", "test_token")
+	mockMatrixClient := matrix.NewClient("http://test.com", "test_token", env.api)
 	mockGetConfig := func() Configuration {
 		return &mockConfiguration{serverURL: "http://test.com"}
 	}
 	
-	cmdHandler := NewCommandHandler(env.client, mockKVStore, mockMatrixClient, mockGetConfig)
+	cmdHandler := NewCommandHandler(env.client, mockKVStore, mockMatrixClient, mockGetConfig, env.api)
 
 	args := &model.CommandArgs{
 		Command: "/hello world",
