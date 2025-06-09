@@ -22,7 +22,7 @@ func sanitizeShareName(name string) string {
 	// Convert to lowercase and replace spaces with hyphens
 	shareName := strings.ToLower(name)
 	shareName = strings.ReplaceAll(shareName, " ", "-")
-	
+
 	// Remove any characters that aren't lowercase letters, numbers, hyphens, or underscores
 	var validShareName strings.Builder
 	for _, r := range shareName {
@@ -30,27 +30,27 @@ func sanitizeShareName(name string) string {
 			validShareName.WriteRune(r)
 		}
 	}
-	
+
 	result := validShareName.String()
 	if result == "" {
 		return "matrixbridge" // fallback if no valid characters
 	}
-	
+
 	// Ensure it starts with alphanumeric
 	for len(result) > 0 && (result[0] == '-' || result[0] == '_') {
 		result = result[1:]
 	}
-	
+
 	// Ensure it ends with alphanumeric
 	for len(result) > 0 && (result[len(result)-1] == '-' || result[len(result)-1] == '_') {
 		result = result[:len(result)-1]
 	}
-	
+
 	// Final fallback check
 	if result == "" {
 		return "matrixbridge"
 	}
-	
+
 	return result
 }
 
@@ -59,7 +59,7 @@ type Handler struct {
 	kvstore      kvstore.KVStore
 	matrixClient *matrix.Client
 	getConfig    func() Configuration // Function to get current plugin configuration
-	pluginAPI    plugin.API            // Access to plugin API methods like ShareChannel
+	pluginAPI    plugin.API           // Access to plugin API methods like ShareChannel
 }
 
 type Command interface {
@@ -86,7 +86,7 @@ func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrix
 
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
 	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix connection"))
-	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name]", "Create a new Matrix room and map to current channel"))
+	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
 	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", "Show bridge status"))
@@ -148,7 +148,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 			Text:         "Invalid room identifier format. Use either:\n• Room alias: `#roomname:server.com` (preferred for joining)\n• Room ID: `!roomid:server.com`",
 		}
 	}
-	
+
 	// Get channel info for display
 	channel, appErr := c.client.Channel.Get(args.ChannelId)
 	channelName := args.ChannelId
@@ -158,7 +158,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 			channelName = channel.Name
 		}
 	}
-	
+
 	// Try to join the Matrix room automatically
 	var joinStatus string
 	if c.matrixClient != nil {
@@ -187,26 +187,26 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 			Text:         "❌ Failed to save channel mapping. Check plugin logs for details.",
 		}
 	}
-	
+
 	c.client.Log.Info("Channel mapping saved", "channel_id", args.ChannelId, "channel_name", channelName, "room_identifier", roomIdentifier)
-	
+
 	// Automatically share the channel to enable sync
 	shareStatus := ""
 	sharedChannel := &model.SharedChannel{
-		ChannelId: args.ChannelId,
-		TeamId: args.TeamId,
-		Home: true,
-		ReadOnly: false,
-		ShareName: sanitizeShareName(channelName),
+		ChannelId:        args.ChannelId,
+		TeamId:           args.TeamId,
+		Home:             true,
+		ReadOnly:         false,
+		ShareName:        sanitizeShareName(channelName),
 		ShareDisplayName: channelName,
-		SharePurpose: fmt.Sprintf("Mapped to Matrix room: %s", roomIdentifier),
-		ShareHeader: "",
-		CreatorId: args.UserId,
-		CreateAt: model.GetMillis(),
-		UpdateAt: model.GetMillis(),
-		RemoteId: "",
+		SharePurpose:     fmt.Sprintf("Mapped to Matrix room: %s", roomIdentifier),
+		ShareHeader:      "",
+		CreatorId:        args.UserId,
+		CreateAt:         model.GetMillis(),
+		UpdateAt:         model.GetMillis(),
+		RemoteId:         "",
 	}
-	
+
 	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
 	if shareErr != nil {
 		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
@@ -215,14 +215,14 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
 		shareStatus = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
 	}
-	
+
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
 		Text:         fmt.Sprintf("✅ **Mapping Saved**\n\n**Channel:** %s\n**Matrix Room:** `%s`%s%s", channelName, roomIdentifier, joinStatus, shareStatus),
 	}
 }
 
-func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName string) *model.CommandResponse {
+func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName string, publish bool) *model.CommandResponse {
 	if c.matrixClient == nil {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
@@ -230,7 +230,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		}
 	}
 
-	// Get channel info for room topic
+	// Get channel info for room name (if not provided) and topic
 	channel, appErr := c.client.Channel.Get(args.ChannelId)
 	channelName := args.ChannelId
 	if appErr == nil {
@@ -240,12 +240,17 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		}
 	}
 
+	// Use channel name as room name if not provided
+	if roomName == "" {
+		roomName = channelName
+	}
+
 	topic := fmt.Sprintf("Matrix room for Mattermost channel: %s", channelName)
 
 	// Create the Matrix room
 	// Extract server domain from Matrix server URL
 	serverDomain := c.extractServerDomain()
-	roomID, err := c.matrixClient.CreateRoom(roomName, topic, serverDomain)
+	roomID, err := c.matrixClient.CreateRoom(roomName, topic, serverDomain, publish)
 	if err != nil {
 		c.client.Log.Error("Failed to create Matrix room", "error", err, "room_name", roomName)
 		return &model.CommandResponse{
@@ -269,20 +274,20 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	// Automatically share the channel to enable sync
 	shareStatus := ""
 	sharedChannel := &model.SharedChannel{
-		ChannelId: args.ChannelId,
-		TeamId: args.TeamId,
-		Home: true,
-		ReadOnly: false,
-		ShareName: sanitizeShareName(channelName),
+		ChannelId:        args.ChannelId,
+		TeamId:           args.TeamId,
+		Home:             true,
+		ReadOnly:         false,
+		ShareName:        sanitizeShareName(channelName),
 		ShareDisplayName: channelName,
-		SharePurpose: topic,
-		ShareHeader: "",
-		CreatorId: args.UserId,
-		CreateAt: model.GetMillis(),
-		UpdateAt: model.GetMillis(),
-		RemoteId: "",
+		SharePurpose:     topic,
+		ShareHeader:      "",
+		CreatorId:        args.UserId,
+		CreateAt:         model.GetMillis(),
+		UpdateAt:         model.GetMillis(),
+		RemoteId:         "",
 	}
-	
+
 	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
 	if shareErr != nil {
 		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_id", roomID)
@@ -292,16 +297,24 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		shareStatus = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
 	}
 
+	// Build status message based on publish parameter
+	publishStatus := ""
+	if publish {
+		publishStatus = "\n**Directory:** Published to public directory"
+	} else {
+		publishStatus = "\n**Directory:** Not published (private room)"
+	}
+
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
-		Text:         fmt.Sprintf("✅ **Matrix Room Created & Mapped**\n\n**Room Name:** %s\n**Room ID:** `%s`\n**Channel:** %s\n\nThe bridge user is automatically joined as the room creator.%s", roomName, roomID, channelName, shareStatus),
+		Text:         fmt.Sprintf("✅ **Matrix Room Created & Mapped**\n\n**Room Name:** %s\n**Room ID:** `%s`\n**Channel:** %s%s\n\nThe bridge user is automatically joined as the room creator.%s", roomName, roomID, channelName, publishStatus, shareStatus),
 	}
 }
 
 func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.CommandResponse {
 	var responseText strings.Builder
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
-	
+
 	// Use ListKeys to get all channel mapping keys
 	keys, err := c.kvstore.ListKeys(0, 1000) // Get up to 1000 mappings
 	if err != nil {
@@ -312,11 +325,11 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 			Text:         responseText.String(),
 		}
 	}
-	
+
 	// Filter for channel mapping keys and build mappings
 	mappings := make(map[string]string)
 	channelMappingPrefix := "channel_mapping_"
-	
+
 	for _, key := range keys {
 		if strings.HasPrefix(key, channelMappingPrefix) {
 			channelID := strings.TrimPrefix(key, channelMappingPrefix)
@@ -326,11 +339,12 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 			}
 		}
 	}
-	
+
 	if len(mappings) == 0 {
 		responseText.WriteString("No channel mappings found.\n\n")
 		responseText.WriteString("**Get Started:**\n")
-		responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room and map to current channel\n")
+		responseText.WriteString("• `/matrix create` - Create new Matrix room using channel name and map to current channel\n")
+		responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room with custom name and map to current channel\n")
 		responseText.WriteString("• `/matrix map [room_alias|room_id]` - Map current channel to existing Matrix room\n")
 	} else {
 		// Show current channel first if it has a mapping
@@ -346,7 +360,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 			}
 			responseText.WriteString(fmt.Sprintf("**Current Channel:** %s → `%s`\n\n", channelName, currentChannelMapping))
 		}
-		
+
 		// Show all mappings
 		responseText.WriteString(fmt.Sprintf("**All Mappings (%d total):**\n", len(mappings)))
 		for channelID, roomID := range mappings {
@@ -359,22 +373,23 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 					channelName = channel.Name
 				}
 			}
-			
+
 			// Mark current channel
 			currentMarker := ""
 			if channelID == args.ChannelId {
 				currentMarker = " *(current)*"
 			}
-			
+
 			responseText.WriteString(fmt.Sprintf("• %s → `%s`%s\n", channelName, roomID, currentMarker))
 		}
 	}
-	
+
 	responseText.WriteString("\n**Commands:**\n")
 	responseText.WriteString("• `/matrix map [room_alias|room_id]` - Map current channel to Matrix room\n")
-	responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room and map to current channel\n")
+	responseText.WriteString("• `/matrix create` - Create new Matrix room using channel name and map to current channel\n")
+	responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room with custom name and map to current channel\n")
 	responseText.WriteString("• `/matrix status` - Check bridge status\n")
-	
+
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
 		Text:         responseText.String(),
@@ -398,14 +413,56 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 			Text:         "Matrix connection test - check plugin logs for results",
 		}
 	case "create":
-		if len(fields) < 3 {
-			return &model.CommandResponse{
-				ResponseType: model.CommandResponseTypeEphemeral,
-				Text:         "Usage: /matrix create [room_name]",
+		// Parse room name and optional publish parameter
+		var roomName string
+		publish := false // don't publish rooms unless user explicitly requests it
+
+		// Handle different argument patterns:
+		// /matrix create
+		// /matrix create true/false
+		// /matrix create publish=true/false  
+		// /matrix create "room name"
+		// /matrix create "room name" true/false
+		// /matrix create "room name" publish=true/false
+
+		if len(fields) == 2 {
+			// Just "/matrix create" - use channel name, no publish
+			roomName = ""
+		} else if len(fields) == 3 {
+			// Check if it's a publish parameter or room name
+			arg := fields[2]
+			if arg == "true" || arg == "false" || strings.HasPrefix(arg, "publish=") {
+				// It's a publish parameter, use channel name for room
+				roomName = ""
+				if strings.HasPrefix(arg, "publish=") {
+					publishValue := strings.TrimPrefix(arg, "publish=")
+					publish = publishValue == "true"
+				} else {
+					publish = arg == "true"
+				}
+			} else {
+				// It's a room name
+				roomName = arg
+			}
+		} else {
+			// Multiple arguments - check if last is publish parameter
+			lastField := fields[len(fields)-1]
+			if lastField == "true" || lastField == "false" || strings.HasPrefix(lastField, "publish=") {
+				if strings.HasPrefix(lastField, "publish=") {
+					publishValue := strings.TrimPrefix(lastField, "publish=")
+					publish = publishValue == "true"
+				} else {
+					publish = lastField == "true"
+				}
+				// Room name is everything except the last field
+				roomName = strings.Join(fields[2:len(fields)-1], " ")
+			} else {
+				// No publish parameter, room name is everything after "create"
+				roomName = strings.Join(fields[2:], " ")
 			}
 		}
-		roomName := strings.Join(fields[2:], " ") // Allow multi-word room names
-		return c.executeCreateRoomCommand(args, roomName)
+
+		return c.executeCreateRoomCommand(args, roomName, publish)
 	case "map":
 		if len(fields) < 3 {
 			return &model.CommandResponse{

@@ -85,7 +85,12 @@ namespaces:
       regex: "#[a-z0-9-]+:${domain}"
   rooms: []
 rate_limited: false
-protocols: ["mattermost"]`;
+protocols: ["mattermost"]
+# Allow the application service to manage room directory visibility
+de.sorunome.msc2409.push_ephemeral: true
+# Alternative approach: explicitly grant room directory permissions
+permissions:
+  - "m.room.directory"`;
 
         // Create and download the file
         const blob = new Blob([registrationYaml], {type: 'text/yaml'});

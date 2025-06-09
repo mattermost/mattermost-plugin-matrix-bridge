@@ -24,9 +24,9 @@ type Client struct {
 }
 
 type MessageContent struct {
-	MsgType string `json:"msgtype"`
-	Body    string `json:"body"`
-	Format  string `json:"format,omitempty"`
+	MsgType       string `json:"msgtype"`
+	Body          string `json:"body"`
+	Format        string `json:"format,omitempty"`
 	FormattedBody string `json:"formatted_body,omitempty"`
 }
 
@@ -140,11 +140,11 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 
 	// Empty content for redaction
 	content := map[string]interface{}{}
-	
+
 	txnID := uuid.New().String()
 	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "redact", eventID, txnID)
 	reqURL := c.serverURL + endpoint
-	
+
 	// Add user_id query parameter for impersonation
 	if ghostUserID != "" {
 		reqURL += "?user_id=" + url.QueryEscape(ghostUserID)
@@ -193,7 +193,7 @@ func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[
 	}
 
 	requestURL := c.serverURL + "/_matrix/client/v1/rooms/" + url.PathEscape(roomID) + "/relations/" + url.PathEscape(eventID)
-	
+
 	// Add user_id query parameter for impersonation
 	if userID != "" {
 		requestURL += "?user_id=" + url.QueryEscape(userID)
@@ -237,7 +237,7 @@ func (c *Client) TestConnection() error {
 	}
 
 	url := c.serverURL + "/_matrix/client/v3/account/whoami"
-	
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return errors.Wrap(err, "failed to create request")
@@ -347,7 +347,7 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	return nil
 }
 
-func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
+func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
 	}
@@ -363,30 +363,38 @@ func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 		roomAlias = "#" + alias + ":" + serverDomain
 	}
 
-	roomData := map[string]interface{}{
+	roomData := map[string]any{
 		"name":       name,
 		"topic":      topic,
 		"preset":     "public_chat",
 		"visibility": "public",
+		"is_direct":  false, // Explicitly mark as not a direct message room
 		// Explicitly set room version and directory visibility
 		"room_version": "10",
-		"initial_state": []map[string]interface{}{
+		"initial_state": []map[string]any{
 			{
 				"type":      "m.room.guest_access",
 				"state_key": "",
-				"content": map[string]interface{}{
+				"content": map[string]any{
 					"guest_access": "can_join",
 				},
 			},
 			{
 				"type":      "m.room.history_visibility",
 				"state_key": "",
-				"content": map[string]interface{}{
+				"content": map[string]any{
 					"history_visibility": "world_readable",
 				},
 			},
+			{
+				"type":      "m.room.join_rules",
+				"state_key": "",
+				"content": map[string]any{
+					"join_rule": "public",
+				},
+			},
 		},
-		"creation_content": map[string]interface{}{
+		"creation_content": map[string]any{
 			"m.federate": true,
 		},
 	}
@@ -434,12 +442,18 @@ func (c *Client) CreateRoom(name, topic, serverDomain string) (string, error) {
 		return "", errors.Wrap(err, "failed to unmarshal room creation response")
 	}
 
-	// Explicitly publish the room to the public directory for discoverability
-	if err := c.PublishRoomToDirectory(response.RoomID, true); err != nil {
-		// Log warning but don't fail room creation - the room was created successfully
-		c.api.LogWarn("Failed to publish room to public directory", "room_id", response.RoomID, "error", err)
+	// Publish to directory based on the publish parameter
+	if publish {
+		c.api.LogDebug("Publishing room to public directory", "room_id", response.RoomID)
+		if err := c.PublishRoomToDirectory(response.RoomID, true); err != nil {
+			// Log warning but don't fail room creation - the room was created successfully
+			c.api.LogWarn("Failed to publish room to public directory", "room_id", response.RoomID, "error", err)
+			c.api.LogInfo("Room created but not published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
+		} else {
+			c.api.LogInfo("Room created and published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
+		}
 	} else {
-		c.api.LogDebug("Successfully published room to public directory", "room_id", response.RoomID)
+		c.api.LogInfo("Room created (not published to directory)", "room_id", response.RoomID, "room_alias", roomAlias)
 	}
 
 	// Log successful room creation
@@ -571,7 +585,7 @@ func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayNa
 				Username: ghostUsername,
 			}, errors.Wrap(err, "ghost user created but failed to upload avatar")
 		}
-		
+
 		// Set the uploaded avatar
 		err = c.SetAvatarURL(ghostUserID, mxcURI)
 		if err != nil {
@@ -776,7 +790,7 @@ func (c *Client) UpdateGhostUserAvatar(userID string, avatarData []byte, avatarC
 	if err != nil {
 		return errors.Wrap(err, "failed to upload avatar")
 	}
-	
+
 	// Set the uploaded avatar
 	err = c.SetAvatarURL(userID, mxcURI)
 	if err != nil {
@@ -834,8 +848,8 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 	}
 
 	content := map[string]interface{}{
-		"msgtype": "m.text",
-		"body":    " * " + newMessage, // Fallback for clients that don't support edits
+		"msgtype":       "m.text",
+		"body":          " * " + newMessage, // Fallback for clients that don't support edits
 		"m.new_content": newContent,
 		"m.relates_to": map[string]interface{}{
 			"rel_type": "m.replace",
@@ -949,7 +963,7 @@ func (c *Client) SendMessageWithFilesAsGhost(roomID, message, htmlMessage, threa
 
 	// For messages with text + files, send the text message first, then files as replies
 	// This creates a visually grouped conversation in Matrix clients
-	
+
 	// Send the text message first
 	textResponse, err := c.SendMessageAsGhost(roomID, message, htmlMessage, threadEventID, ghostUserID)
 	if err != nil {
@@ -969,7 +983,7 @@ func (c *Client) SendMessageWithFilesAsGhost(roomID, message, htmlMessage, threa
 			// Log error but continue with other files
 			return textResponse, errors.Wrapf(err, "failed to send file attachment %s", filename)
 		}
-		
+
 		if fileResponse != nil && fileResponse.EventID != "" {
 			fileEventIDs = append(fileEventIDs, fileResponse.EventID)
 		}
@@ -987,7 +1001,6 @@ func (c *Client) SendMessageWithFilesAsGhost(roomID, message, htmlMessage, threa
 	// Return the text message event ID as the primary event
 	return textResponse, nil
 }
-
 
 // sendEventAsUser sends an event as a specific user (using application service impersonation)
 func (c *Client) sendEventAsUser(roomID, eventType string, content interface{}, userID string) (*SendEventResponse, error) {
@@ -1147,7 +1160,7 @@ func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
 	}
 
 	requestURL := c.serverURL + "/_matrix/client/v3/directory/list/room/" + url.PathEscape(roomID)
-	
+
 	content := map[string]interface{}{
 		"visibility": "public",
 	}
@@ -1195,7 +1208,7 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 	// Create a custom event to store the file attachment metadata
 	// We'll use a custom event type that won't be displayed by Matrix clients
 	content := map[string]interface{}{
-		"file_attachments": fileEventIDs,
+		"file_attachments":   fileEventIDs,
 		"relates_to_message": messageEventID,
 		// Add proper Matrix relation so it's returned by the relations API
 		"m.relates_to": map[string]interface{}{
@@ -1209,7 +1222,7 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 	if err != nil {
 		return errors.Wrapf(err, "failed to send file metadata event for message %s with %d files", messageEventID, len(fileEventIDs))
 	}
-	
+
 	// Log successful metadata creation
 	c.api.LogDebug("Successfully created file metadata event", "message_event_id", messageEventID, "file_count", len(fileEventIDs), "file_event_ids", fileEventIDs)
 	return nil
