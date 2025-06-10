@@ -30,8 +30,7 @@ type PluginAccessor interface {
 	GetConfiguration() Configuration
 
 	// Ghost user management
-	GetGhostUser(mattermostUserID string) (string, bool)
-	CreateGhostUser(mattermostUserID, mattermostUsername string) (string, error)
+	CreateOrGetGhostUser(mattermostUserID, mattermostUsername string) (string, error)
 
 	// Mattermost API access
 	GetPluginAPI() plugin.API
@@ -204,31 +203,18 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 				c.client.Log.Warn("Failed to get command issuer for ghost user join", "error", appErr, "user_id", args.UserId)
 				joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
 			} else {
-				// Get or create ghost user for the command issuer
-				ghostUserID, exists := c.plugin.GetGhostUser(user.Id)
-				if !exists {
-					var err error
-					ghostUserID, err = c.plugin.CreateGhostUser(user.Id, user.Username)
-					if err != nil {
-						c.client.Log.Warn("Failed to create ghost user for command issuer", "error", err, "user_id", user.Id)
-						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
-					} else {
-						// Join the newly created ghost user to the room
-						if err := c.matrixClient.JoinRoomAsUser(roomIdentifier, ghostUserID); err != nil {
-							c.client.Log.Warn("Failed to join ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
-							joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
-						} else {
-							c.client.Log.Info("Successfully joined ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
-							joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully! You're ready to start messaging."
-						}
-					}
+				// Create or get ghost user for the command issuer
+				ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id, user.Username)
+				if err != nil {
+					c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
+					joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
 				} else {
-					// Ghost user exists, just join them to the room
+					// Join the ghost user to the room
 					if err := c.matrixClient.JoinRoomAsUser(roomIdentifier, ghostUserID); err != nil {
-						c.client.Log.Warn("Failed to join existing ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
+						c.client.Log.Warn("Failed to join ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
 						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
 					} else {
-						c.client.Log.Info("Successfully joined existing ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
+						c.client.Log.Info("Successfully joined ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
 						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully! You're ready to start messaging."
 					}
 				}

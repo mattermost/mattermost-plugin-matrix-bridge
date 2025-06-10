@@ -18,8 +18,14 @@ func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
 	return "", false
 }
 
-// createGhostUser creates a new Matrix ghost user for a Mattermost user
-func (p *Plugin) createGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+// createOrGetGhostUser creates a new Matrix ghost user for a Mattermost user, or returns existing one
+func (p *Plugin) createOrGetGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+	// First check if ghost user already exists
+	if ghostUserID, exists := p.getGhostUser(mattermostUserID); exists {
+		return ghostUserID, nil
+	}
+
+	// Ghost user doesn't exist, create a new one
 	// Get the Mattermost user to fetch display name and avatar
 	user, appErr := p.API.GetUser(mattermostUserID)
 	if appErr != nil {

@@ -109,20 +109,14 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 
 // createPostInMatrix creates a new post in Matrix and stores the event ID
 func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user *model.User, propertyKey string) error {
-	// Check if ghost user already exists
-	ghostUserID, exists := p.getGhostUser(user.Id)
-
-	// If ghost user doesn't exist, create it
-	if !exists {
-		var err error
-		ghostUserID, err = p.createGhostUser(user.Id, user.Username)
-		if err != nil {
-			return errors.Wrap(err, "failed to create ghost user")
-		}
+	// Create or get ghost user
+	ghostUserID, err := p.CreateOrGetGhostUser(user.Id, user.Username)
+	if err != nil {
+		return errors.Wrap(err, "failed to create or get ghost user")
 	}
 
 	// Ensure ghost user is joined to the room
-	err := p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
+	err = p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
 	if err != nil {
 		return errors.Wrap(err, "failed to ensure ghost user is in room")
 	}
@@ -212,20 +206,14 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 
 // updatePostInMatrix updates an existing post in Matrix
 func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, eventID string, user *model.User) error {
-	// Check if ghost user already exists
-	ghostUserID, exists := p.getGhostUser(user.Id)
-
-	// If ghost user doesn't exist, create it
-	if !exists {
-		var err error
-		ghostUserID, err = p.createGhostUser(user.Id, user.Username)
-		if err != nil {
-			return errors.Wrap(err, "failed to create ghost user")
-		}
+	// Create or get ghost user
+	ghostUserID, err := p.CreateOrGetGhostUser(user.Id, user.Username)
+	if err != nil {
+		return errors.Wrap(err, "failed to create or get ghost user")
 	}
 
 	// Ensure ghost user is still in the room
-	err := p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
+	err = p.ensureGhostUserInRoom(ghostUserID, matrixRoomID, user.Id)
 	if err != nil {
 		return errors.Wrap(err, "failed to ensure ghost user is in room")
 	}
@@ -368,16 +356,10 @@ func (p *Plugin) addReactionToMatrix(reaction *model.Reaction, channelID string)
 		return errors.Wrap(appErr, "failed to get user for reaction")
 	}
 
-	// Check if ghost user already exists
-	ghostUserID, exists := p.getGhostUser(user.Id)
-
-	// If ghost user doesn't exist, create it
-	if !exists {
-		var err error
-		ghostUserID, err = p.createGhostUser(user.Id, user.Username)
-		if err != nil {
-			return errors.Wrap(err, "failed to create ghost user for reaction")
-		}
+	// Create or get ghost user
+	ghostUserID, err := p.CreateOrGetGhostUser(user.Id, user.Username)
+	if err != nil {
+		return errors.Wrap(err, "failed to create or get ghost user for reaction")
 	}
 
 	// Ensure ghost user is in the room

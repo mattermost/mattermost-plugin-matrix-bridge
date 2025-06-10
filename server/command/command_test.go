@@ -47,12 +47,7 @@ func (m *mockPlugin) GetConfiguration() Configuration {
 	return m.config
 }
 
-func (m *mockPlugin) GetGhostUser(mattermostUserID string) (string, bool) {
-	// Mock implementation - return empty for tests
-	return "", false
-}
-
-func (m *mockPlugin) CreateGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+func (m *mockPlugin) CreateOrGetGhostUser(mattermostUserID, _ string) (string, error) {
 	// Mock implementation - return test ghost user
 	return "_mattermost_" + mattermostUserID + ":test.com", nil
 }
@@ -594,7 +589,7 @@ func TestChannelNameFallback(t *testing.T) {
 				matrixClient: nil,
 				pluginAPI:    env.api,
 			},
-			onCreateRoom: func(roomName string, publish bool) {
+			onCreateRoom: func(roomName string, _ bool) {
 				capturedRoomName = roomName
 			},
 		}

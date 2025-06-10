@@ -155,14 +155,9 @@ func (p *Plugin) GetConfiguration() command.Configuration {
 	return p.getConfiguration()
 }
 
-// GetGhostUser retrieves an existing ghost user ID for a Mattermost user
-func (p *Plugin) GetGhostUser(mattermostUserID string) (string, bool) {
-	return p.getGhostUser(mattermostUserID)
-}
-
-// CreateGhostUser creates a new ghost user for a Mattermost user
-func (p *Plugin) CreateGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
-	return p.createGhostUser(mattermostUserID, mattermostUsername)
+// CreateOrGetGhostUser gets an existing ghost user or creates a new one for a Mattermost user
+func (p *Plugin) CreateOrGetGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+	return p.createOrGetGhostUser(mattermostUserID, mattermostUsername)
 }
 
 // GetPluginAPI returns the Mattermost plugin API
