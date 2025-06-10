@@ -82,15 +82,18 @@ namespaces:
     - exclusive: true
       regex: "#_mattermost_.*:${domain}"
     - exclusive: false
-      regex: "#[a-z0-9-]+:${domain}"
-  rooms: []
+      regex: "#.*:${domain}"
+  rooms:
+    - exclusive: false
+      regex: "!.*:${domain}"
 rate_limited: false
 protocols: ["mattermost"]
 # Allow the application service to manage room directory visibility
 de.sorunome.msc2409.push_ephemeral: true
 # Alternative approach: explicitly grant room directory permissions
 permissions:
-  - "m.room.directory"`;
+  - "m.room.directory"
+  - "m.room.membership"`;
 
         // Create and download the file
         const blob = new Blob([registrationYaml], {type: 'text/yaml'});

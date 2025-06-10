@@ -193,7 +193,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		// Join the AS bot to establish bridge presence
 		if err := c.matrixClient.JoinRoom(roomIdentifier); err != nil {
 			c.client.Log.Warn("Failed to auto-join Matrix room", "error", err, "room_identifier", roomIdentifier)
-			joinStatus = "\n\n⚠️ **Note:** Could not auto-join Matrix room. You may need to manually invite the bridge user."
+			joinStatus = "\n\n⚠️ **Note:** Could not auto-join Matrix room. You may need to manually invite the bridge user or make the room public in Matrix."
 		} else {
 			c.client.Log.Info("Successfully joined Matrix room as AS bot", "room_identifier", roomIdentifier)
 
@@ -308,6 +308,30 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 
 	c.client.Log.Info("Created Matrix room and published to directory", "room_id", roomID, "room_name", roomName)
 
+	// Join the ghost user of the command issuer to the newly created room
+	var joinStatus string
+	user, appErr := c.client.User.Get(args.UserId)
+	if appErr != nil {
+		c.client.Log.Warn("Failed to get command issuer for ghost user join", "error", appErr, "user_id", args.UserId)
+		joinStatus = "\n\nThe bridge user is automatically joined as the room creator."
+	} else {
+		// Create or get ghost user for the command issuer
+		ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id, user.Username)
+		if err != nil {
+			c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
+			joinStatus = "\n\nThe bridge user is automatically joined as the room creator."
+		} else {
+			// Join the ghost user to the room
+			if err := c.matrixClient.JoinRoomAsUser(roomID, ghostUserID); err != nil {
+				c.client.Log.Warn("Failed to join ghost user to created room", "error", err, "ghost_user_id", ghostUserID, "room_id", roomID)
+				joinStatus = "\n\nThe bridge user is automatically joined as the room creator."
+			} else {
+				c.client.Log.Info("Successfully joined ghost user to created room", "ghost_user_id", ghostUserID, "room_id", roomID)
+				joinStatus = "\n\nThe bridge user is automatically joined as the room creator. You're ready to start messaging."
+			}
+		}
+	}
+
 	// Automatically map the created room to this channel
 	mappingKey := "channel_mapping_" + args.ChannelId
 	if err := c.kvstore.Set(mappingKey, []byte(roomID)); err != nil {
@@ -354,7 +378,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
-		Text:         fmt.Sprintf("✅ **Matrix Room Created & Mapped**\n\n**Room Name:** %s\n**Room ID:** `%s`\n**Channel:** %s%s\n\nThe bridge user is automatically joined as the room creator.%s", roomName, roomID, channelName, publishStatus, shareStatus),
+		Text:         fmt.Sprintf("✅ **Matrix Room Created & Mapped**\n\n**Room Name:** %s\n**Room ID:** `%s`\n**Channel:** %s%s%s%s", roomName, roomID, channelName, publishStatus, joinStatus, shareStatus),
 	}
 }
 
