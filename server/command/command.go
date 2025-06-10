@@ -237,6 +237,51 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 
 	c.client.Log.Info("Channel mapping saved", "channel_id", args.ChannelId, "channel_name", channelName, "room_identifier", roomIdentifier)
 
+	// Add bridge alias for Matrix Application Service filtering
+	if c.matrixClient != nil {
+		// Extract room name from the identifier for the bridge alias
+		var roomName string
+		if strings.HasPrefix(roomIdentifier, "#") {
+			// Extract local part from room alias (#name:server.com -> name)
+			parts := strings.Split(roomIdentifier[1:], ":")
+			if len(parts) > 0 {
+				roomName = parts[0]
+			}
+		} else {
+			// For room IDs, use channel name as fallback
+			roomName = strings.ToLower(strings.ReplaceAll(channelName, " ", "-"))
+			roomName = strings.ReplaceAll(roomName, "_", "-")
+		}
+
+		if roomName != "" {
+			// Create bridge alias
+			serverDomain := c.extractServerDomain()
+			bridgeAlias := "#mattermost-bridge-" + roomName + ":" + serverDomain
+
+			// First resolve room identifier to room ID
+			roomID, err := c.matrixClient.ResolveRoomAlias(roomIdentifier)
+			if err != nil {
+				// If it's already a room ID, use it directly
+				if strings.HasPrefix(roomIdentifier, "!") {
+					roomID = roomIdentifier
+				} else {
+					c.client.Log.Warn("Failed to resolve room identifier for bridge alias", "error", err, "room_identifier", roomIdentifier)
+					roomID = ""
+				}
+			}
+
+			if roomID != "" {
+				err = c.matrixClient.AddRoomAlias(roomID, bridgeAlias)
+				if err != nil {
+					c.client.Log.Warn("Failed to add bridge filtering alias for manual mapping", "error", err, "bridge_alias", bridgeAlias, "room_id", roomID)
+					// Continue - mapping still works, just no filtering alias
+				} else {
+					c.client.Log.Info("Successfully added bridge filtering alias for manual mapping", "room_id", roomID, "bridge_alias", bridgeAlias, "original_identifier", roomIdentifier)
+				}
+			}
+		}
+	}
+
 	// Only auto-share the channel if mapping was successfully saved
 	shareStatus := ""
 	sharedChannel := &model.SharedChannel{

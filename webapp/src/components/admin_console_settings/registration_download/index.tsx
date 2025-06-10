@@ -82,7 +82,7 @@ namespaces:
     - exclusive: true
       regex: "#_mattermost_.*:${domain}"
     - exclusive: false
-      regex: "#.*:${domain}"
+      regex: "#mattermost-bridge-.*:${domain}"
   rooms:
     - exclusive: false
       regex: "!.*:${domain}"

@@ -462,6 +462,19 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 	}
 	c.api.LogInfo("Matrix room created successfully", "room_id", response.RoomID, "room_alias", roomAlias, "return_value", returnValue)
 
+	// Add bridge alias for Matrix Application Service filtering
+	if roomAlias != "" {
+		// Create bridge alias with mattermost-bridge- prefix
+		bridgeAlias := "#mattermost-bridge-" + alias + ":" + serverDomain
+		err = c.AddRoomAlias(response.RoomID, bridgeAlias)
+		if err != nil {
+			c.api.LogWarn("Failed to add bridge filtering alias", "error", err, "bridge_alias", bridgeAlias, "room_id", response.RoomID)
+			// Continue - user alias still works, bridge filtering just won't work for this room
+		} else {
+			c.api.LogInfo("Successfully added bridge filtering alias", "room_id", response.RoomID, "bridge_alias", bridgeAlias, "user_alias", roomAlias)
+		}
+	}
+
 	// Return the room alias if we created one, otherwise return the room ID
 	if roomAlias != "" {
 		return roomAlias, nil
@@ -486,6 +499,55 @@ func (c *Client) extractServerDomain() (string, error) {
 	}
 
 	return hostname, nil
+}
+
+// AddRoomAlias adds an additional alias to an existing Matrix room
+func (c *Client) AddRoomAlias(roomID, alias string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	c.api.LogDebug("Adding room alias", "room_id", roomID, "alias", alias)
+
+	requestBody := map[string]string{
+		"room_id": roomID,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal alias request")
+	}
+
+	// URL encode the alias to handle special characters
+	encodedAlias := url.PathEscape(alias)
+	requestURL := c.serverURL + "/_matrix/client/v3/directory/room/" + encodedAlias
+
+	req, err := http.NewRequest("PUT", requestURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return errors.Wrap(err, "failed to create alias request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send alias request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read alias response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		c.api.LogError("Failed to add room alias", "status_code", resp.StatusCode, "response", string(body), "alias", alias, "room_id", roomID)
+		return fmt.Errorf("failed to add room alias: %d %s", resp.StatusCode, string(body))
+	}
+
+	c.api.LogInfo("Successfully added room alias", "room_id", roomID, "alias", alias)
+	return nil
 }
 
 // Ghost user management functions
