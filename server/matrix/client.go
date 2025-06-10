@@ -273,15 +273,9 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 		return errors.New("matrix client not configured")
 	}
 
-	var requestURL string
-	if strings.HasPrefix(roomIdentifier, "#") {
-		// For room aliases, use the /join endpoint with URL-encoded alias
-		encodedAlias := url.PathEscape(roomIdentifier)
-		requestURL = c.serverURL + "/_matrix/client/v3/join/" + encodedAlias
-	} else {
-		// For room IDs, use the original endpoint
-		requestURL = c.serverURL + "/_matrix/client/v3/rooms/" + roomIdentifier + "/join"
-	}
+	// Use the unified join endpoint that supports both room IDs and aliases
+	encodedIdentifier := url.PathEscape(roomIdentifier)
+	requestURL := c.serverURL + "/_matrix/client/v3/join/" + encodedIdentifier
 
 	req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer([]byte("{}")))
 	if err != nil {
@@ -315,15 +309,9 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 		return errors.New("matrix client not configured")
 	}
 
-	var requestURL string
-	if strings.HasPrefix(roomIdentifier, "#") {
-		// For room aliases, use the /join endpoint with URL-encoded alias
-		encodedAlias := url.PathEscape(roomIdentifier)
-		requestURL = c.serverURL + "/_matrix/client/v3/join/" + encodedAlias
-	} else {
-		// For room IDs, use the original endpoint
-		requestURL = c.serverURL + "/_matrix/client/v3/rooms/" + roomIdentifier + "/join"
-	}
+	// Use the unified join endpoint that supports both room IDs and aliases
+	encodedIdentifier := url.PathEscape(roomIdentifier)
+	requestURL := c.serverURL + "/_matrix/client/v3/join/" + encodedIdentifier
 
 	// Add user_id query parameter for impersonation
 	if userID != "" {

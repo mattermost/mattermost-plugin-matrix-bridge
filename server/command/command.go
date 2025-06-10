@@ -18,6 +18,26 @@ type Configuration interface {
 	GetMatrixServerURL() string
 }
 
+// PluginAccessor defines the interface for plugin functionality needed by command handlers
+type PluginAccessor interface {
+	// Matrix client access
+	GetMatrixClient() *matrix.Client
+
+	// Storage access
+	GetKVStore() kvstore.KVStore
+
+	// Configuration access
+	GetConfiguration() Configuration
+
+	// Ghost user management
+	GetGhostUser(mattermostUserID string) (string, bool)
+	CreateGhostUser(mattermostUserID, mattermostUsername string) (string, error)
+
+	// Mattermost API access
+	GetPluginAPI() plugin.API
+	GetPluginAPIClient() *pluginapi.Client
+}
+
 // sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
 func sanitizeShareName(name string) string {
 	// Convert to lowercase and replace spaces with hyphens
@@ -57,11 +77,11 @@ func sanitizeShareName(name string) string {
 
 // Handler implements slash command processing for the Matrix Bridge plugin.
 type Handler struct {
+	plugin       PluginAccessor
 	client       *pluginapi.Client
 	kvstore      kvstore.KVStore
 	matrixClient *matrix.Client
-	getConfig    func() Configuration // Function to get current plugin configuration
-	pluginAPI    plugin.API           // Access to plugin API methods like ShareChannel
+	pluginAPI    plugin.API
 }
 
 // Command defines the interface for handling Matrix Bridge slash commands.
@@ -75,7 +95,13 @@ const helloCommandTrigger = "hello"
 const matrixCommandTrigger = "matrix"
 
 // NewCommandHandler creates and registers all slash commands for the Matrix Bridge plugin.
-func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrixClient *matrix.Client, getConfig func() Configuration, pluginAPI plugin.API) Command {
+func NewCommandHandler(plugin PluginAccessor) Command {
+	// Cache frequently used services for reduced verbosity
+	client := plugin.GetPluginAPIClient()
+	kvstore := plugin.GetKVStore()
+	matrixClient := plugin.GetMatrixClient()
+	pluginAPI := plugin.GetPluginAPI()
+
 	err := client.SlashCommand.Register(&model.Command{
 		Trigger:          helloCommandTrigger,
 		AutoComplete:     true,
@@ -106,10 +132,10 @@ func NewCommandHandler(client *pluginapi.Client, kvstore kvstore.KVStore, matrix
 	}
 
 	return &Handler{
+		plugin:       plugin,
 		client:       client,
 		kvstore:      kvstore,
 		matrixClient: matrixClient,
-		getConfig:    getConfig,
 		pluginAPI:    pluginAPI,
 	}
 }
@@ -165,16 +191,48 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	// Try to join the Matrix room automatically
 	var joinStatus string
 	if c.matrixClient != nil {
+		// Join the AS bot to establish bridge presence
 		if err := c.matrixClient.JoinRoom(roomIdentifier); err != nil {
 			c.client.Log.Warn("Failed to auto-join Matrix room", "error", err, "room_identifier", roomIdentifier)
-			if strings.HasPrefix(roomIdentifier, "!") {
-				joinStatus = "\n\n⚠️ **Note:** Could not auto-join using room ID. Try using room alias instead (e.g., `#roomname:server.com`)"
-			} else {
-				joinStatus = "\n\n⚠️ **Note:** Could not auto-join Matrix room. You may need to manually invite the bridge user."
-			}
+			joinStatus = "\n\n⚠️ **Note:** Could not auto-join Matrix room. You may need to manually invite the bridge user."
 		} else {
-			c.client.Log.Info("Successfully joined Matrix room", "room_identifier", roomIdentifier)
-			joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+			c.client.Log.Info("Successfully joined Matrix room as AS bot", "room_identifier", roomIdentifier)
+
+			// Also join the ghost user of the command issuer for immediate messaging capability
+			user, appErr := c.client.User.Get(args.UserId)
+			if appErr != nil {
+				c.client.Log.Warn("Failed to get command issuer for ghost user join", "error", appErr, "user_id", args.UserId)
+				joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+			} else {
+				// Get or create ghost user for the command issuer
+				ghostUserID, exists := c.plugin.GetGhostUser(user.Id)
+				if !exists {
+					var err error
+					ghostUserID, err = c.plugin.CreateGhostUser(user.Id, user.Username)
+					if err != nil {
+						c.client.Log.Warn("Failed to create ghost user for command issuer", "error", err, "user_id", user.Id)
+						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+					} else {
+						// Join the newly created ghost user to the room
+						if err := c.matrixClient.JoinRoomAsUser(roomIdentifier, ghostUserID); err != nil {
+							c.client.Log.Warn("Failed to join ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
+							joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+						} else {
+							c.client.Log.Info("Successfully joined ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
+							joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully! You're ready to start messaging."
+						}
+					}
+				} else {
+					// Ghost user exists, just join them to the room
+					if err := c.matrixClient.JoinRoomAsUser(roomIdentifier, ghostUserID); err != nil {
+						c.client.Log.Warn("Failed to join existing ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
+						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+					} else {
+						c.client.Log.Info("Successfully joined existing ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
+						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully! You're ready to start messaging."
+					}
+				}
+			}
 		}
 	} else {
 		joinStatus = "\n\n⚠️ **Note:** Matrix client not configured. Please configure Matrix settings and manually invite the bridge user."
@@ -187,13 +245,13 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "❌ Failed to save channel mapping. Check plugin logs for details.",
+			Text:         fmt.Sprintf("❌ Failed to save channel mapping. Check plugin logs for details.%s", joinStatus),
 		}
 	}
 
 	c.client.Log.Info("Channel mapping saved", "channel_id", args.ChannelId, "channel_name", channelName, "room_identifier", roomIdentifier)
 
-	// Automatically share the channel to enable sync
+	// Only auto-share the channel if mapping was successfully saved
 	shareStatus := ""
 	sharedChannel := &model.SharedChannel{
 		ChannelId:        args.ChannelId,
@@ -493,7 +551,7 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 // extractServerDomain extracts the domain from the Matrix server URL
 func (c *Handler) extractServerDomain() string {
 	// Get the current plugin configuration
-	config := c.getConfig()
+	config := c.plugin.GetConfiguration()
 	if config == nil {
 		c.client.Log.Warn("Plugin configuration not available")
 		return "matrix.org" // fallback

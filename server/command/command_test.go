@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/mattermost/mattermost/server/public/model"
+	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,45 @@ type mockConfiguration struct {
 
 func (m *mockConfiguration) GetMatrixServerURL() string {
 	return m.serverURL
+}
+
+// mockPlugin implements the PluginAccessor interface for testing
+type mockPlugin struct {
+	client       *pluginapi.Client
+	kvstore      kvstore.KVStore
+	matrixClient *matrix.Client
+	config       Configuration
+	pluginAPI    *plugintest.API
+}
+
+func (m *mockPlugin) GetMatrixClient() *matrix.Client {
+	return m.matrixClient
+}
+
+func (m *mockPlugin) GetKVStore() kvstore.KVStore {
+	return m.kvstore
+}
+
+func (m *mockPlugin) GetConfiguration() Configuration {
+	return m.config
+}
+
+func (m *mockPlugin) GetGhostUser(mattermostUserID string) (string, bool) {
+	// Mock implementation - return empty for tests
+	return "", false
+}
+
+func (m *mockPlugin) CreateGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+	// Mock implementation - return test ghost user
+	return "_mattermost_" + mattermostUserID + ":test.com", nil
+}
+
+func (m *mockPlugin) GetPluginAPI() plugin.API {
+	return m.pluginAPI
+}
+
+func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client {
+	return m.client
 }
 
 func setupTest() *env {
@@ -64,14 +104,16 @@ func TestHelloCommand(t *testing.T) {
 		AutocompleteData: matrixData,
 	}).Return(nil)
 
-	// Create mock dependencies
-	mockKVStore := kvstore.NewKVStore(env.client)
-	mockMatrixClient := matrix.NewClient("http://test.com", "test_token", env.api)
-	mockGetConfig := func() Configuration {
-		return &mockConfiguration{serverURL: "http://test.com"}
+	// Create mock plugin API
+	mockPlugin := &mockPlugin{
+		client:       env.client,
+		kvstore:      kvstore.NewKVStore(env.client),
+		matrixClient: matrix.NewClient("http://test.com", "test_token", env.api),
+		config:       &mockConfiguration{serverURL: "http://test.com"},
+		pluginAPI:    env.api,
 	}
 
-	cmdHandler := NewCommandHandler(env.client, mockKVStore, mockMatrixClient, mockGetConfig, env.api)
+	cmdHandler := NewCommandHandler(mockPlugin)
 
 	args := &model.CommandArgs{
 		Command: "/hello world",
@@ -217,15 +259,22 @@ func TestMatrixCreateCommandParsing(t *testing.T) {
 			var capturedPublish bool
 			var createCalled bool
 
+			// Create mock plugin API
+			mockPlugin := &mockPlugin{
+				client:       env.client,
+				kvstore:      kvstore.NewKVStore(env.client),
+				matrixClient: nil, // Will cause create to fail gracefully
+				config:       &mockConfiguration{serverURL: "http://test.com"},
+				pluginAPI:    env.api,
+			}
+
 			testHandler := &testCommandHandler{
 				Handler: &Handler{
+					plugin:       mockPlugin,
 					client:       env.client,
 					kvstore:      kvstore.NewKVStore(env.client),
-					matrixClient: nil, // Will cause create to fail gracefully
-					getConfig: func() Configuration {
-						return &mockConfiguration{serverURL: "http://test.com"}
-					},
-					pluginAPI: env.api,
+					matrixClient: nil,
+					pluginAPI:    env.api,
 				},
 				onCreateRoom: func(roomName string, publish bool) {
 					capturedRoomName = roomName
@@ -266,10 +315,10 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 	// Override the executeCreateRoomCommand to capture parameters
 	originalHandler := t.Handler
 	t.Handler = &Handler{
+		plugin:       originalHandler.plugin,
 		client:       originalHandler.client,
 		kvstore:      originalHandler.kvstore,
 		matrixClient: originalHandler.matrixClient,
-		getConfig:    originalHandler.getConfig,
 		pluginAPI:    originalHandler.pluginAPI,
 	}
 
@@ -405,15 +454,14 @@ func TestMatrixCreateCommandEdgeCases(t *testing.T) {
 			env.api.On("GetChannel", "test-channel-id").Return(channel, nil)
 
 			// Create command handler
-			cmdHandler := NewCommandHandler(
-				env.client,
-				kvstore.NewKVStore(env.client),
-				nil, // No matrix client - will fail gracefully
-				func() Configuration {
-					return &mockConfiguration{serverURL: "http://test.com"}
-				},
-				env.api,
-			)
+			mockPlugin := &mockPlugin{
+				client:       env.client,
+				kvstore:      kvstore.NewKVStore(env.client),
+				matrixClient: nil, // No matrix client - will fail gracefully
+				config:       &mockConfiguration{serverURL: "http://test.com"},
+				pluginAPI:    env.api,
+			}
+			cmdHandler := NewCommandHandler(mockPlugin)
 
 			args := &model.CommandArgs{
 				Command:   tt.command,
@@ -466,15 +514,14 @@ func TestMatrixCommandErrors(t *testing.T) {
 			setupCommandRegistration(env)
 
 			// Create command handler
-			cmdHandler := NewCommandHandler(
-				env.client,
-				kvstore.NewKVStore(env.client),
-				nil,
-				func() Configuration {
-					return &mockConfiguration{serverURL: "http://test.com"}
-				},
-				env.api,
-			)
+			mockPlugin := &mockPlugin{
+				client:       env.client,
+				kvstore:      kvstore.NewKVStore(env.client),
+				matrixClient: nil,
+				config:       &mockConfiguration{serverURL: "http://test.com"},
+				pluginAPI:    env.api,
+			}
+			cmdHandler := NewCommandHandler(mockPlugin)
 
 			args := &model.CommandArgs{
 				Command:   tt.command,
@@ -532,15 +579,20 @@ func TestChannelNameFallback(t *testing.T) {
 		env.api.On("GetChannel", "test-channel-id").Return(channel, nil).Once()
 
 		var capturedRoomName string
+		mockPlugin := &mockPlugin{
+			client:       env.client,
+			kvstore:      kvstore.NewKVStore(env.client),
+			matrixClient: nil,
+			config:       &mockConfiguration{serverURL: "http://test.com"},
+			pluginAPI:    env.api,
+		}
 		testHandler := &testCommandHandler{
 			Handler: &Handler{
+				plugin:       mockPlugin,
 				client:       env.client,
 				kvstore:      kvstore.NewKVStore(env.client),
 				matrixClient: nil,
-				getConfig: func() Configuration {
-					return &mockConfiguration{serverURL: "http://test.com"}
-				},
-				pluginAPI: env.api,
+				pluginAPI:    env.api,
 			},
 			onCreateRoom: func(roomName string, publish bool) {
 				capturedRoomName = roomName

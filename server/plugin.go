@@ -58,7 +58,7 @@ func (p *Plugin) OnActivate() error {
 
 	p.initMatrixClient()
 
-	p.commandClient = command.NewCommandHandler(p.client, p.kvstore, p.matrixClient, p.getConfigurationForCommand, p.API)
+	p.commandClient = command.NewCommandHandler(p)
 
 	if err := p.registerForSharedChannels(); err != nil {
 		p.API.LogWarn("Failed to register for shared channels", "error", err)
@@ -138,9 +138,41 @@ func (p *Plugin) registerForSharedChannels() error {
 	return nil
 }
 
-// getConfigurationForCommand returns the configuration as the interface expected by command package
-func (p *Plugin) getConfigurationForCommand() command.Configuration {
+// PluginAccessor interface implementation for command handlers
+
+// GetMatrixClient returns the Matrix client instance
+func (p *Plugin) GetMatrixClient() *matrix.Client {
+	return p.matrixClient
+}
+
+// GetKVStore returns the KV store instance
+func (p *Plugin) GetKVStore() kvstore.KVStore {
+	return p.kvstore
+}
+
+// GetConfiguration returns the plugin configuration
+func (p *Plugin) GetConfiguration() command.Configuration {
 	return p.getConfiguration()
+}
+
+// GetGhostUser retrieves an existing ghost user ID for a Mattermost user
+func (p *Plugin) GetGhostUser(mattermostUserID string) (string, bool) {
+	return p.getGhostUser(mattermostUserID)
+}
+
+// CreateGhostUser creates a new ghost user for a Mattermost user
+func (p *Plugin) CreateGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+	return p.createGhostUser(mattermostUserID, mattermostUsername)
+}
+
+// GetPluginAPI returns the Mattermost plugin API
+func (p *Plugin) GetPluginAPI() plugin.API {
+	return p.API
+}
+
+// GetPluginAPIClient returns the pluginapi client
+func (p *Plugin) GetPluginAPIClient() *pluginapi.Client {
+	return p.client
 }
 
 // See https://developers.mattermost.com/extend/plugins/server/reference/
