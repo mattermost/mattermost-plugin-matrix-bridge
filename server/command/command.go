@@ -113,7 +113,7 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	}
 
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix connection"))
+	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix server connection and configuration"))
 	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
 	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
@@ -524,10 +524,7 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 	subcommand := fields[1]
 	switch subcommand {
 	case "test":
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Matrix connection test - check plugin logs for results",
-		}
+		return c.executeTestCommand(args)
 	case "create":
 		// Parse room name and optional publish parameter
 		var roomName string
@@ -632,4 +629,95 @@ func (c *Handler) extractServerDomain() string {
 	}
 
 	return hostname
+}
+
+func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandResponse {
+	var responseText strings.Builder
+	responseText.WriteString("🔍 **Matrix Connection Test**\n\n")
+
+	// Check basic configuration
+	config := c.plugin.GetConfiguration()
+	if config == nil {
+		responseText.WriteString("❌ **Configuration:** Plugin configuration not available\n")
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         responseText.String(),
+		}
+	}
+
+	serverURL := config.GetMatrixServerURL()
+	if serverURL == "" {
+		responseText.WriteString("❌ **Configuration:** Matrix server URL not set\n")
+		responseText.WriteString("📝 **Action:** Go to System Console → Plugins → Matrix Bridge and set your Matrix server URL\n")
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         responseText.String(),
+		}
+	}
+
+	responseText.WriteString(fmt.Sprintf("✅ **Server URL:** %s\n", serverURL))
+
+	// Check Matrix client availability
+	if c.matrixClient == nil {
+		responseText.WriteString("❌ **Matrix Client:** Not initialized\n")
+		responseText.WriteString("📝 **Action:** Check that Application Service and Homeserver tokens are generated\n")
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         responseText.String(),
+		}
+	}
+
+	responseText.WriteString("✅ **Matrix Client:** Initialized\n")
+
+	// Test Matrix server connection
+	err := c.matrixClient.TestConnection()
+	if err != nil {
+		responseText.WriteString("❌ **Connection:** Failed to connect to Matrix server\n")
+		responseText.WriteString(fmt.Sprintf("🔍 **Error:** %s\n", err.Error()))
+		responseText.WriteString("📝 **Actions:**\n")
+		responseText.WriteString("   • Verify Matrix server URL is correct and reachable\n")
+		responseText.WriteString("   • Check that Application Service registration file is installed\n")
+		responseText.WriteString("   • Ensure Matrix homeserver is running\n")
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         responseText.String(),
+		}
+	}
+
+	responseText.WriteString("✅ **Connection:** Successfully connected to Matrix server\n")
+
+	// Try to get server information (name and version)
+	serverInfo, infoErr := c.matrixClient.GetServerInfo()
+	if infoErr == nil && serverInfo != nil {
+		if serverInfo.Name != "Matrix Server" || serverInfo.Version != "Unknown" {
+			responseText.WriteString(fmt.Sprintf("📊 **Matrix Server:** %s", serverInfo.Name))
+			if serverInfo.Version != "Unknown" {
+				responseText.WriteString(fmt.Sprintf(" v%s", serverInfo.Version))
+			}
+			responseText.WriteString("\n")
+		}
+	}
+
+	// Test Application Service permissions without making invasive changes
+	asErr := c.matrixClient.TestApplicationServicePermissions()
+	if asErr != nil {
+		responseText.WriteString("❌ **Application Service:** Permission test failed\n")
+		responseText.WriteString(fmt.Sprintf("🔍 **Error:** %s\n", asErr.Error()))
+		responseText.WriteString("📝 **Actions:**\n")
+		responseText.WriteString("   • Verify Application Service registration file is properly installed\n")
+		responseText.WriteString("   • Check that homeserver and AS tokens match the registration file\n")
+		responseText.WriteString("   • Restart Matrix homeserver if registration file was recently added\n")
+	} else {
+		responseText.WriteString("✅ **Application Service:** Permissions verified (can query namespace)\n")
+	}
+
+	// Test shared channels registration
+	responseText.WriteString("\n📋 **Next Steps:**\n")
+	responseText.WriteString("   • Use `/matrix create \"Room Name\"` to create a Matrix room\n")
+	responseText.WriteString("   • The channel will be automatically configured for syncing\n")
+
+	return &model.CommandResponse{
+		ResponseType: model.CommandResponseTypeEphemeral,
+		Text:         responseText.String(),
+	}
 }

@@ -33,6 +33,7 @@ A seamless bridge that connects Mattermost and Matrix, enabling real-time bidire
 Use slash commands to bridge channels:
 
 ```
+/matrix test                            # Test Matrix connection and configuration
 /matrix create "Room Name"              # Create new Matrix room
 /matrix map #room:matrix.example.com    # Map to existing room
 /matrix status                          # Check bridge health
