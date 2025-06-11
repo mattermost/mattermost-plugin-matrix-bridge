@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
@@ -298,12 +297,12 @@ func (p *Plugin) extractUsernameFromMatrixUserID(userID string) string {
 
 // generateMattermostUsername creates a unique Mattermost username
 func (p *Plugin) generateMattermostUsername(baseUsername string) string {
-	// Sanitize username for Mattermost
+	// Sanitize username for Mattermost (following Shared Channels convention)
 	sanitized := strings.ToLower(baseUsername)
 	sanitized = regexp.MustCompile(`[^a-z0-9\-_]`).ReplaceAllString(sanitized, "_")
 
-	// Add matrix prefix to distinguish from regular users
-	username := "matrix_" + sanitized
+	// Follow Shared Channels convention: remote_name:username_sanitized
+	username := "matrix:" + sanitized
 
 	// Ensure uniqueness by checking if username exists
 	counter := 1
@@ -321,8 +320,8 @@ func (p *Plugin) generateMattermostUsername(baseUsername string) string {
 
 		// Prevent infinite loop
 		if counter > 1000 {
-			// Fallback to using hash of Matrix user ID
-			username = fmt.Sprintf("matrix_user_%d", time.Now().Unix())
+			// Fallback to using counter
+			username = fmt.Sprintf("matrix:user_%d", counter)
 			break
 		}
 	}
