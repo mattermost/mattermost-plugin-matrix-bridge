@@ -13,11 +13,14 @@ import (
 func (p *Plugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Request) {
 	router := mux.NewRouter()
 
-	// Middleware to require that the user is logged in
-	router.Use(p.MattermostAuthorizationRequired)
+	// Matrix Application Service webhook endpoint with Matrix authentication
+	matrixRouter := router.PathPrefix("/_matrix/app/v1").Subrouter()
+	matrixRouter.Use(p.MatrixAuthorizationRequired)
+	matrixRouter.HandleFunc("/transactions/{txnId}", p.handleMatrixTransaction).Methods(http.MethodPut)
 
+	// Authenticated Mattermost API routes
 	apiRouter := router.PathPrefix("/api/v1").Subrouter()
-
+	apiRouter.Use(p.MattermostAuthorizationRequired)
 	apiRouter.HandleFunc("/hello", p.HelloWorld).Methods(http.MethodGet)
 
 	router.ServeHTTP(w, r)
@@ -29,6 +32,38 @@ func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler
 		userID := r.Header.Get("Mattermost-User-ID")
 		if userID == "" {
 			http.Error(w, "Not authorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// MatrixAuthorizationRequired is a middleware that requires valid Matrix hs_token authentication.
+func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		config := p.getConfiguration()
+		
+		// Check if sync is enabled
+		if !config.EnableSync {
+			p.API.LogDebug("Matrix webhook received but sync is disabled")
+			http.Error(w, "Sync disabled", http.StatusServiceUnavailable)
+			return
+		}
+
+		// Verify hs_token in Authorization header
+		authHeader := r.Header.Get("Authorization")
+		expectedToken := "Bearer " + config.MatrixHSToken
+		
+		if config.MatrixHSToken == "" {
+			p.API.LogWarn("Matrix webhook received but hs_token not configured")
+			http.Error(w, "Matrix not configured", http.StatusServiceUnavailable)
+			return
+		}
+		
+		if authHeader != expectedToken {
+			p.API.LogWarn("Matrix webhook authentication failed", "expected_prefix", "Bearer ...", "received", authHeader)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 

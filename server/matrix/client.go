@@ -1177,6 +1177,55 @@ func (c *Client) GetEvent(eventID string) (*MatrixEvent, error) {
 	return nil, errors.New("event retrieval not implemented - content comparison disabled")
 }
 
+// UserProfile represents a Matrix user's profile information
+type UserProfile struct {
+	DisplayName string `json:"displayname,omitempty"`
+	AvatarURL   string `json:"avatar_url,omitempty"`
+}
+
+// GetUserProfile retrieves the profile information for a Matrix user
+func (c *Client) GetUserProfile(userID string) (*UserProfile, error) {
+	if c.serverURL == "" || c.asToken == "" {
+		return nil, errors.New("matrix client not configured")
+	}
+
+	// URL encode the user ID to handle special characters
+	encodedUserID := url.PathEscape(userID)
+	requestURL := c.serverURL + "/_matrix/client/v3/profile/" + encodedUserID
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create profile request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to send profile request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read profile response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		c.api.LogWarn("Failed to get Matrix user profile", "status_code", resp.StatusCode, "response", string(body), "user_id", userID)
+		// Return empty profile rather than error - user might not have set a display name
+		return &UserProfile{}, nil
+	}
+
+	var profile UserProfile
+	if err := json.Unmarshal(body, &profile); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal profile response")
+	}
+
+	c.api.LogDebug("Successfully retrieved Matrix user profile", "user_id", userID, "display_name", profile.DisplayName)
+	return &profile, nil
+}
+
 // GetEventInRoom retrieves a specific Matrix event from a room
 func (c *Client) GetEventInRoom(roomID, eventID string) (*MatrixEvent, error) {
 	if c.serverURL == "" || c.asToken == "" {

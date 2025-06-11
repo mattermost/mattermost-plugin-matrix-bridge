@@ -312,3 +312,31 @@ func (p *Plugin) getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUse
 
 	return nil, errors.New("no file metadata found")
 }
+
+// parseDisplayName attempts to parse a display name into first and last name components
+func (p *Plugin) parseDisplayName(displayName string) (firstName, lastName string) {
+	if displayName == "" {
+		return "", ""
+	}
+
+	// Trim whitespace
+	displayName = strings.TrimSpace(displayName)
+	
+	// Split on spaces
+	parts := strings.Fields(displayName)
+	
+	switch len(parts) {
+	case 0:
+		return "", ""
+	case 1:
+		// Only one part - could be first name or a single name
+		// Use as first name
+		return parts[0], ""
+	case 2:
+		// Two parts - likely first and last name
+		return parts[0], parts[1]
+	default:
+		// Multiple parts - use first as first name, join rest as last name
+		return parts[0], strings.Join(parts[1:], " ")
+	}
+}

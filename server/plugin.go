@@ -37,6 +37,9 @@ type Plugin struct {
 	// pendingFiles tracks uploaded files awaiting their posts
 	pendingFiles *PendingFileTracker
 
+	// remoteID is the identifier returned by RegisterPluginForSharedChannels
+	remoteID string
+
 	backgroundJob *cluster.Job
 
 	// configurationLock synchronizes access to the configuration.
@@ -133,6 +136,9 @@ func (p *Plugin) registerForSharedChannels() error {
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to register plugin for shared channels")
 	}
+
+	// Store the remote ID for use in sync operations
+	p.remoteID = remoteID
 
 	p.API.LogInfo("Successfully registered plugin for shared channels", "remote_id", remoteID)
 	return nil
