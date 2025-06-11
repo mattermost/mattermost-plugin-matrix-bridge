@@ -30,7 +30,7 @@ type PluginAccessor interface {
 	GetConfiguration() Configuration
 
 	// Ghost user management
-	CreateOrGetGhostUser(mattermostUserID, mattermostUsername string) (string, error)
+	CreateOrGetGhostUser(mattermostUserID string) (string, error)
 
 	// Mattermost API access
 	GetPluginAPI() plugin.API
@@ -204,7 +204,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 				joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
 			} else {
 				// Create or get ghost user for the command issuer
-				ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id, user.Username)
+				ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
 				if err != nil {
 					c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
 					joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
@@ -361,7 +361,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		joinStatus = "\n\nThe bridge user is automatically joined as the room creator."
 	} else {
 		// Create or get ghost user for the command issuer
-		ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id, user.Username)
+		ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
 		if err != nil {
 			c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
 			joinStatus = "\n\nThe bridge user is automatically joined as the room creator."

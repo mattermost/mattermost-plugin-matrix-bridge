@@ -19,7 +19,7 @@ func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
 }
 
 // createOrGetGhostUser creates a new Matrix ghost user for a Mattermost user, or returns existing one
-func (p *Plugin) createOrGetGhostUser(mattermostUserID, mattermostUsername string) (string, error) {
+func (p *Plugin) createOrGetGhostUser(mattermostUserID string) (string, error) {
 	// First check if ghost user already exists
 	if ghostUserID, exists := p.getGhostUser(mattermostUserID); exists {
 		return ghostUserID, nil
@@ -44,7 +44,7 @@ func (p *Plugin) createOrGetGhostUser(mattermostUserID, mattermostUsername strin
 	}
 
 	// Create new ghost user with display name and avatar
-	ghostUser, err := p.matrixClient.CreateGhostUser(mattermostUserID, mattermostUsername, displayName, avatarData, avatarContentType)
+	ghostUser, err := p.matrixClient.CreateGhostUser(mattermostUserID, displayName, avatarData, avatarContentType)
 	if err != nil {
 		// Check if this is a display name error (user was created but display name failed)
 		if ghostUser != nil && ghostUser.UserID != "" {
@@ -131,7 +131,7 @@ func (p *Plugin) extractServerDomain(serverURL string) string {
 }
 
 // findAndDeleteFileMessage finds and deletes file attachment messages that are replies to the main post
-func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, mimetype, postEventID string) error {
+func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, postEventID string) error {
 	// Get all reply messages to the main post event
 	relations, err := p.matrixClient.GetEventRelationsAsUser(matrixRoomID, postEventID, ghostUserID)
 	if err != nil {
@@ -321,10 +321,10 @@ func (p *Plugin) parseDisplayName(displayName string) (firstName, lastName strin
 
 	// Trim whitespace
 	displayName = strings.TrimSpace(displayName)
-	
+
 	// Split on spaces
 	parts := strings.Fields(displayName)
-	
+
 	switch len(parts) {
 	case 0:
 		return "", ""

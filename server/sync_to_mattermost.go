@@ -67,7 +67,6 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 		Props:     make(map[string]interface{}),
 	}
 
-
 	// Store Matrix event ID in post properties for reaction mapping and edit tracking
 	config := p.getConfiguration()
 	serverDomain := p.extractServerDomain(config.MatrixServerURL)
@@ -160,7 +159,6 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 
 	// Convert Matrix emoji to Mattermost format
 	emojiName := p.convertMatrixEmojiToMattermost(key)
-	
 
 	// Create Mattermost reaction
 	reaction := &model.Reaction{
@@ -170,7 +168,6 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 		CreateAt:  event.Timestamp,
 		RemoteId:  &p.remoteID, // Attribute to Matrix remote
 	}
-
 
 	// Add the reaction
 	_, appErr := p.API.AddReaction(reaction)
@@ -222,7 +219,9 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 		}
 
 		// User no longer exists, remove the mapping
-		p.kvstore.Delete(userMapKey)
+		if err := p.kvstore.Delete(userMapKey); err != nil {
+			p.API.LogWarn("Failed to delete user mapping", "error", err, "key", userMapKey)
+		}
 	}
 
 	// Extract username from Matrix user ID (@username:server.com -> username)
@@ -232,12 +231,12 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 	}
 
 	// Create a unique Mattermost username
-	mattermostUsername := p.generateMattermostUsername(username, matrixUserID)
+	mattermostUsername := p.generateMattermostUsername(username)
 
 	// Get real display name from Matrix profile
 	var displayName string
 	var firstName, lastName string
-	
+
 	if p.matrixClient != nil {
 		profile, err := p.matrixClient.GetUserProfile(matrixUserID)
 		if err != nil {
@@ -258,15 +257,14 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 	user := &model.User{
 		Username:    mattermostUsername,
 		Email:       fmt.Sprintf("%s@matrix.bridge", mattermostUsername), // Placeholder email
-		Password:    model.NewId(), // Generate random password (user won't use it for login)
-		Nickname:    displayName, // Use real Matrix display name
-		FirstName:   firstName,   // Parsed from display name if possible
-		LastName:    lastName,    // Parsed from display name if possible
+		Password:    model.NewId(),                                       // Generate random password (user won't use it for login)
+		Nickname:    displayName,                                         // Use real Matrix display name
+		FirstName:   firstName,                                           // Parsed from display name if possible
+		LastName:    lastName,                                            // Parsed from display name if possible
 		AuthData:    nil,
 		AuthService: "",
 		RemoteId:    &p.remoteID, // Attribute to Matrix remote
 	}
-
 
 	createdUser, appErr := p.API.CreateUser(user)
 	if appErr != nil {
@@ -299,7 +297,7 @@ func (p *Plugin) extractUsernameFromMatrixUserID(userID string) string {
 }
 
 // generateMattermostUsername creates a unique Mattermost username
-func (p *Plugin) generateMattermostUsername(baseUsername, matrixUserID string) string {
+func (p *Plugin) generateMattermostUsername(baseUsername string) string {
 	// Sanitize username for Mattermost
 	sanitized := strings.ToLower(baseUsername)
 	sanitized = regexp.MustCompile(`[^a-z0-9\-_]`).ReplaceAllString(sanitized, "_")
@@ -373,7 +371,7 @@ func (p *Plugin) convertMatrixToMattermost(content string) string {
 // convertMatrixEmojiToMattermost converts Matrix emoji format to Mattermost
 func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 	// Matrix reactions can be Unicode emoji or custom emoji
-	
+
 	// If it's already a simple name (like "thumbsup"), validate it exists in Mattermost
 	if regexp.MustCompile(`^[a-z0-9_+-]+$`).MatchString(matrixEmoji) {
 		// Check if this emoji name exists in our mapping
@@ -393,7 +391,7 @@ func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 			}
 		}
 	}
-	
+
 	// Try to find similar matches (without variation selectors)
 	stripVariation := func(s string) string {
 		// Remove common variation selectors
@@ -401,7 +399,7 @@ func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 		s = strings.ReplaceAll(s, "\uFE0E", "") // variation selector-15
 		return s
 	}
-	
+
 	strippedMatrix := stripVariation(matrixEmoji)
 	if strippedMatrix != matrixEmoji {
 		for emojiName, index := range emojiNameToIndex {
@@ -419,7 +417,7 @@ func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 	case "👍":
 		return "+1"
 	case "👎":
-		return "-1" 
+		return "-1"
 	case "❤️", "❤":
 		return "heart"
 	case "😂":
@@ -445,7 +443,7 @@ func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 			p.API.LogWarn("Unknown complex emoji from Matrix", "emoji", matrixEmoji)
 			return "question" // Use question mark emoji as fallback
 		}
-		
+
 		// For simple unknown emoji, try to create a safe name
 		safeName := regexp.MustCompile(`[^a-z0-9]`).ReplaceAllString(strings.ToLower(matrixEmoji), "")
 		if safeName == "" || len(safeName) < 2 {

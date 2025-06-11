@@ -48,7 +48,6 @@ func convertTables(content string) string {
 	var result []string
 	var inTable bool
 	var tableRows []string
-	var isHeaderTable bool
 
 	for i, line := range lines {
 		line = strings.TrimSpace(line)
@@ -57,10 +56,9 @@ func convertTables(content string) string {
 		if line == "" {
 			if inTable {
 				// Empty line ends table
-				result = append(result, buildHTMLTable(tableRows, isHeaderTable))
+				result = append(result, buildHTMLTable(tableRows))
 				inTable = false
 				tableRows = []string{}
-				isHeaderTable = false
 			}
 			result = append(result, line)
 			continue
@@ -68,10 +66,6 @@ func convertTables(content string) string {
 
 		// Check if this is a table separator line
 		if isTableSeparator(line) {
-			if inTable {
-				// Mark that this table has a header
-				isHeaderTable = true
-			}
 			continue // Skip separator lines
 		}
 
@@ -83,7 +77,6 @@ func convertTables(content string) string {
 				nextLine := strings.TrimSpace(lines[i+1])
 				if isTableSeparator(nextLine) {
 					isHeader = true
-					isHeaderTable = true
 				}
 			}
 
@@ -91,7 +84,6 @@ func convertTables(content string) string {
 			if !inTable {
 				inTable = true
 				tableRows = []string{}
-				isHeaderTable = false
 			}
 
 			// Add the row
@@ -99,10 +91,9 @@ func convertTables(content string) string {
 		} else {
 			// Not a table row - end table if we were in one
 			if inTable {
-				result = append(result, buildHTMLTable(tableRows, isHeaderTable))
+				result = append(result, buildHTMLTable(tableRows))
 				inTable = false
 				tableRows = []string{}
-				isHeaderTable = false
 			}
 			result = append(result, line)
 		}
@@ -110,7 +101,7 @@ func convertTables(content string) string {
 
 	// Handle case where content ends with a table
 	if inTable && len(tableRows) > 0 {
-		result = append(result, buildHTMLTable(tableRows, isHeaderTable))
+		result = append(result, buildHTMLTable(tableRows))
 	}
 
 	return strings.Join(result, "<br>")
@@ -152,7 +143,7 @@ func processTableRow(line string, isHeader bool) string {
 }
 
 // buildHTMLTable creates a complete HTML table from processed rows
-func buildHTMLTable(rows []string, hasHeader bool) string {
+func buildHTMLTable(rows []string) string {
 	if len(rows) == 0 {
 		return ""
 	}

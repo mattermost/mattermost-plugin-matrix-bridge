@@ -559,7 +559,7 @@ type GhostUser struct {
 }
 
 // CreateGhostUser creates a ghost user for a Mattermost user with display name and avatar data
-func (c *Client) CreateGhostUser(mattermostUserID, mattermostUsername, displayName string, avatarData []byte, avatarContentType string) (*GhostUser, error) {
+func (c *Client) CreateGhostUser(mattermostUserID, displayName string, avatarData []byte, avatarContentType string) (*GhostUser, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
 	}
@@ -1157,26 +1157,6 @@ func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
 	return response.RoomID, nil
 }
 
-// MatrixEvent represents a Matrix event for content comparison.
-type MatrixEvent struct { //nolint:revive // MatrixEvent is clear and descriptive despite package name
-	Content map[string]interface{} `json:"content"`
-	Type    string                 `json:"type"`
-	Sender  string                 `json:"sender"`
-	EventID string                 `json:"event_id"`
-}
-
-// GetEvent retrieves a specific Matrix event for content comparison
-func (c *Client) GetEvent(eventID string) (*MatrixEvent, error) {
-	if c.serverURL == "" || c.asToken == "" {
-		return nil, errors.New("matrix client not configured")
-	}
-
-	// Note: This is a simplified implementation that assumes we have room context
-	// In a full implementation, you'd need to specify the room ID as well
-	// For now, we'll return a stub that indicates comparison should be skipped
-	return nil, errors.New("event retrieval not implemented - content comparison disabled")
-}
-
 // UserProfile represents a Matrix user's profile information
 type UserProfile struct {
 	DisplayName string `json:"displayname,omitempty"`
@@ -1224,44 +1204,6 @@ func (c *Client) GetUserProfile(userID string) (*UserProfile, error) {
 
 	c.api.LogDebug("Successfully retrieved Matrix user profile", "user_id", userID, "display_name", profile.DisplayName)
 	return &profile, nil
-}
-
-// GetEventInRoom retrieves a specific Matrix event from a room
-func (c *Client) GetEventInRoom(roomID, eventID string) (*MatrixEvent, error) {
-	if c.serverURL == "" || c.asToken == "" {
-		return nil, errors.New("matrix client not configured")
-	}
-
-	requestURL := c.serverURL + "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/event/" + url.PathEscape(eventID)
-
-	req, err := http.NewRequest("GET", requestURL, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create event request")
-	}
-
-	req.Header.Set("Authorization", "Bearer "+c.asToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to send event request")
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read event response")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get event: %d %s", resp.StatusCode, string(body))
-	}
-
-	var event MatrixEvent
-	if err := json.Unmarshal(body, &event); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal event response")
-	}
-
-	return &event, nil
 }
 
 // PublishRoomToDirectory explicitly publishes a room to the public directory

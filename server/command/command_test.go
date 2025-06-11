@@ -47,7 +47,7 @@ func (m *mockPlugin) GetConfiguration() Configuration {
 	return m.config
 }
 
-func (m *mockPlugin) CreateOrGetGhostUser(mattermostUserID, _ string) (string, error) {
+func (m *mockPlugin) CreateOrGetGhostUser(mattermostUserID string) (string, error) {
 	// Mock implementation - return test ghost user
 	return "_mattermost_" + mattermostUserID + ":test.com", nil
 }

@@ -110,7 +110,7 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 // createPostInMatrix creates a new post in Matrix and stores the event ID
 func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user *model.User, propertyKey string) error {
 	// Create or get ghost user
-	ghostUserID, err := p.CreateOrGetGhostUser(user.Id, user.Username)
+	ghostUserID, err := p.CreateOrGetGhostUser(user.Id)
 	if err != nil {
 		return errors.Wrap(err, "failed to create or get ghost user")
 	}
@@ -207,7 +207,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 // updatePostInMatrix updates an existing post in Matrix
 func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, eventID string, user *model.User) error {
 	// Create or get ghost user
-	ghostUserID, err := p.CreateOrGetGhostUser(user.Id, user.Username)
+	ghostUserID, err := p.CreateOrGetGhostUser(user.Id)
 	if err != nil {
 		return errors.Wrap(err, "failed to create or get ghost user")
 	}
@@ -357,7 +357,7 @@ func (p *Plugin) addReactionToMatrix(reaction *model.Reaction, channelID string)
 	}
 
 	// Create or get ghost user
-	ghostUserID, err := p.CreateOrGetGhostUser(user.Id, user.Username)
+	ghostUserID, err := p.CreateOrGetGhostUser(user.Id)
 	if err != nil {
 		return errors.Wrap(err, "failed to create or get ghost user for reaction")
 	}

@@ -68,7 +68,9 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	if timestamp, exists := processedTransactions[txnID]; exists {
 		p.API.LogDebug("Duplicate Matrix transaction ignored", "txn_id", txnID, "previous_timestamp", timestamp)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("{}"))
+		if _, err := w.Write([]byte("{}")); err != nil {
+			p.API.LogWarn("Failed to write webhook response", "error", err)
+		}
 		return
 	}
 
@@ -111,7 +113,9 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 
 	// Return success response
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("{}"))
+	if _, err := w.Write([]byte("{}")); err != nil {
+		p.API.LogWarn("Failed to write webhook response", "error", err)
+	}
 }
 
 // processMatrixEvent routes a single Matrix event to the appropriate handler
@@ -169,7 +173,7 @@ func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
 			}
 
 			roomIdentifier := string(roomIdentifierBytes)
-			
+
 			// Check if this mapping points to our room
 			// Handle both room aliases and room IDs
 			if roomIdentifier == roomID {
@@ -207,10 +211,10 @@ func (p *Plugin) isGhostUser(userID string) bool {
 		return false
 	}
 	serverDomain := parsedURL.Hostname()
-	
+
 	// Ghost users follow the pattern: @_mattermost_<mattermost_user_id>:<server_domain>
 	ghostUserPrefix := "@_mattermost_"
 	ghostUserSuffix := fmt.Sprintf(":%s", serverDomain)
-	
+
 	return strings.HasPrefix(userID, ghostUserPrefix) && strings.HasSuffix(userID, ghostUserSuffix)
 }

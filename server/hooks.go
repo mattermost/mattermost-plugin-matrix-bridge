@@ -6,7 +6,7 @@ import (
 )
 
 // OnSharedChannelsSyncMsg is called when messages need to be synced from Mattermost to Matrix
-func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteCluster) (model.SyncResponse, error) {
+func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteCluster) (model.SyncResponse, error) {
 	config := p.getConfiguration()
 	if !config.EnableSync {
 		return model.SyncResponse{}, nil
@@ -45,7 +45,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 }
 
 // OnSharedChannelsPing is called to check if the bridge is healthy and ready to process messages
-func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
+func (p *Plugin) OnSharedChannelsPing(_ *model.RemoteCluster) bool {
 	config := p.getConfiguration()
 
 	// If sync is disabled, we're still "healthy" but not actively processing
@@ -76,7 +76,7 @@ func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
 }
 
 // OnSharedChannelsAttachmentSyncMsg is called when file attachments need to be synced
-func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *model.Post, rc *model.RemoteCluster) error {
+func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *model.Post, _ *model.RemoteCluster) error {
 	config := p.getConfiguration()
 	if !config.EnableSync {
 		return nil
@@ -189,7 +189,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 	}
 
 	// Find and delete the file message from Matrix
-	err = p.findAndDeleteFileMessage(matrixRoomID, ghostUserID, fi.Name, fi.MimeType, postEventID)
+	err = p.findAndDeleteFileMessage(matrixRoomID, ghostUserID, fi.Name, postEventID)
 	if err != nil {
 		return errors.Wrap(err, "failed to find and delete file message in Matrix")
 	}
@@ -199,7 +199,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 }
 
 // OnSharedChannelsProfileImageSyncMsg is called when user profile images need to be synced
-func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, rc *model.RemoteCluster) error {
+func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, _ *model.RemoteCluster) error {
 	config := p.getConfiguration()
 	if !config.EnableSync {
 		return nil
