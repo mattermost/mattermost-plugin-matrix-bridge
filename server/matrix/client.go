@@ -353,13 +353,13 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 
 	c.api.LogDebug("Creating Matrix room", "name", name, "topic", topic, "server_domain", serverDomain)
 
-	// Create room alias without namespace prefix for public discoverability
+	// Create room alias using reserved Application Service namespace
 	alias := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
 	alias = strings.ReplaceAll(alias, "_", "-")
-	// Use clean alias for public room directory appearance
+	// Use _mattermost_ prefix for namespace reservation
 	roomAlias := ""
 	if serverDomain != "" {
-		roomAlias = "#" + alias + ":" + serverDomain
+		roomAlias = "#_mattermost_" + alias + ":" + serverDomain
 	}
 
 	roomData := map[string]any{
@@ -400,7 +400,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 
 	// Add room alias if we have a server domain
 	if roomAlias != "" {
-		roomData["room_alias_name"] = alias // Just the local part for room_alias_name
+		roomData["room_alias_name"] = "_mattermost_" + alias // Include namespace prefix in local part
 	}
 
 	jsonData, err := json.Marshal(roomData)
