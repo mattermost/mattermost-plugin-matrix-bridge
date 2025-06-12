@@ -49,7 +49,7 @@ Use slash commands to bridge channels:
 - Messages (with formatting and mentions)
 - Emoji reactions (4,400+ emoji support)
 - Message edits and deletions
-- User profiles and avatars
+- User profiles with display names and avatars
 - Reply threads
 
 ## Requirements

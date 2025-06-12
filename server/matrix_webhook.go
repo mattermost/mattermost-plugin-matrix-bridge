@@ -145,9 +145,7 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 	case "m.reaction":
 		return p.syncMatrixReactionToMattermost(event, channelID)
 	case "m.room.member":
-		// Handle membership changes if needed
-		p.API.LogDebug("Ignoring membership event", "event_id", event.EventID, "room_id", event.RoomID)
-		return nil
+		return p.syncMatrixMemberEventToMattermost(event, channelID)
 	case "m.room.redaction":
 		return p.syncMatrixRedactionToMattermost(event, channelID)
 	default:

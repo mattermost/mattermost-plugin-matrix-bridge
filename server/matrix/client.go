@@ -1206,6 +1206,101 @@ func (c *Client) GetUserProfile(userID string) (*UserProfile, error) {
 	return &profile, nil
 }
 
+// DownloadAvatar downloads avatar image data from a Matrix MXC URI
+func (c *Client) DownloadAvatar(avatarURL string) ([]byte, error) {
+	if avatarURL == "" {
+		return nil, errors.New("avatar URL is empty")
+	}
+
+	// Matrix avatar URLs are in the format mxc://server/media_id
+	if !strings.HasPrefix(avatarURL, "mxc://") {
+		return nil, errors.New("invalid Matrix avatar URL format")
+	}
+
+	// Extract server and media ID from mxc://server/media_id
+	mxcParts := strings.TrimPrefix(avatarURL, "mxc://")
+	parts := strings.SplitN(mxcParts, "/", 2)
+	if len(parts) != 2 {
+		return nil, errors.New("invalid Matrix MXC URI format")
+	}
+
+	serverName := parts[0]
+	mediaID := parts[1]
+
+	// Try different media download endpoints
+	downloadURLs := []string{
+		// NEW: Try client API endpoints first (newer Synapse versions use these)
+		fmt.Sprintf("%s/_matrix/client/v1/media/download/%s/%s", c.serverURL, serverName, mediaID),
+		fmt.Sprintf("%s/_matrix/client/v1/media/download/%s", c.serverURL, mediaID),
+		// Standard Matrix media repository API v3
+		fmt.Sprintf("%s/_matrix/media/v3/download/%s/%s", c.serverURL, serverName, mediaID),
+		// Fallback to v1 API (some older servers)
+		fmt.Sprintf("%s/_matrix/media/v1/download/%s/%s", c.serverURL, serverName, mediaID),
+		// Alternative endpoint without server name (some configurations)
+		fmt.Sprintf("%s/_matrix/media/v3/download/%s", c.serverURL, mediaID),
+		fmt.Sprintf("%s/_matrix/media/v1/download/%s", c.serverURL, mediaID),
+	}
+
+	var lastErr error
+	for i, downloadURL := range downloadURLs {
+		c.api.LogDebug("Attempting to download Matrix avatar", "url", downloadURL, "attempt", i+1)
+
+		req, err := http.NewRequest("GET", downloadURL, nil)
+		if err != nil {
+			c.api.LogWarn("Failed to create avatar download request", "error", err, "url", downloadURL)
+			lastErr = err
+			continue
+		}
+
+		// Add authorization header for authenticated download
+		req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			c.api.LogWarn("Failed to download avatar from URL", "error", err, "url", downloadURL)
+			lastErr = err
+			continue
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			c.api.LogWarn("Matrix media endpoint returned error", "url", downloadURL, "status", resp.StatusCode)
+			lastErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, downloadURL)
+			continue
+		}
+
+		// Check content type
+		contentType := resp.Header.Get("Content-Type")
+		if !strings.HasPrefix(contentType, "image/") {
+			c.api.LogWarn("Invalid content type for avatar", "content_type", contentType, "url", downloadURL)
+			lastErr = fmt.Errorf("invalid content type: %s", contentType)
+			continue
+		}
+
+		// Read the image data
+		avatarData, err := io.ReadAll(resp.Body)
+		if err != nil {
+			c.api.LogWarn("Failed to read avatar data", "error", err, "url", downloadURL)
+			lastErr = err
+			continue
+		}
+
+		// Check size limit (6MB max for Mattermost)
+		const maxAvatarSize = 6 * 1024 * 1024
+		if len(avatarData) > maxAvatarSize {
+			c.api.LogWarn("Avatar too large", "size", len(avatarData), "max", maxAvatarSize, "url", downloadURL)
+			lastErr = fmt.Errorf("avatar too large: %d bytes (max %d)", len(avatarData), maxAvatarSize)
+			continue
+		}
+
+		c.api.LogDebug("Successfully downloaded Matrix avatar", "url", downloadURL, "size", len(avatarData), "content_type", contentType)
+		return avatarData, nil
+	}
+
+	// If we get here, all attempts failed
+	return nil, errors.Wrapf(lastErr, "failed to download avatar from any endpoint for MXC URI: %s", avatarURL)
+}
+
 // PublishRoomToDirectory explicitly publishes a room to the public directory
 func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
 	if c.asToken == "" {

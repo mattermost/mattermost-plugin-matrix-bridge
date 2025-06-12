@@ -85,7 +85,7 @@ func TestHelloCommand(t *testing.T) {
 	}).Return(nil)
 
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix connection"))
+	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix server connection and configuration"))
 	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
 	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
@@ -374,7 +374,7 @@ func setupCommandRegistration(env *env) {
 
 	// Matrix command registration
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix connection"))
+	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix server connection and configuration"))
 	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
 	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))

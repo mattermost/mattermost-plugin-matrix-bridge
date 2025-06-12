@@ -7,6 +7,7 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
+	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 // syncMatrixMessageToMattermost handles syncing Matrix messages to Mattermost posts
@@ -213,7 +214,13 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 		mattermostUserID := string(userIDBytes)
 
 		// Verify the user still exists
-		if _, appErr := p.API.GetUser(mattermostUserID); appErr == nil {
+		if existingUser, appErr := p.API.GetUser(mattermostUserID); appErr == nil {
+			// User exists, check if we need to update their profile
+			context := &ProfileUpdateContext{
+				EventID: "",
+				Source:  "api",
+			}
+			p.updateMattermostUserProfile(existingUser, matrixUserID, context)
 			return mattermostUserID, nil
 		}
 
@@ -232,21 +239,32 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 	// Create a unique Mattermost username
 	mattermostUsername := p.generateMattermostUsername(username)
 
-	// Get real display name from Matrix profile
+	// Get real display name and avatar from Matrix profile
 	var displayName string
 	var firstName, lastName string
+	var avatarData []byte
 
 	if p.matrixClient != nil {
 		profile, err := p.matrixClient.GetUserProfile(matrixUserID)
 		if err != nil {
 			p.API.LogWarn("Failed to get Matrix user profile", "error", err, "user_id", matrixUserID)
 			displayName = username // Fallback to username
-		} else if profile.DisplayName != "" {
-			displayName = profile.DisplayName
-			// Try to parse first/last name from display name
-			firstName, lastName = p.parseDisplayName(profile.DisplayName)
 		} else {
-			displayName = username // Fallback to username if no display name set
+			if profile.DisplayName != "" {
+				displayName = profile.DisplayName
+				// Try to parse first/last name from display name
+				firstName, lastName = p.parseDisplayName(profile.DisplayName)
+			} else {
+				displayName = username // Fallback to username if no display name set
+			}
+
+			// Download avatar if available
+			if profile.AvatarURL != "" {
+				avatarData, err = p.downloadMatrixAvatar(profile.AvatarURL)
+				if err != nil {
+					p.API.LogWarn("Failed to download Matrix user avatar", "error", err, "user_id", matrixUserID, "avatar_url", profile.AvatarURL)
+				}
+			}
 		}
 	} else {
 		displayName = username // Fallback if no Matrix client
@@ -268,6 +286,16 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 	createdUser, appErr := p.API.CreateUser(user)
 	if appErr != nil {
 		return "", errors.Wrap(appErr, "failed to create Mattermost user")
+	}
+
+	// Set avatar if we downloaded one
+	if len(avatarData) > 0 {
+		appErr = p.API.SetProfileImage(createdUser.Id, avatarData)
+		if appErr != nil {
+			p.API.LogWarn("Failed to set Matrix user avatar", "error", appErr, "user_id", createdUser.Id, "matrix_user_id", matrixUserID)
+		} else {
+			p.API.LogDebug("Successfully set avatar for Matrix user", "user_id", createdUser.Id, "matrix_user_id", matrixUserID)
+		}
 	}
 
 	// Store the mapping
@@ -450,4 +478,241 @@ func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 		}
 		return safeName
 	}
+}
+
+// downloadMatrixAvatar downloads an avatar image from a Matrix MXC URI
+func (p *Plugin) downloadMatrixAvatar(avatarURL string) ([]byte, error) {
+	if p.matrixClient == nil {
+		return nil, errors.New("Matrix client not configured")
+	}
+
+	// Use the Matrix client's dedicated avatar download method
+	return p.matrixClient.DownloadAvatar(avatarURL)
+}
+
+// ProfileUpdateContext provides context information for profile updates
+type ProfileUpdateContext struct {
+	EventID string // Matrix event ID if update is from an event
+	Source  string // "api" for proactive checks, "event" for Matrix member events
+}
+
+// updateMattermostUserProfile updates an existing Mattermost user's profile from Matrix
+// Can be called either proactively (fetching current profile) or reactively (from Matrix events)
+func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixUserID string, context *ProfileUpdateContext, profileData ...*matrix.UserProfile) {
+	if p.matrixClient == nil {
+		return
+	}
+
+	var profile *matrix.UserProfile
+	var err error
+
+	// Determine profile data source
+	if len(profileData) > 0 && profileData[0] != nil {
+		// Use provided profile data (from Matrix event)
+		profile = profileData[0]
+	} else {
+		// Fetch current Matrix profile (proactive check)
+		profile, err = p.matrixClient.GetUserProfile(matrixUserID)
+		if err != nil {
+			p.API.LogWarn("Failed to get Matrix user profile for update", "error", err, "user_id", matrixUserID)
+			return
+		}
+	}
+
+	var needsUpdate bool
+	updatedUser := *mattermostUser // Create a copy
+
+	// Check display name updates
+	if profile.DisplayName != "" {
+		// Parse first/last name from display name
+		firstName, lastName := p.parseDisplayName(profile.DisplayName)
+
+		// Update nickname (display name)
+		if updatedUser.Nickname != profile.DisplayName {
+			if context.Source == "event" {
+				p.API.LogInfo("Updating user display name from Matrix event", "user_id", mattermostUser.Id, "old_name", mattermostUser.Nickname, "new_name", profile.DisplayName, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+			} else {
+				p.API.LogDebug("Updating display name from proactive check", "user_id", mattermostUser.Id, "old", mattermostUser.Nickname, "new", profile.DisplayName)
+			}
+			updatedUser.Nickname = profile.DisplayName
+			needsUpdate = true
+		}
+
+		// Update first/last name if they changed
+		if updatedUser.FirstName != firstName {
+			updatedUser.FirstName = firstName
+			needsUpdate = true
+		}
+		if updatedUser.LastName != lastName {
+			updatedUser.LastName = lastName
+			needsUpdate = true
+		}
+	}
+
+	// Update user profile if needed
+	if needsUpdate {
+		if _, appErr := p.API.UpdateUser(&updatedUser); appErr != nil {
+			if context.Source == "event" {
+				p.API.LogError("Failed to update Mattermost user profile from Matrix event", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+			} else {
+				p.API.LogWarn("Failed to update Mattermost user profile from proactive check", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
+			}
+		} else {
+			if context.Source == "event" {
+				p.API.LogInfo("Successfully updated Mattermost user profile from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName, "event_id", context.EventID)
+			} else {
+				p.API.LogInfo("Updated Mattermost user profile from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName)
+			}
+		}
+	}
+
+	// Check avatar updates
+	if profile.AvatarURL != "" {
+		p.updateMattermostUserAvatar(mattermostUser, matrixUserID, profile.AvatarURL, context)
+	}
+}
+
+// updateMattermostUserAvatar updates a Mattermost user's profile image from Matrix
+// Compares current and new image data to avoid unnecessary updates
+func (p *Plugin) updateMattermostUserAvatar(mattermostUser *model.User, matrixUserID, matrixAvatarURL string, context *ProfileUpdateContext) {
+	// Get current Mattermost profile image
+	currentAvatarData, appErr := p.API.GetProfileImage(mattermostUser.Id)
+	if appErr != nil {
+		if context.Source == "event" {
+			p.API.LogWarn("Failed to get current Mattermost profile image for comparison", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+		} else {
+			p.API.LogDebug("Failed to get current Mattermost profile image for comparison", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
+		}
+		// Continue with update even if we can't get current image
+		currentAvatarData = nil
+	}
+
+	// Download Matrix avatar image
+	newAvatarData, err := p.downloadMatrixAvatar(matrixAvatarURL)
+	if err != nil {
+		if context.Source == "event" {
+			p.API.LogWarn("Failed to download Matrix avatar for comparison", "error", err, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID)
+		} else {
+			p.API.LogDebug("Failed to download Matrix avatar for comparison", "error", err, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL)
+		}
+		return
+	}
+
+	// Compare image data to see if update is needed
+	if currentAvatarData != nil && p.compareImageData(currentAvatarData, newAvatarData) {
+		p.API.LogDebug("Matrix avatar unchanged, skipping update", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "source", context.Source)
+		return
+	}
+
+	// Images are different, update the profile image
+	appErr = p.API.SetProfileImage(mattermostUser.Id, newAvatarData)
+	if appErr != nil {
+		if context.Source == "event" {
+			p.API.LogError("Failed to update Mattermost user avatar from Matrix event", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+		} else {
+			p.API.LogWarn("Failed to update Mattermost user avatar from proactive check", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
+		}
+		return
+	}
+
+	// Log successful avatar update
+	if context.Source == "event" {
+		p.API.LogInfo("Successfully updated Mattermost user avatar from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID, "size_bytes", len(newAvatarData))
+	} else {
+		p.API.LogInfo("Updated Mattermost user avatar from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "size_bytes", len(newAvatarData))
+	}
+}
+
+// compareImageData compares two image byte arrays to determine if they're the same
+// Uses a simple byte comparison for now, could be enhanced with more sophisticated comparison
+func (p *Plugin) compareImageData(currentData, newData []byte) bool {
+	// Quick size check first
+	if len(currentData) != len(newData) {
+		return false
+	}
+
+	// If both are empty, they're the same
+	if len(currentData) == 0 {
+		return true
+	}
+
+	// Compare byte by byte
+	for i := range currentData {
+		if currentData[i] != newData[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// syncMatrixMemberEventToMattermost handles Matrix member events (joins, leaves, profile changes)
+func (p *Plugin) syncMatrixMemberEventToMattermost(event MatrixEvent, channelID string) error {
+	p.API.LogDebug("Processing Matrix member event", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+
+	// Skip events from our own ghost users to prevent loops
+	if p.isGhostUser(event.Sender) {
+		p.API.LogDebug("Ignoring member event from ghost user", "sender", event.Sender, "event_id", event.EventID)
+		return nil
+	}
+
+	// Extract membership state and content
+	membership, ok := event.Content["membership"].(string)
+	if !ok {
+		p.API.LogDebug("Member event missing membership field", "event_id", event.EventID, "sender", event.Sender)
+		return nil
+	}
+
+	// We only care about profile changes for existing members
+	// Profile changes happen when membership is "join" and there are profile fields
+	if membership != "join" {
+		p.API.LogDebug("Ignoring non-join member event", "event_id", event.EventID, "sender", event.Sender, "membership", membership)
+		return nil
+	}
+
+	// Check if this is a profile change (has displayname or avatar_url in content)
+	displayName, hasDisplayName := event.Content["displayname"].(string)
+	avatarURL, hasAvatarURL := event.Content["avatar_url"].(string)
+
+	if !hasDisplayName && !hasAvatarURL {
+		p.API.LogDebug("Member event has no profile information", "event_id", event.EventID, "sender", event.Sender)
+		return nil
+	}
+
+	p.API.LogDebug("Detected Matrix profile change", "event_id", event.EventID, "sender", event.Sender, "display_name", displayName, "avatar_url", avatarURL)
+
+	// Check if we have a Mattermost user for this Matrix user
+	userMapKey := "matrix_user_" + event.Sender
+	userIDBytes, err := p.kvstore.Get(userMapKey)
+	if err != nil || len(userIDBytes) == 0 {
+		p.API.LogDebug("No Mattermost user found for Matrix user profile change", "matrix_user_id", event.Sender, "event_id", event.EventID)
+		return nil // User doesn't exist in Mattermost yet, ignore profile change
+	}
+
+	mattermostUserID := string(userIDBytes)
+
+	// Get the existing Mattermost user
+	mattermostUser, appErr := p.API.GetUser(mattermostUserID)
+	if appErr != nil {
+		p.API.LogWarn("Failed to get Mattermost user for profile update", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", event.Sender)
+		return nil
+	}
+
+	p.API.LogDebug("Found Mattermost user for profile update", "user_id", mattermostUser.Id, "username", mattermostUser.Username, "matrix_user_id", event.Sender)
+
+	// Create profile data from Matrix event
+	eventProfile := &matrix.UserProfile{
+		DisplayName: displayName,
+		AvatarURL:   avatarURL,
+	}
+
+	// Update the user's profile using the unified method
+	context := &ProfileUpdateContext{
+		EventID: event.EventID,
+		Source:  "event",
+	}
+
+	p.updateMattermostUserProfile(mattermostUser, event.Sender, context, eventProfile)
+
+	return nil
 }
