@@ -35,7 +35,7 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 	}
 
 	// Get or create Mattermost user for the Matrix sender
-	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender)
+	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender, channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get or create Mattermost user")
 	}
@@ -152,7 +152,7 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 	}
 
 	// Get or create Mattermost user for the reaction sender
-	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender)
+	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender, channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get or create Mattermost user for reaction")
 	}
@@ -206,7 +206,8 @@ func (p *Plugin) syncMatrixRedactionToMattermost(event MatrixEvent, channelID st
 }
 
 // getOrCreateMattermostUser gets or creates a Mattermost user for a Matrix user
-func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) {
+// If channelID is provided, ensures the user is added to the team associated with that channel
+func (p *Plugin) getOrCreateMattermostUser(matrixUserID string, channelID string) (string, error) {
 	// Check if we already have a mapping for this Matrix user
 	userMapKey := "matrix_user_" + matrixUserID
 	userIDBytes, err := p.kvstore.Get(userMapKey)
@@ -215,7 +216,14 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 
 		// Verify the user still exists
 		if existingUser, appErr := p.API.GetUser(mattermostUserID); appErr == nil {
-			// User exists, check if we need to update their profile
+			// User exists, ensure they're in the team for this channel
+			if channelID != "" {
+				if err := p.addUserToChannelTeam(mattermostUserID, channelID); err != nil {
+					p.API.LogWarn("Failed to add existing Matrix user to team", "error", err, "user_id", mattermostUserID, "channel_id", channelID, "matrix_user_id", matrixUserID)
+				}
+			}
+
+			// Check if we need to update their profile
 			context := &ProfileUpdateContext{
 				EventID: "",
 				Source:  "api",
@@ -298,6 +306,13 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 		}
 	}
 
+	// Add user to team if channelID is provided
+	if channelID != "" {
+		if err := p.addUserToChannelTeam(createdUser.Id, channelID); err != nil {
+			p.API.LogWarn("Failed to add new Matrix user to team", "error", err, "user_id", createdUser.Id, "channel_id", channelID, "matrix_user_id", matrixUserID)
+		}
+	}
+
 	// Store the mapping
 	err = p.kvstore.Set(userMapKey, []byte(createdUser.Id))
 	if err != nil {
@@ -306,6 +321,32 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string) (string, error) 
 
 	p.API.LogInfo("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
 	return createdUser.Id, nil
+}
+
+// addUserToChannelTeam adds a user to the team that owns the specified channel
+func (p *Plugin) addUserToChannelTeam(userID, channelID string) error {
+	// Get the channel to find its team ID
+	channel, appErr := p.API.GetChannel(channelID)
+	if appErr != nil {
+		return errors.Wrap(appErr, "failed to get channel")
+	}
+
+	// Check if user is already a member of the team
+	_, appErr = p.API.GetTeamMember(channel.TeamId, userID)
+	if appErr == nil {
+		// User is already a team member
+		p.API.LogDebug("User already member of team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
+		return nil
+	}
+
+	// Add user to the team
+	_, appErr = p.API.CreateTeamMember(channel.TeamId, userID)
+	if appErr != nil {
+		return errors.Wrap(appErr, "failed to add user to team")
+	}
+
+	p.API.LogInfo("Added Matrix user to team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
+	return nil
 }
 
 // extractUsernameFromMatrixUserID extracts username from Matrix user ID
