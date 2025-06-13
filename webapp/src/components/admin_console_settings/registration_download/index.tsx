@@ -2,6 +2,9 @@
 // See LICENSE.txt for license information.
 
 import React, {useEffect, useState} from 'react';
+import {useSelector} from 'react-redux';
+
+import {getConfig} from 'mattermost-redux/selectors/entities/general';
 
 interface Props {
     label: string;
@@ -16,6 +19,8 @@ interface AdminConsoleConfig {
 }
 
 const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
+    const mattermostConfig = useSelector(getConfig);
+    const siteURL = mattermostConfig.SiteURL;
     const [isDownloadEnabled, setIsDownloadEnabled] = useState(false);
     const [currentValues, setCurrentValues] = useState<AdminConsoleConfig>({
         matrix_server_url: '',
@@ -41,7 +46,8 @@ const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
             const hasAllValues = Boolean(
                 values.matrix_server_url?.trim() &&
                 values.matrix_as_token?.trim() &&
-                values.matrix_hs_token?.trim(),
+                values.matrix_hs_token?.trim() &&
+                siteURL?.trim(),
             );
             setIsDownloadEnabled(hasAllValues);
         };
@@ -70,7 +76,7 @@ const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
         }
 
         const registrationYaml = `id: "mattermost-bridge"
-url: "http://localhost:8065/plugins/com.mattermost.plugin-matrix-bridge"
+url: "${siteURL}/plugins/com.mattermost.plugin-matrix-bridge"
 as_token: "${currentValues.matrix_as_token}"
 hs_token: "${currentValues.matrix_hs_token}"
 sender_localpart: "_mattermost_bridge"
@@ -88,9 +94,7 @@ namespaces:
       regex: "!.*:${domain}"
 rate_limited: false
 protocols: ["mattermost"]
-# Allow the application service to manage room directory visibility
 de.sorunome.msc2409.push_ephemeral: true
-# Alternative approach: explicitly grant room directory permissions
 permissions:
   - "m.room.directory"
   - "m.room.membership"`;
@@ -142,7 +146,10 @@ permissions:
                         className='help-text'
                         style={{color: '#999', marginTop: '8px'}}
                     >
-                        {'Please fill in all Matrix configuration fields to enable download.'}
+                        {siteURL?.trim() ?
+                            'Please fill in all Matrix configuration fields to enable download.' :
+                            'Please configure the Site URL in System Console > General > Server Settings to enable download.'
+                        }
                     </div>
                 )}
             </div>
