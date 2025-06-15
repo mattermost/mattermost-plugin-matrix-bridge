@@ -57,7 +57,7 @@ const RegistrationDownload: React.FC<Props> = ({label, helpText, config}) => {
         const interval = setInterval(checkValues, 500);
 
         return () => clearInterval(interval);
-    }, [config]);
+    }, [config, siteURL]);
 
     const generateRegistrationFile = () => {
         if (!isDownloadEnabled) {
@@ -146,10 +146,7 @@ permissions:
                         className='help-text'
                         style={{color: '#999', marginTop: '8px'}}
                     >
-                        {siteURL?.trim() ?
-                            'Please fill in all Matrix configuration fields to enable download.' :
-                            'Please configure the Site URL in System Console > General > Server Settings to enable download.'
-                        }
+                        {siteURL?.trim() ? 'Please fill in all Matrix configuration fields to enable download.' : 'Please configure the Site URL in System Console > General > Server Settings to enable download.'}
                     </div>
                 )}
             </div>

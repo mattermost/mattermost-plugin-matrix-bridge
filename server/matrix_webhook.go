@@ -15,15 +15,15 @@ import (
 
 // MatrixEvent represents a Matrix event received via Application Service webhook
 type MatrixEvent struct {
-	Type       string                 `json:"type"`
-	EventID    string                 `json:"event_id"`
-	Sender     string                 `json:"sender"`
-	RoomID     string                 `json:"room_id"`
-	Content    map[string]interface{} `json:"content"`
-	StateKey   *string                `json:"state_key,omitempty"`
-	Timestamp  int64                  `json:"origin_server_ts"`
-	Unsigned   map[string]interface{} `json:"unsigned,omitempty"`
-	PrevEvents []string               `json:"prev_events,omitempty"`
+	Type       string         `json:"type"`
+	EventID    string         `json:"event_id"`
+	Sender     string         `json:"sender"`
+	RoomID     string         `json:"room_id"`
+	Content    map[string]any `json:"content"`
+	StateKey   *string        `json:"state_key,omitempty"`
+	Timestamp  int64          `json:"origin_server_ts"`
+	Unsigned   map[string]any `json:"unsigned,omitempty"`
+	PrevEvents []string       `json:"prev_events,omitempty"`
 }
 
 // MatrixTransaction represents a transaction from the Matrix homeserver
