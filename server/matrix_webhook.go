@@ -83,7 +83,7 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Log the raw transaction body for debugging
+	// Log the raw transaction body for debugging (only if MM_MATRIX_LOG_FILESPEC is set)
 	p.transactionLogger.Debug("Received Matrix transaction", logr.String("txn_id", txnID), logr.String("body", string(body)))
 
 	// Parse transaction JSON

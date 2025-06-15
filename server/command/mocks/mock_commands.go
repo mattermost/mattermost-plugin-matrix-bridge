@@ -35,11 +35,11 @@ func (m *MockCommand) EXPECT() *MockCommandMockRecorder {
 }
 
 // Handle mocks base method.
-func (m *MockCommand) Handle(arg0 *model.CommandArgs) (*model.CommandResponse, *model.AppError) {
+func (m *MockCommand) Handle(arg0 *model.CommandArgs) (*model.CommandResponse, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Handle", arg0)
 	ret0, _ := ret[0].(*model.CommandResponse)
-	ret1, _ := ret[1].(*model.AppError)
+	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
@@ -61,4 +61,18 @@ func (m *MockCommand) executeHelloCommand(arg0 *model.CommandArgs) *model.Comman
 func (mr *MockCommandMockRecorder) executeHelloCommand(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "executeHelloCommand", reflect.TypeOf((*MockCommand)(nil).executeHelloCommand), arg0)
+}
+
+// executeMatrixCommand mocks base method.
+func (m *MockCommand) executeMatrixCommand(arg0 *model.CommandArgs) *model.CommandResponse {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "executeMatrixCommand", arg0)
+	ret0, _ := ret[0].(*model.CommandResponse)
+	return ret0
+}
+
+// executeMatrixCommand indicates an expected call of executeMatrixCommand.
+func (mr *MockCommandMockRecorder) executeMatrixCommand(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "executeMatrixCommand", reflect.TypeOf((*MockCommand)(nil).executeMatrixCommand), arg0)
 }
