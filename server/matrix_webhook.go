@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/mattermost/logr/v2"
 	"github.com/pkg/errors"
 )
 
@@ -81,6 +82,9 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
+
+	// Log the raw transaction body for debugging
+	p.transactionLogger.Debug("Received Matrix transaction", logr.String("txn_id", txnID), logr.String("body", string(body)))
 
 	// Parse transaction JSON
 	var transaction MatrixTransaction

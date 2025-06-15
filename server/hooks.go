@@ -160,7 +160,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 
 	// Get Matrix event ID from post properties - this is the message the file was attached to
 	config := p.getConfiguration()
-	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var postEventID string

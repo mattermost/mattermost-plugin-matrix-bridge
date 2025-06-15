@@ -1,13 +1,11 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
 func TestParseDisplayName(t *testing.T) {
-	// Create a mock plugin instance for testing
-	plugin := &Plugin{}
-
 	tests := []struct {
 		name              string
 		displayName       string
@@ -108,7 +106,7 @@ func TestParseDisplayName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			firstName, lastName := plugin.parseDisplayName(tt.displayName)
+			firstName, lastName := parseDisplayName(tt.displayName)
 
 			if firstName != tt.expectedFirstName {
 				t.Errorf("parseDisplayName(%q) firstName = %q, want %q",
@@ -124,23 +122,267 @@ func TestParseDisplayName(t *testing.T) {
 }
 
 func TestParseDisplayNameEdgeCases(t *testing.T) {
-	plugin := &Plugin{}
-
 	// Test with tabs and multiple spaces
-	firstName, lastName := plugin.parseDisplayName("John\t\t   Doe")
+	firstName, lastName := parseDisplayName("John\t\t   Doe")
 	if firstName != "John" || lastName != "Doe" {
 		t.Errorf("parseDisplayName with tabs failed: got (%q, %q), want (\"John\", \"Doe\")", firstName, lastName)
 	}
 
 	// Test with newlines
-	firstName, lastName = plugin.parseDisplayName("John\nDoe")
+	firstName, lastName = parseDisplayName("John\nDoe")
 	if firstName != "John" || lastName != "Doe" {
 		t.Errorf("parseDisplayName with newlines failed: got (%q, %q), want (\"John\", \"Doe\")", firstName, lastName)
 	}
 
 	// Test with mixed whitespace
-	firstName, lastName = plugin.parseDisplayName(" \t John \n  Michael \r  Doe \t ")
+	firstName, lastName = parseDisplayName(" \t John \n  Michael \r  Doe \t ")
 	if firstName != "John" || lastName != "Michael Doe" {
 		t.Errorf("parseDisplayName with mixed whitespace failed: got (%q, %q), want (\"John\", \"Michael Doe\")", firstName, lastName)
+	}
+}
+
+// mockLogger implements the Logger interface for testing
+type mockLogger struct {
+	logs []string
+}
+
+func (m *mockLogger) LogWarn(message string, _ ...interface{}) {
+	m.logs = append(m.logs, message)
+}
+
+func TestExtractServerDomain(t *testing.T) {
+	tests := []struct {
+		name      string
+		serverURL string
+		expected  string
+		shouldLog bool
+	}{
+		{
+			name:      "empty URL",
+			serverURL: "",
+			expected:  "unknown",
+			shouldLog: false,
+		},
+		{
+			name:      "valid HTTPS URL",
+			serverURL: "https://matrix.example.com",
+			expected:  "matrix_example_com",
+			shouldLog: false,
+		},
+		{
+			name:      "valid HTTP URL",
+			serverURL: "http://localhost:8008",
+			expected:  "localhost",
+			shouldLog: false,
+		},
+		{
+			name:      "URL with port",
+			serverURL: "https://matrix.example.com:8448",
+			expected:  "matrix_example_com",
+			shouldLog: false,
+		},
+		{
+			name:      "URL with path",
+			serverURL: "https://example.com/_matrix",
+			expected:  "example_com",
+			shouldLog: false,
+		},
+		{
+			name:      "invalid URL",
+			serverURL: "not-a-url",
+			expected:  "unknown",
+			shouldLog: true,
+		},
+		{
+			name:      "URL with special chars",
+			serverURL: "https://sub.domain.example.com",
+			expected:  "sub_domain_example_com",
+			shouldLog: false,
+		},
+		{
+			name:      "IPv6 URL",
+			serverURL: "https://[::1]:8008",
+			expected:  "__1", // Colons are replaced with underscores
+			shouldLog: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockLogger := &mockLogger{}
+			result := extractServerDomain(mockLogger, tt.serverURL)
+
+			if result != tt.expected {
+				t.Errorf("extractServerDomain(%q) = %q, want %q", tt.serverURL, result, tt.expected)
+			}
+
+			if tt.shouldLog && len(mockLogger.logs) == 0 {
+				t.Errorf("extractServerDomain(%q) should have logged a warning", tt.serverURL)
+			}
+
+			if !tt.shouldLog && len(mockLogger.logs) > 0 {
+				t.Errorf("extractServerDomain(%q) should not have logged warnings, but got: %v", tt.serverURL, mockLogger.logs)
+			}
+		})
+	}
+}
+
+func TestCleanupMarkdown(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "no cleanup needed",
+			input:    "Hello world",
+			expected: "Hello world",
+		},
+		{
+			name:     "remove excessive newlines",
+			input:    "Hello\n\n\n\nworld",
+			expected: "Hello\n\nworld",
+		},
+		{
+			name:     "trim whitespace",
+			input:    "  Hello world  ",
+			expected: "Hello world",
+		},
+		{
+			name:     "trim and clean newlines",
+			input:    "  \n\nHello\n\n\n\nworld\n\n  ",
+			expected: "Hello\n\nworld",
+		},
+		{
+			name:     "preserve double newlines",
+			input:    "Hello\n\nworld",
+			expected: "Hello\n\nworld",
+		},
+		{
+			name:     "reduce many newlines to double",
+			input:    "Hello\n\n\n\n\n\nworld",
+			expected: "Hello\n\nworld",
+		},
+		{
+			name:     "handle tabs and spaces",
+			input:    "\t  Hello world  \t",
+			expected: "Hello world",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := cleanupMarkdown(tt.input)
+			if result != tt.expected {
+				t.Errorf("cleanupMarkdown(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestConvertHTMLToMarkdown(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "plain text",
+			input:    "Hello world",
+			expected: "Hello world",
+		},
+		{
+			name:     "bold text",
+			input:    "<strong>bold</strong>",
+			expected: "**bold**",
+		},
+		{
+			name:     "italic text",
+			input:    "<em>italic</em>",
+			expected: "*italic*",
+		},
+		{
+			name:     "mixed formatting",
+			input:    "<strong>bold</strong> and <em>italic</em>",
+			expected: "**bold** and *italic*",
+		},
+		{
+			name:     "code block",
+			input:    "<pre><code>console.log('test');</code></pre>",
+			expected: "```\nconsole.log('test');\n```",
+		},
+		{
+			name:     "inline code",
+			input:    "Use <code>console.log</code> for debugging",
+			expected: "Use `console.log` for debugging",
+		},
+		{
+			name:     "links",
+			input:    "<a href=\"https://example.com\">Example</a>",
+			expected: "[Example](https://example.com)",
+		},
+		{
+			name:     "headers",
+			input:    "<h1>Title</h1><h2>Subtitle</h2>",
+			expected: "# Title\n\n## Subtitle",
+		},
+		{
+			name:     "unordered list",
+			input:    "<ul><li>Item 1</li><li>Item 2</li></ul>",
+			expected: "- Item 1\n- Item 2",
+		},
+		{
+			name:     "paragraphs",
+			input:    "<p>First paragraph</p><p>Second paragraph</p>",
+			expected: "First paragraph\n\nSecond paragraph",
+		},
+		{
+			name:     "line breaks",
+			input:    "Line 1<br>Line 2<br/>Line 3",
+			expected: "Line 1\n\nLine 2\n\nLine 3", // HTML-to-markdown adds double newlines for br tags
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockLogger := &mockLogger{}
+			result := convertHTMLToMarkdown(mockLogger, tt.input)
+
+			// Normalize whitespace for comparison
+			result = strings.TrimSpace(result)
+			expected := strings.TrimSpace(tt.expected)
+
+			if result != expected {
+				t.Errorf("convertHTMLToMarkdown(%q) = %q, want %q", tt.input, result, expected)
+			}
+		})
+	}
+}
+
+func TestConvertHTMLToMarkdownError(t *testing.T) {
+	// Test error handling - the html-to-markdown library is quite resilient,
+	// so we just test that it doesn't panic and produces some output
+	mockLogger := &mockLogger{}
+	input := "<invalid><unclosed>tags"
+	result := convertHTMLToMarkdown(mockLogger, input)
+
+	// Should produce some output (library handles malformed HTML gracefully)
+	if result == "" {
+		t.Errorf("convertHTMLToMarkdown should produce some output, got empty string")
+	}
+
+	// Library handles malformed HTML without errors, so no warning expected
+	if len(mockLogger.logs) > 0 {
+		t.Errorf("convertHTMLToMarkdown should not log warnings for this input, but got: %v", mockLogger.logs)
 	}
 }

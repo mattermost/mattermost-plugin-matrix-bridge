@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mattermost/logr/v2"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
@@ -48,10 +49,19 @@ type Plugin struct {
 	// configuration is the active plugin configuration. Consult getConfiguration and
 	// setConfiguration for usage.
 	configuration *configuration
+
+	// Logr instance specifically for logging Matrix transactions.
+	transactionLogger logr.Logger
 }
 
 // OnActivate is invoked when the plugin is activated. If an error is returned, the plugin will be deactivated.
 func (p *Plugin) OnActivate() error {
+	var err error
+	p.transactionLogger, err = CreateLogger()
+	if err != nil {
+		return errors.Wrap(err, "failed to create transaction logger")
+	}
+
 	p.client = pluginapi.NewClient(p.API, p.Driver)
 
 	p.kvstore = kvstore.NewKVStore(p.client)

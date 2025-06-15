@@ -14,17 +14,14 @@ import (
 func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID string) error {
 	p.API.LogDebug("Syncing Matrix message to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
-	// Extract message content
-	content, ok := event.Content["body"].(string)
-	if !ok {
-		content = "" // Treat missing body as empty string
-	}
+	// Extract message content (prefer formatted_body if available)
+	content := p.extractMatrixMessageContent(event)
 
 	// Check if this is a message edit (has m.relates_to with rel_type: m.replace)
 	if relatesTo, exists := event.Content["m.relates_to"].(map[string]interface{}); exists {
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.replace" {
 			// This is an edit - handle separately (allow empty content for deletions)
-			return p.handleMatrixMessageEdit(event, channelID, content)
+			return p.handleMatrixMessageEdit(event, channelID)
 		}
 	}
 
@@ -69,7 +66,7 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 
 	// Store Matrix event ID in post properties for reaction mapping and edit tracking
 	config := p.getConfiguration()
-	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 	post.Props[propertyKey] = event.EventID
 	post.Props["from_matrix"] = true
@@ -85,7 +82,9 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 }
 
 // handleMatrixMessageEdit handles Matrix message edits by updating the corresponding Mattermost post
-func (p *Plugin) handleMatrixMessageEdit(event MatrixEvent, channelID string, newContent string) error {
+func (p *Plugin) handleMatrixMessageEdit(event MatrixEvent, channelID string) error {
+	// Extract the new content from the edit event
+	newContent := p.extractMatrixMessageContent(event)
 	// Extract the original event ID being edited
 	relatesTo, exists := event.Content["m.relates_to"].(map[string]interface{})
 	if !exists {
@@ -261,7 +260,7 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string, channelID string
 			if profile.DisplayName != "" {
 				displayName = profile.DisplayName
 				// Try to parse first/last name from display name
-				firstName, lastName = p.parseDisplayName(profile.DisplayName)
+				firstName, lastName = parseDisplayName(profile.DisplayName)
 			} else {
 				displayName = username // Fallback to username if no display name set
 			}
@@ -402,7 +401,7 @@ func (p *Plugin) generateMattermostUsername(baseUsername string) string {
 func (p *Plugin) getPostIDFromMatrixEvent(matrixEventID, channelID string) string {
 	// Search through posts in the channel to find one with matching Matrix event ID
 	config := p.getConfiguration()
-	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	// Get recent posts in the channel (Matrix events are usually recent)
@@ -566,7 +565,7 @@ func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixU
 	// Check display name updates
 	if profile.DisplayName != "" {
 		// Parse first/last name from display name
-		firstName, lastName := p.parseDisplayName(profile.DisplayName)
+		firstName, lastName := parseDisplayName(profile.DisplayName)
 
 		// Update nickname (display name)
 		if updatedUser.Nickname != profile.DisplayName {

@@ -63,7 +63,7 @@ func (p *Plugin) syncPostToMatrix(post *model.Post, channelID string) error {
 
 	// Check if this post already has a Matrix event ID (indicating it's an edit)
 	config := p.getConfiguration()
-	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var existingEventID string
@@ -252,7 +252,7 @@ func (p *Plugin) deletePostFromMatrix(post *model.Post, channelID string) error 
 
 	// Get Matrix event ID from post properties
 	config := p.getConfiguration()
-	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var matrixEventID string
@@ -335,7 +335,7 @@ func (p *Plugin) addReactionToMatrix(reaction *model.Reaction, channelID string)
 
 	// Get Matrix event ID from post properties
 	config := p.getConfiguration()
-	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var matrixEventID string
@@ -408,7 +408,7 @@ func (p *Plugin) removeReactionFromMatrix(reaction *model.Reaction, channelID st
 
 	// Get Matrix event ID from post properties
 	config := p.getConfiguration()
-	serverDomain := p.extractServerDomain(config.MatrixServerURL)
+	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var matrixEventID string

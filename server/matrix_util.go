@@ -2,11 +2,18 @@ package main
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 
+	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 )
+
+// Logger interface for logging operations
+type Logger interface {
+	LogWarn(message string, keyValuePairs ...interface{})
+}
 
 // getGhostUser retrieves the Matrix ghost user ID for a Mattermost user if it exists
 func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
@@ -109,20 +116,20 @@ func (p *Plugin) getMatrixRoomID(channelID string) (string, error) {
 }
 
 // extractServerDomain extracts the hostname from a Matrix server URL
-func (p *Plugin) extractServerDomain(serverURL string) string {
+func extractServerDomain(logger Logger, serverURL string) string {
 	if serverURL == "" {
 		return "unknown"
 	}
 
 	parsedURL, err := url.Parse(serverURL)
 	if err != nil {
-		p.API.LogWarn("Failed to parse Matrix server URL", "url", serverURL, "error", err)
+		logger.LogWarn("Failed to parse Matrix server URL", "url", serverURL, "error", err)
 		return "unknown"
 	}
 
 	hostname := parsedURL.Hostname()
 	if hostname == "" {
-		p.API.LogWarn("Could not extract hostname from Matrix server URL", "url", serverURL)
+		logger.LogWarn("Could not extract hostname from Matrix server URL", "url", serverURL)
 		return "unknown"
 	}
 
@@ -314,7 +321,7 @@ func (p *Plugin) getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUse
 }
 
 // parseDisplayName attempts to parse a display name into first and last name components
-func (p *Plugin) parseDisplayName(displayName string) (firstName, lastName string) {
+func parseDisplayName(displayName string) (firstName, lastName string) {
 	if displayName == "" {
 		return "", ""
 	}
@@ -339,4 +346,54 @@ func (p *Plugin) parseDisplayName(displayName string) (firstName, lastName strin
 		// Multiple parts - use first as first name, join rest as last name
 		return parts[0], strings.Join(parts[1:], " ")
 	}
+}
+
+// extractMatrixMessageContent extracts content from Matrix event, preferring formatted_body over body
+func (p *Plugin) extractMatrixMessageContent(event MatrixEvent) string {
+	// Check if there's HTML formatted content
+	if format, hasFormat := event.Content["format"].(string); hasFormat && format == "org.matrix.custom.html" {
+		if formattedBody, hasFormatted := event.Content["formatted_body"].(string); hasFormatted && formattedBody != "" {
+			// Convert HTML to Markdown
+			return convertHTMLToMarkdown(p.API, formattedBody)
+		}
+	}
+
+	// Fall back to plain text body
+	if body, hasBody := event.Content["body"].(string); hasBody {
+		return body
+	}
+
+	return ""
+}
+
+// convertHTMLToMarkdown converts Matrix HTML content to Mattermost-compatible markdown
+func convertHTMLToMarkdown(logger Logger, htmlContent string) string {
+	converter := md.NewConverter("", true, &md.Options{
+		StrongDelimiter:  "**",     // Use ** for bold (Mattermost standard)
+		EmDelimiter:      "*",      // Use * for italic
+		CodeBlockStyle:   "fenced", // Use ``` code blocks
+		HeadingStyle:     "atx",    // Use # headers
+		HorizontalRule:   "---",    // Use --- for hr
+		BulletListMarker: "-",      // Use - for bullets
+	})
+
+	markdown, err := converter.ConvertString(htmlContent)
+	if err != nil {
+		logger.LogWarn("Failed to convert HTML to markdown", "error", err, "html", htmlContent)
+		// Return original content if conversion fails
+		return htmlContent
+	}
+
+	return cleanupMarkdown(markdown)
+}
+
+// cleanupMarkdown cleans up conversion artifacts from HTML-to-markdown conversion
+func cleanupMarkdown(markdown string) string {
+	// Remove excessive newlines
+	cleaned := regexp.MustCompile(`\n{3,}`).ReplaceAllString(markdown, "\n\n")
+
+	// Trim leading/trailing whitespace
+	cleaned = strings.TrimSpace(cleaned)
+
+	return cleaned
 }

@@ -44,12 +44,12 @@ endif
 # Used for semver bumping
 PROTECTED_BRANCH := master
 APP_NAME    := $(shell basename -s .git `git config --get remote.origin.url`)
-CURRENT_VERSION := $(shell git describe --abbrev=0 --tags)
+CURRENT_VERSION := $(shell git describe --abbrev=0 --tags 2>/dev/null || echo "v0.0.0")
 VERSION_PARTS := $(subst ., ,$(subst v,,$(subst -rc, ,$(CURRENT_VERSION))))
 MAJOR := $(word 1,$(VERSION_PARTS))
 MINOR := $(word 2,$(VERSION_PARTS))
 PATCH := $(word 3,$(VERSION_PARTS))
-RC := $(shell echo $(CURRENT_VERSION) | grep -oE 'rc[0-9]+' | sed 's/rc//')
+RC := $(shell echo $(CURRENT_VERSION) | grep -oE 'rc[0-9]+' | sed 's/rc//' || echo "0")
 # Check if current branch is protected
 define check_protected_branch
 	@current_branch=$$(git rev-parse --abbrev-ref HEAD); \
