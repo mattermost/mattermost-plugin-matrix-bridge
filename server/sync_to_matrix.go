@@ -1,10 +1,19 @@
 package main
 
 import (
+	"fmt"
+	"regexp"
+
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 )
+
+// MattermostMentionResults represents extracted mentions from a Mattermost post
+type MattermostMentionResults struct {
+	UserMentions    []string // usernames mentioned
+	ChannelMentions bool     // @channel/@all/@here
+}
 
 // syncUserToMatrix handles syncing user changes (like display name) to Matrix ghost users
 func (p *Plugin) syncUserToMatrix(user *model.User) error {
@@ -124,6 +133,21 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
+	// Create Matrix message content structure
+	messageContent := map[string]interface{}{
+		"msgtype": "m.text",
+		"body":    plainText,
+	}
+
+	// Add formatted content if HTML is present
+	if htmlContent != "" {
+		messageContent["format"] = "org.matrix.custom.html"
+		messageContent["formatted_body"] = htmlContent
+	}
+
+	// Add Matrix mentions if any @mentions exist in the post
+	p.addMatrixMentions(messageContent, post)
+
 	// Check if this is a threaded post (reply to another post)
 	var threadEventID string
 	if post.RootId != "" {
@@ -163,7 +187,11 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 			})
 		}
 
-		sendResponse, err = p.matrixClient.SendMessageWithFilesAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID, files)
+		// Extract content from message structure
+		finalPlainText := messageContent["body"].(string)
+		finalHTMLContent, _ := messageContent["formatted_body"].(string)
+
+		sendResponse, err = p.matrixClient.SendMessageWithFilesAsGhost(matrixRoomID, finalPlainText, finalHTMLContent, threadEventID, ghostUserID, files)
 		if err != nil {
 			return errors.Wrap(err, "failed to send message with files as ghost user")
 		}
@@ -171,7 +199,11 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 		p.API.LogInfo("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
 	} else {
 		// No files, send regular message
-		sendResponse, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, plainText, htmlContent, threadEventID, ghostUserID)
+		// Extract content from message structure
+		finalPlainText := messageContent["body"].(string)
+		finalHTMLContent, _ := messageContent["formatted_body"].(string)
+
+		sendResponse, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, finalPlainText, finalHTMLContent, threadEventID, ghostUserID)
 		if err != nil {
 			return errors.Wrap(err, "failed to send message as ghost user")
 		}
@@ -221,8 +253,27 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
+	// Create Matrix message content structure
+	messageContent := map[string]interface{}{
+		"msgtype": "m.text",
+		"body":    plainText,
+	}
+
+	// Add formatted content if HTML is present
+	if htmlContent != "" {
+		messageContent["format"] = "org.matrix.custom.html"
+		messageContent["formatted_body"] = htmlContent
+	}
+
+	// Add Matrix mentions if any @mentions exist in the post
+	p.addMatrixMentions(messageContent, post)
+
+	// Extract content from message structure
+	finalPlainText := messageContent["body"].(string)
+	finalHTMLContent, _ := messageContent["formatted_body"].(string)
+
 	// Send edit as ghost user with proper HTML formatting support
-	_, err = p.matrixClient.EditMessageAsGhost(matrixRoomID, eventID, plainText, htmlContent, ghostUserID)
+	_, err = p.matrixClient.EditMessageAsGhost(matrixRoomID, eventID, finalPlainText, finalHTMLContent, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to edit message as ghost user")
 	}
@@ -497,4 +548,88 @@ func (p *Plugin) removeReactionFromMatrix(reaction *model.Reaction, channelID st
 
 	p.API.LogDebug("Successfully removed reaction from Matrix", "post_id", reaction.PostId, "emoji", reaction.EmojiName, "ghost_user_id", ghostUserID, "reaction_event_id", reactionEventID)
 	return nil
+}
+
+// extractMattermostMentions extracts @mentions from Mattermost post content
+func (p *Plugin) extractMattermostMentions(post *model.Post) *MattermostMentionResults {
+	text := post.Message
+	results := &MattermostMentionResults{}
+
+	// Extract @username mentions (similar to Mattermost's regex)
+	// Match @word where word contains letters, numbers, dots, hyphens, underscores
+	userMentionRegex := regexp.MustCompile(`@([a-zA-Z0-9\.\-_]+)`)
+	matches := userMentionRegex.FindAllStringSubmatch(text, -1)
+
+	for _, match := range matches {
+		if len(match) > 1 {
+			username := match[1]
+			switch username {
+			case "here", "channel", "all":
+				results.ChannelMentions = true
+			default:
+				results.UserMentions = append(results.UserMentions, username)
+			}
+		}
+	}
+
+	p.API.LogDebug("Extracted mentions from Mattermost post", "post_id", post.Id, "user_mentions", results.UserMentions, "channel_mentions", results.ChannelMentions)
+	return results
+}
+
+// addMatrixMentions converts Mattermost mentions to Matrix format and adds them to content
+func (p *Plugin) addMatrixMentions(content map[string]interface{}, post *model.Post) {
+	mentions := p.extractMattermostMentions(post)
+
+	// Only process if we have user mentions (ignore channel mentions for now)
+	if len(mentions.UserMentions) == 0 {
+		return
+	}
+
+	var matrixUserIDs []string
+	updatedHTML, hasHTML := content["formatted_body"].(string)
+	if !hasHTML {
+		// If no HTML content, create it from plain text
+		if plainText, hasPlain := content["body"].(string); hasPlain {
+			updatedHTML = plainText
+		} else {
+			return // No content to process
+		}
+	}
+
+	// Convert user mentions to Matrix ghost users
+	for _, username := range mentions.UserMentions {
+		// Look up Mattermost user by username
+		user, appErr := p.API.GetUserByUsername(username)
+		if appErr != nil {
+			p.API.LogDebug("Failed to find Mattermost user for mention", "username", username, "error", appErr)
+			continue
+		}
+
+		// Check if this user has a Matrix ghost user
+		if ghostUserID, exists := p.getGhostUser(user.Id); exists {
+			matrixUserIDs = append(matrixUserIDs, ghostUserID)
+
+			// Replace @username with Matrix mention link in HTML
+			// Create a regex that matches @username as a whole word
+			usernamePattern := fmt.Sprintf(`@%s\b`, regexp.QuoteMeta(username))
+			usernameRegex := regexp.MustCompile(usernamePattern)
+			matrixMentionLink := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`, ghostUserID, username)
+			updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionLink)
+
+			p.API.LogDebug("Converted Mattermost mention to Matrix", "username", username, "ghost_user_id", ghostUserID)
+		} else {
+			p.API.LogDebug("No Matrix ghost user found for mention", "username", username, "user_id", user.Id)
+		}
+	}
+
+	// Add Matrix mentions structure if we have any Matrix users to mention
+	if len(matrixUserIDs) > 0 {
+		content["m.mentions"] = map[string]interface{}{
+			"user_ids": matrixUserIDs,
+		}
+		content["formatted_body"] = updatedHTML
+		content["format"] = "org.matrix.custom.html"
+
+		p.API.LogInfo("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs)
+	}
 }
