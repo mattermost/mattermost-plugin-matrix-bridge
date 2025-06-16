@@ -130,6 +130,9 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 		return errors.Wrap(err, "failed to ensure ghost user is in room")
 	}
 
+	// Process mentions first on the original text
+	mentionData := p.extractMattermostMentions(post)
+
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
@@ -146,7 +149,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 	}
 
 	// Add Matrix mentions if any @mentions exist in the post
-	p.addMatrixMentions(messageContent, post)
+	p.addMatrixMentionsWithData(messageContent, post, mentionData)
 
 	// Check if this is a threaded post (reply to another post)
 	var threadEventID string
@@ -250,6 +253,9 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 		return errors.Wrap(err, "failed to ensure ghost user is in room")
 	}
 
+	// Process mentions first on the original text
+	mentionData := p.extractMattermostMentions(post)
+
 	// Convert post content to Matrix format
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
@@ -266,7 +272,7 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 	}
 
 	// Add Matrix mentions if any @mentions exist in the post
-	p.addMatrixMentions(messageContent, post)
+	p.addMatrixMentionsWithData(messageContent, post, mentionData)
 
 	// Extract content from message structure
 	finalPlainText := messageContent["body"].(string)
@@ -579,24 +585,23 @@ func (p *Plugin) extractMattermostMentions(post *model.Post) *MattermostMentionR
 // addMatrixMentions converts Mattermost mentions to Matrix format and adds them to content
 func (p *Plugin) addMatrixMentions(content map[string]interface{}, post *model.Post) {
 	mentions := p.extractMattermostMentions(post)
+	p.addMatrixMentionsWithData(content, post, mentions)
+}
 
+// addMatrixMentionsWithData converts Mattermost mentions to Matrix format using pre-extracted mention data
+func (p *Plugin) addMatrixMentionsWithData(content map[string]interface{}, post *model.Post, mentions *MattermostMentionResults) {
 	// Only process if we have user mentions (ignore channel mentions for now)
 	if len(mentions.UserMentions) == 0 {
 		return
 	}
 
 	var matrixUserIDs []string
-	updatedHTML, hasHTML := content["formatted_body"].(string)
-	if !hasHTML {
-		// If no HTML content, create it from plain text
-		if plainText, hasPlain := content["body"].(string); hasPlain {
-			updatedHTML = plainText
-		} else {
-			return // No content to process
-		}
+	var mentionReplacements []struct {
+		username    string
+		ghostUserID string
 	}
 
-	// Convert user mentions to Matrix ghost users
+	// First pass: collect all mention data
 	for _, username := range mentions.UserMentions {
 		// Look up Mattermost user by username
 		user, appErr := p.API.GetUserByUsername(username)
@@ -608,13 +613,10 @@ func (p *Plugin) addMatrixMentions(content map[string]interface{}, post *model.P
 		// Check if this user has a Matrix ghost user
 		if ghostUserID, exists := p.getGhostUser(user.Id); exists {
 			matrixUserIDs = append(matrixUserIDs, ghostUserID)
-
-			// Replace @username with Matrix mention link in HTML
-			// Create a regex that matches @username as a whole word
-			usernamePattern := fmt.Sprintf(`@%s\b`, regexp.QuoteMeta(username))
-			usernameRegex := regexp.MustCompile(usernamePattern)
-			matrixMentionLink := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`, ghostUserID, username)
-			updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionLink)
+			mentionReplacements = append(mentionReplacements, struct {
+				username    string
+				ghostUserID string
+			}{username, ghostUserID})
 
 			p.API.LogDebug("Converted Mattermost mention to Matrix", "username", username, "ghost_user_id", ghostUserID)
 		} else {
@@ -622,14 +624,38 @@ func (p *Plugin) addMatrixMentions(content map[string]interface{}, post *model.P
 		}
 	}
 
-	// Add Matrix mentions structure if we have any Matrix users to mention
-	if len(matrixUserIDs) > 0 {
-		content["m.mentions"] = map[string]interface{}{
-			"user_ids": matrixUserIDs,
-		}
-		content["formatted_body"] = updatedHTML
-		content["format"] = "org.matrix.custom.html"
-
-		p.API.LogInfo("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs)
+	// Only proceed if we have Matrix users to mention
+	if len(matrixUserIDs) == 0 {
+		return
 	}
+
+	// Handle HTML content replacement
+	updatedHTML, hasHTML := content["formatted_body"].(string)
+	if !hasHTML {
+		// If no HTML content, create it from plain text
+		if plainText, hasPlain := content["body"].(string); hasPlain {
+			updatedHTML = plainText
+		} else {
+			return // No content to process
+		}
+	}
+
+	// Second pass: replace mentions in HTML content
+	for _, replacement := range mentionReplacements {
+		// Replace @username with Matrix mention link in HTML
+		// Use more robust replacement that handles HTML escaping
+		usernamePattern := fmt.Sprintf(`@%s\b`, regexp.QuoteMeta(replacement.username))
+		usernameRegex := regexp.MustCompile(usernamePattern)
+		matrixMentionLink := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`, replacement.ghostUserID, replacement.username)
+		updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionLink)
+	}
+
+	// Add Matrix mentions structure
+	content["m.mentions"] = map[string]interface{}{
+		"user_ids": matrixUserIDs,
+	}
+	content["formatted_body"] = updatedHTML
+	content["format"] = "org.matrix.custom.html"
+
+	p.API.LogInfo("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs)
 }
