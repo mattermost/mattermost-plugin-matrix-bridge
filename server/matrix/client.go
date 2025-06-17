@@ -21,6 +21,7 @@ import (
 type Client struct {
 	serverURL  string
 	asToken    string // Application Service token for all operations
+	remoteID   string // Plugin remote ID for metadata
 	httpClient *http.Client
 	api        plugin.API
 }
@@ -49,7 +50,6 @@ type MessageRequest struct {
 	HTMLMessage    string           `json:"html_message"`      // Optional: HTML formatted message content
 	ThreadEventID  string           `json:"thread_event_id"`   // Optional: Event ID to thread/reply to
 	PostID         string           `json:"post_id"`           // Optional: Mattermost post ID metadata
-	RemoteID       string           `json:"remote_id"`         // Optional: Plugin remote ID metadata
 	Files          []FileAttachment `json:"files"`             // Optional: File attachments
 	ReplyToEventID string           `json:"reply_to_event_id"` // Optional: Event ID to reply to (for files)
 }
@@ -59,11 +59,12 @@ type SendEventResponse struct {
 	EventID string `json:"event_id"`
 }
 
-// NewClient creates a new Matrix client with the given server URL and application service token.
-func NewClient(serverURL, asToken string, api plugin.API) *Client {
+// NewClient creates a new Matrix client with the given server URL, application service token, and remote ID.
+func NewClient(serverURL, asToken, remoteID string, api plugin.API) *Client {
 	return &Client{
 		serverURL: serverURL,
 		asToken:   asToken,
+		remoteID:  remoteID,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -141,6 +142,45 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 	}
 
 	return &response, nil
+}
+
+// GetEvent retrieves a single Matrix event by ID
+func (c *Client) GetEvent(roomID, eventID string) (map[string]any, error) {
+	if c.asToken == "" {
+		return nil, errors.New("application service token not configured")
+	}
+
+	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "event", eventID)
+	reqURL := c.serverURL + endpoint
+
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create get event request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to send get event request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read get event response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get event: %d %s", resp.StatusCode, string(body))
+	}
+
+	var event map[string]any
+	if err := json.Unmarshal(body, &event); err != nil {
+		return nil, errors.Wrap(err, "failed to parse get event response")
+	}
+
+	return event, nil
 }
 
 // GetEventRelationsAsUser retrieves events related to a specific event (like reactions) as a specific user
@@ -857,196 +897,146 @@ func (c *Client) SendMessage(req MessageRequest) (*SendEventResponse, error) {
 
 	c.api.LogDebug("Sending message as ghost user", "room_id", req.RoomID, "ghost_user_id", req.GhostUserID, "file_count", len(req.Files), "has_text", req.Message != "" || req.HTMLMessage != "")
 
-	// Handle different message types based on content and files
+	// Simplified logic: send text (if any) and files (if any) as separate top-level messages
+	// All messages from one Mattermost post will be linked via m.relates_to
 
-	// Case 1: No text content - send files as individual messages
-	if req.Message == "" && req.HTMLMessage == "" {
-		if len(req.Files) == 0 {
-			return nil, errors.New("no message content or files to send")
-		}
-		if len(req.Files) == 1 {
-			// Single file without text - send as file message
-			return c.sendSingleMessage(req)
-		}
-		// Multiple files without text - send each as individual file message
-		return c.sendMultipleFiles(req)
+	if req.Message == "" && req.HTMLMessage == "" && len(req.Files) == 0 {
+		return nil, errors.New("no message content or files to send")
 	}
 
-	// Case 2: Has text content
-	if len(req.Files) == 0 {
-		// Text only - send as text message
-		return c.sendSingleMessage(req)
-	}
-	// Text + files - send text first, then files as replies
-	return c.sendMessageWithFiles(req)
+	return c.sendMattermostPost(req)
 }
 
-// sendSingleMessage sends either a text message or a single file message
-func (c *Client) sendSingleMessage(req MessageRequest) (*SendEventResponse, error) {
-	// Start with empty content and populate based on message type
-	content := make(map[string]any)
+// sendMattermostPost sends all content from a Mattermost post as separate Matrix messages
+// Text (if any) and each file become separate top-level messages, linked via m.relates_to
+func (c *Client) sendMattermostPost(req MessageRequest) (*SendEventResponse, error) {
+	var primaryResponse *SendEventResponse
+	var rootEventID string
 
-	// Determine if this is a file message or text message
-	if len(req.Files) == 1 && req.Message == "" && req.HTMLMessage == "" {
-		// Single file message
-		file := req.Files[0]
+	// Send text message first if present
+	if req.Message != "" || req.HTMLMessage != "" {
+		textResponse, err := c.sendTextMessage(req, "")
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to send text message")
+		}
+		primaryResponse = textResponse
+		rootEventID = textResponse.EventID
+		c.api.LogDebug("Sent text message", "event_id", rootEventID)
+	}
 
-		// Determine message type based on MIME type
-		switch {
-		case strings.HasPrefix(file.MimeType, "image/"):
-			content["msgtype"] = "m.image"
-		case strings.HasPrefix(file.MimeType, "video/"):
-			content["msgtype"] = "m.video"
-		case strings.HasPrefix(file.MimeType, "audio/"):
-			content["msgtype"] = "m.audio"
-		default:
-			content["msgtype"] = "m.file"
+	// Send each file as separate top-level message
+	for _, file := range req.Files {
+		fileResponse, err := c.sendFileMessage(req, file, rootEventID)
+		if err != nil {
+			// Log error but continue with other files
+			c.api.LogWarn("Failed to send file message", "filename", file.Filename, "error", err)
+			continue
 		}
 
-		content["body"] = file.Filename
-		content["url"] = file.MxcURI
-		content["info"] = map[string]any{
-			"size":     file.Size,
-			"mimetype": file.MimeType,
-		}
-	} else {
-		// Text message
-		content["msgtype"] = "m.text"
-		content["body"] = req.Message
-
-		// Add HTML formatting if provided
-		if req.HTMLMessage != "" {
-			content["format"] = "org.matrix.custom.html"
-			content["formatted_body"] = req.HTMLMessage
+		// If this is the first message (no text), use it as primary and root
+		if primaryResponse == nil {
+			primaryResponse = fileResponse
+			rootEventID = fileResponse.EventID
+			c.api.LogDebug("Sent first file message as root", "event_id", rootEventID, "filename", file.Filename)
+		} else {
+			c.api.LogDebug("Sent file message linked to root", "event_id", fileResponse.EventID, "filename", file.Filename, "root_event_id", rootEventID)
 		}
 	}
 
-	// Add threading if provided
+	if primaryResponse == nil {
+		return nil, errors.New("failed to send any content")
+	}
+
+	c.api.LogDebug("Successfully sent Mattermost post", "primary_event_id", primaryResponse.EventID, "text_present", req.Message != "" || req.HTMLMessage != "", "file_count", len(req.Files))
+	return primaryResponse, nil
+}
+
+// sendTextMessage sends a text message with optional relation to root event
+func (c *Client) sendTextMessage(req MessageRequest, rootEventID string) (*SendEventResponse, error) {
+	content := make(map[string]any)
+
+	// Text message content
+	content["msgtype"] = "m.text"
+	content["body"] = req.Message
+
+	// Add HTML formatting if provided
+	if req.HTMLMessage != "" {
+		content["format"] = "org.matrix.custom.html"
+		content["formatted_body"] = req.HTMLMessage
+	}
+
+	// Add threading if provided (takes priority over post grouping)
 	if req.ThreadEventID != "" {
 		content["m.relates_to"] = map[string]any{
 			"rel_type": "m.thread",
 			"event_id": req.ThreadEventID,
 		}
+	} else if rootEventID != "" {
+		// Add relation to root event if no threading (for post grouping)
+		content["m.relates_to"] = map[string]any{
+			"rel_type": "m.mattermost.post",
+			"event_id": rootEventID,
+		}
 	}
 
-	// Add Mattermost metadata if provided
+	// Add Mattermost metadata - ALWAYS include for deletion tracking
 	if req.PostID != "" {
 		content["mattermost_post_id"] = req.PostID
 	}
-	if req.RemoteID != "" {
-		content["mattermost_remote_id"] = req.RemoteID
+	if c.remoteID != "" {
+		content["mattermost_remote_id"] = c.remoteID
 	}
 
 	return c.sendEventAsUser(req.RoomID, "m.room.message", content, req.GhostUserID)
 }
 
-// sendMultipleFiles sends multiple files as individual messages (without accompanying text)
-func (c *Client) sendMultipleFiles(req MessageRequest) (*SendEventResponse, error) {
-	var firstResponse *SendEventResponse
+// sendFileMessage sends a file message with optional relation to root event
+func (c *Client) sendFileMessage(req MessageRequest, file FileAttachment, rootEventID string) (*SendEventResponse, error) {
+	content := make(map[string]any)
 
-	for i, file := range req.Files {
-		// Create a request for this single file
-		fileReq := MessageRequest{
-			RoomID:        req.RoomID,
-			GhostUserID:   req.GhostUserID,
-			ThreadEventID: req.ThreadEventID,
-			PostID:        req.PostID,
-			RemoteID:      req.RemoteID,
-			Files:         []FileAttachment{file},
-		}
-
-		response, err := c.sendSingleMessage(fileReq)
-		if err != nil {
-			// If this is the first file and it fails, return the error
-			if i == 0 {
-				return nil, errors.Wrapf(err, "failed to send file %s", file.Filename)
-			}
-			// For subsequent files, log error but continue
-			c.api.LogWarn("Failed to send file attachment", "filename", file.Filename, "error", err)
-			continue
-		}
-
-		// Keep track of the first successful response to return as primary
-		if firstResponse == nil && response != nil {
-			firstResponse = response
-		}
-	}
-
-	if firstResponse == nil {
-		return nil, errors.New("failed to send any file attachments")
-	}
-
-	return firstResponse, nil
-}
-
-// sendMessageWithFiles sends a message with file attachments (text first, then files as replies)
-func (c *Client) sendMessageWithFiles(req MessageRequest) (*SendEventResponse, error) {
-	// Send the text message first (create a copy without files for the text part)
-	textReq := req
-	textReq.Files = nil
-	textResponse, err := c.sendSingleMessage(textReq)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to send text message")
-	}
-
-	// Send each file as a reply to the text message and collect their event IDs
-	var fileEventIDs []string
-	for _, file := range req.Files {
-		fileResponse, err := c.sendFileReply(req.RoomID, file, textResponse.EventID, req.GhostUserID)
-		if err != nil {
-			// Log error but continue with other files
-			return textResponse, errors.Wrapf(err, "failed to send file attachment %s", file.Filename)
-		}
-
-		if fileResponse != nil && fileResponse.EventID != "" {
-			fileEventIDs = append(fileEventIDs, fileResponse.EventID)
-		}
-	}
-
-	// If we have file attachments, update the text message with file event IDs metadata
-	if len(fileEventIDs) > 0 {
-		err := c.AddFileMetadataToMessage(req.RoomID, textResponse.EventID, fileEventIDs, req.GhostUserID)
-		if err != nil {
-			// Log error but don't fail - the messages were sent successfully
-			return textResponse, errors.Wrap(err, "failed to add file metadata to message")
-		}
-	}
-
-	// Return the text message event ID as the primary event
-	return textResponse, nil
-}
-
-// sendFileReply sends a file as a reply to another message
-func (c *Client) sendFileReply(roomID string, file FileAttachment, replyToEventID, ghostUserID string) (*SendEventResponse, error) {
 	// Determine message type based on MIME type
-	var msgType string
 	switch {
 	case strings.HasPrefix(file.MimeType, "image/"):
-		msgType = "m.image"
+		content["msgtype"] = "m.image"
 	case strings.HasPrefix(file.MimeType, "video/"):
-		msgType = "m.video"
+		content["msgtype"] = "m.video"
 	case strings.HasPrefix(file.MimeType, "audio/"):
-		msgType = "m.audio"
+		content["msgtype"] = "m.audio"
 	default:
-		msgType = "m.file"
+		content["msgtype"] = "m.file"
 	}
 
-	content := map[string]any{
-		"msgtype": msgType,
-		"body":    file.Filename,
-		"url":     file.MxcURI,
-		"info": map[string]any{
-			"size":     file.Size,
-			"mimetype": file.MimeType,
-		},
-		"m.relates_to": map[string]any{
-			"m.in_reply_to": map[string]any{
-				"event_id": replyToEventID,
-			},
-		},
+	// File content
+	content["body"] = file.Filename
+	content["url"] = file.MxcURI
+	content["info"] = map[string]any{
+		"size":     file.Size,
+		"mimetype": file.MimeType,
 	}
 
-	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
+	// Add threading if provided (takes priority over post grouping)
+	if req.ThreadEventID != "" {
+		content["m.relates_to"] = map[string]any{
+			"rel_type": "m.thread",
+			"event_id": req.ThreadEventID,
+		}
+	} else if rootEventID != "" {
+		// Add relation to root event if no threading (for post grouping)
+		content["m.relates_to"] = map[string]any{
+			"rel_type": "m.mattermost.post",
+			"event_id": rootEventID,
+		}
+	}
+
+	// Add Mattermost metadata - ALWAYS include for deletion tracking
+	if req.PostID != "" {
+		content["mattermost_post_id"] = req.PostID
+	}
+	if c.remoteID != "" {
+		content["mattermost_remote_id"] = c.remoteID
+	}
+
+	return c.sendEventAsUser(req.RoomID, "m.room.message", content, req.GhostUserID)
 }
 
 // sendEventAsUser sends an event as a specific user (using application service impersonation)

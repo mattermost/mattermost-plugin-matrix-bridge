@@ -199,7 +199,6 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 		HTMLMessage:   finalHTMLContent,
 		ThreadEventID: threadEventID,
 		PostID:        post.Id,
-		RemoteID:      p.remoteID,
 		Files:         fileAttachments,
 	}
 
@@ -277,6 +276,31 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 	// Extract content from message structure
 	finalPlainText := messageContent["body"].(string)
 	finalHTMLContent, _ := messageContent["formatted_body"].(string)
+
+	// Check for pending file attachments for this post
+	pendingFiles := p.pendingFiles.GetFiles(post.Id)
+	var currentFiles []matrix.FileAttachment
+	for _, file := range pendingFiles {
+		currentFiles = append(currentFiles, matrix.FileAttachment{
+			Filename: file.Filename,
+			MxcURI:   file.MxcURI,
+			MimeType: file.MimeType,
+			Size:     file.Size,
+		})
+	}
+
+	// Fetch the current Matrix event content to compare
+	currentEvent, err := p.matrixClient.GetEvent(matrixRoomID, eventID)
+	if err != nil {
+		p.API.LogWarn("Failed to fetch current Matrix event for comparison", "error", err, "event_id", eventID)
+		// Continue with update if we can't fetch current content
+	} else {
+		// Compare content and file attachments to see if anything actually changed
+		if p.isMatrixContentIdentical(currentEvent, finalPlainText, finalHTMLContent, matrixRoomID, eventID, currentFiles) {
+			p.API.LogDebug("Matrix message content and attachments unchanged, skipping edit", "post_id", post.Id, "matrix_event_id", eventID)
+			return nil
+		}
+	}
 
 	// Send edit as ghost user with proper HTML formatting support
 	_, err = p.matrixClient.EditMessageAsGhost(matrixRoomID, eventID, finalPlainText, finalHTMLContent, ghostUserID)
@@ -658,4 +682,172 @@ func (p *Plugin) addMatrixMentionsWithData(content map[string]any, post *model.P
 	content["format"] = "org.matrix.custom.html"
 
 	p.API.LogDebug("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs)
+}
+
+// isMatrixContentIdentical compares current Matrix event content with new content to detect if update is needed
+func (p *Plugin) isMatrixContentIdentical(currentEvent map[string]any, newPlainText, newHTMLContent, matrixRoomID, eventID string, newFiles []matrix.FileAttachment) bool {
+	// First check text content
+	if !p.compareTextContent(currentEvent, newPlainText, newHTMLContent) {
+		return false
+	}
+
+	// Then compare file attachments by checking related events
+	if !p.areFileAttachmentsIdentical(matrixRoomID, eventID, newFiles) {
+		p.API.LogDebug("Matrix message file attachments differ")
+		return false
+	}
+
+	// Content and attachments are identical
+	p.API.LogDebug("Matrix message content and attachments are identical, no update needed")
+	return true
+}
+
+// compareTextContent compares text and HTML content between current and new message content
+func (p *Plugin) compareTextContent(currentEvent map[string]any, newPlainText, newHTMLContent string) bool {
+	// Extract current content from Matrix event
+	content, ok := currentEvent["content"].(map[string]any)
+	if !ok {
+		p.API.LogDebug("Current Matrix event has no content field")
+		return false
+	}
+
+	// Compare plain text body
+	currentBody, hasBody := content["body"].(string)
+	if !hasBody || currentBody != newPlainText {
+		p.API.LogDebug("Matrix message body differs", "current", currentBody, "new", newPlainText)
+		return false
+	}
+
+	// Compare HTML formatted content if present
+	currentFormattedBody, hasFormatted := content["formatted_body"].(string)
+	if newHTMLContent != "" {
+		// New content has HTML, check if current content matches
+		if !hasFormatted || currentFormattedBody != newHTMLContent {
+			p.API.LogDebug("Matrix message formatted_body differs", "current", currentFormattedBody, "new", newHTMLContent)
+			return false
+		}
+	} else {
+		// New content has no HTML, current should also have no formatted content
+		if hasFormatted && currentFormattedBody != "" {
+			p.API.LogDebug("Matrix message formatted_body differs (new has none, current has some)", "current", currentFormattedBody)
+			return false
+		}
+	}
+
+	return true
+}
+
+// areFileAttachmentsIdentical compares current Matrix file attachments with new file attachments
+func (p *Plugin) areFileAttachmentsIdentical(matrixRoomID, eventID string, newFiles []matrix.FileAttachment) bool {
+	// Get current file attachments by looking at related events
+	currentFiles, err := p.getCurrentMatrixFileAttachments(matrixRoomID, eventID)
+	if err != nil {
+		p.API.LogWarn("Failed to get current Matrix file attachments for comparison", "error", err, "event_id", eventID)
+		// If we can't get current files, assume they're different to be safe
+		return false
+	}
+
+	// Compare counts first
+	if len(currentFiles) != len(newFiles) {
+		p.API.LogDebug("File attachment count differs", "current_count", len(currentFiles), "new_count", len(newFiles))
+		return false
+	}
+
+	// Compare each file attachment
+	for i, newFile := range newFiles {
+		if i >= len(currentFiles) {
+			p.API.LogDebug("New file attachment not found in current attachments", "filename", newFile.Filename)
+			return false
+		}
+
+		currentFile := currentFiles[i]
+		if currentFile.Filename != newFile.Filename ||
+			currentFile.MxcURI != newFile.MxcURI ||
+			currentFile.MimeType != newFile.MimeType ||
+			currentFile.Size != newFile.Size {
+			p.API.LogDebug("File attachment differs", "current", currentFile, "new", newFile)
+			return false
+		}
+	}
+
+	return true
+}
+
+// getCurrentMatrixFileAttachments retrieves current file attachments for a Matrix event
+func (p *Plugin) getCurrentMatrixFileAttachments(matrixRoomID, eventID string) ([]matrix.FileAttachment, error) {
+	// Get related events (file attachments are sent as separate messages related to the main message)
+	relations, err := p.matrixClient.GetEventRelationsAsUser(matrixRoomID, eventID, "")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get event relations")
+	}
+
+	var files []matrix.FileAttachment
+	for _, event := range relations {
+		// Check if this is a file message related to our main message
+		eventType, ok := event["type"].(string)
+		if !ok || eventType != "m.room.message" {
+			continue
+		}
+
+		content, ok := event["content"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		// Check if this is a file message
+		msgType, ok := content["msgtype"].(string)
+		if !ok {
+			continue
+		}
+
+		// File messages have msgtype of m.file, m.image, m.video, or m.audio
+		if msgType != "m.file" && msgType != "m.image" && msgType != "m.video" && msgType != "m.audio" {
+			continue
+		}
+
+		// Check if this is related to our main message
+		relatesTo, ok := content["m.relates_to"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		relType, ok := relatesTo["rel_type"].(string)
+		relEventID, hasEventID := relatesTo["event_id"].(string)
+		if !ok || relType != "m.mattermost.post" || !hasEventID || relEventID != eventID {
+			continue
+		}
+
+		// Extract file information
+		filename, hasFilename := content["body"].(string)
+		mxcURI, hasMxcURI := content["url"].(string)
+
+		if !hasFilename || !hasMxcURI {
+			continue
+		}
+
+		// Extract file info
+		var mimeType string
+		var size int64
+		if info, hasInfo := content["info"].(map[string]any); hasInfo {
+			if mt, hasMT := info["mimetype"].(string); hasMT {
+				mimeType = mt
+			}
+			if s, hasSize := info["size"]; hasSize {
+				if sizeFloat, ok := s.(float64); ok {
+					size = int64(sizeFloat)
+				} else if sizeInt, ok := s.(int64); ok {
+					size = sizeInt
+				}
+			}
+		}
+
+		files = append(files, matrix.FileAttachment{
+			Filename: filename,
+			MxcURI:   mxcURI,
+			MimeType: mimeType,
+			Size:     size,
+		})
+	}
+
+	return files, nil
 }

@@ -113,7 +113,7 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 
 func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
-	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken, p.API)
+	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken, p.remoteID, p.API)
 }
 
 func (p *Plugin) registerForSharedChannels() error {

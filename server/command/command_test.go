@@ -103,7 +103,7 @@ func TestHelloCommand(t *testing.T) {
 	mockPlugin := &mockPlugin{
 		client:       env.client,
 		kvstore:      kvstore.NewKVStore(env.client),
-		matrixClient: matrix.NewClient("http://test.com", "test_token", env.api),
+		matrixClient: matrix.NewClient("http://test.com", "test_token", "test_remote_id", env.api),
 		config:       &mockConfiguration{serverURL: "http://test.com"},
 		pluginAPI:    env.api,
 	}

@@ -27,6 +27,11 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 
 	// Then process post sync events
 	for _, post := range msg.Posts {
+		// Skip syncing posts that originated from Matrix to prevent loops, except for deletions
+		if post.GetRemoteID() == p.remoteID && post.DeleteAt == 0 {
+			continue
+		}
+
 		if err := p.syncPostToMatrix(post, msg.ChannelId); err != nil {
 			p.API.LogError("Failed to sync post to Matrix", "error", err, "post_id", post.Id)
 			continue
@@ -35,6 +40,11 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 
 	// Finally process reaction sync events
 	for _, reaction := range msg.Reactions {
+		// Skip syncing reactions that originated from Matrix to prevent loops
+		if reaction.GetRemoteID() == p.remoteID {
+			continue
+		}
+
 		if err := p.syncReactionToMatrix(reaction, msg.ChannelId); err != nil {
 			p.API.LogError("Failed to sync reaction to Matrix", "error", err, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName)
 			continue
@@ -84,6 +94,11 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 
 	if p.matrixClient == nil {
 		return errors.New("matrix client not initialized")
+	}
+
+	// Skip syncing file attachments that originated from Matrix to prevent loops, except for deletions
+	if fi.RemoteId != nil && *fi.RemoteId == p.remoteID && fi.DeleteAt == 0 {
+		return nil
 	}
 
 	p.API.LogDebug("Received attachment sync", "file_id", fi.Id, "post_id", post.Id, "filename", fi.Name)
@@ -207,6 +222,11 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, _ *model.
 
 	if p.matrixClient == nil {
 		return errors.New("matrix client not initialized")
+	}
+
+	// Skip syncing profile images for users that originated from Matrix to prevent loops
+	if user.GetRemoteID() == p.remoteID {
+		return nil
 	}
 
 	p.API.LogDebug("Received profile image sync", "user_id", user.Id, "username", user.Username)
