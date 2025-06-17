@@ -98,6 +98,13 @@ make deploy
 - [Matrix Specification](https://spec.matrix.org/)
 - [Mattermost Plugin Documentation](https://developers.mattermost.com/integrate/plugins/)
 
+## Roadmap
+
+- Support multiple Matrix instances
+- Expose more Share Channels APIs in plugin API
+- Fix Matrix mention pill display
+- Improve support for private, encrypted channels
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
