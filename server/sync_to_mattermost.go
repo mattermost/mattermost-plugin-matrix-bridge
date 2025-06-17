@@ -14,11 +14,17 @@ import (
 func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID string) error {
 	p.API.LogDebug("Syncing Matrix message to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
+	// Extract Mattermost metadata if present
+	mattermostPostID, mattermostRemoteID := p.extractMattermostMetadata(event)
+	if mattermostPostID != "" || mattermostRemoteID != "" {
+		p.API.LogDebug("Found Mattermost metadata in Matrix event", "event_id", event.EventID, "mattermost_post_id", mattermostPostID, "mattermost_remote_id", mattermostRemoteID)
+	}
+
 	// Extract message content (prefer formatted_body if available)
 	content := p.extractMatrixMessageContent(event)
 
 	// Check if this is a message edit (has m.relates_to with rel_type: m.replace)
-	if relatesTo, exists := event.Content["m.relates_to"].(map[string]interface{}); exists {
+	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.replace" {
 			// This is an edit - handle separately (allow empty content for deletions)
 			return p.handleMatrixMessageEdit(event, channelID)
@@ -42,7 +48,7 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 
 	// Check if this is a threaded message (reply)
 	var rootID string
-	if relatesTo, exists := event.Content["m.relates_to"].(map[string]interface{}); exists {
+	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
 			if parentEventID, exists := relatesTo["event_id"].(string); exists {
 				// Find the Mattermost post ID for this Matrix event
@@ -61,7 +67,7 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 		CreateAt:  event.Timestamp,
 		RootId:    rootID,
 		RemoteId:  &p.remoteID, // Attribute to Matrix remote
-		Props:     make(map[string]interface{}),
+		Props:     make(map[string]any),
 	}
 
 	// Store Matrix event ID in post properties for reaction mapping and edit tracking
@@ -86,7 +92,7 @@ func (p *Plugin) handleMatrixMessageEdit(event MatrixEvent, channelID string) er
 	// Extract the new content from the edit event
 	newContent := p.extractMatrixMessageContent(event)
 	// Extract the original event ID being edited
-	relatesTo, exists := event.Content["m.relates_to"].(map[string]interface{})
+	relatesTo, exists := event.Content["m.relates_to"].(map[string]any)
 	if !exists {
 		return errors.New("edit event missing m.relates_to")
 	}
@@ -128,7 +134,7 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 	p.API.LogDebug("Syncing Matrix reaction to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
 	// Extract reaction key (emoji)
-	relatesTo, exists := event.Content["m.relates_to"].(map[string]interface{})
+	relatesTo, exists := event.Content["m.relates_to"].(map[string]any)
 	if !exists {
 		return errors.New("reaction event missing m.relates_to")
 	}

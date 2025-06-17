@@ -150,11 +150,11 @@ type mockLogger struct {
 	logs []string
 }
 
-func (m *mockLogger) LogWarn(message string, _ ...interface{}) {
+func (m *mockLogger) LogWarn(message string, _ ...any) {
 	m.logs = append(m.logs, message)
 }
 
-func (m *mockLogger) LogDebug(message string, _ ...interface{}) {
+func (m *mockLogger) LogDebug(message string, _ ...any) {
 	m.logs = append(m.logs, message)
 }
 

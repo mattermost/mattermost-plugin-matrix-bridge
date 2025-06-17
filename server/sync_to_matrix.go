@@ -137,7 +137,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
 	// Create Matrix message content structure
-	messageContent := map[string]interface{}{
+	messageContent := map[string]any{
 		"msgtype": "m.text",
 		"body":    plainText,
 	}
@@ -176,46 +176,46 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 	// Check for pending file attachments for this post
 	pendingFiles := p.pendingFiles.GetFiles(post.Id)
 
-	// Send message as ghost user (formatted if HTML content exists, threaded if threadEventID is provided)
-	var sendResponse *matrix.SendEventResponse
+	// Prepare file attachments if any
+	var fileAttachments []matrix.FileAttachment
+	for _, file := range pendingFiles {
+		fileAttachments = append(fileAttachments, matrix.FileAttachment{
+			Filename: file.Filename,
+			MxcURI:   file.MxcURI,
+			MimeType: file.MimeType,
+			Size:     file.Size,
+		})
+	}
+
+	// Extract content from message structure
+	finalPlainText := messageContent["body"].(string)
+	finalHTMLContent, _ := messageContent["formatted_body"].(string)
+
+	// Send message using consolidated method
+	messageRequest := matrix.MessageRequest{
+		RoomID:        matrixRoomID,
+		GhostUserID:   ghostUserID,
+		Message:       finalPlainText,
+		HTMLMessage:   finalHTMLContent,
+		ThreadEventID: threadEventID,
+		PostID:        post.Id,
+		RemoteID:      p.remoteID,
+		Files:         fileAttachments,
+	}
+
+	sendResponse, err := p.matrixClient.SendMessage(messageRequest)
+	if err != nil {
+		return errors.Wrap(err, "failed to send message as ghost user")
+	}
+
 	if len(pendingFiles) > 0 {
-		// Convert pending files to the format expected by SendMessageWithFilesAsGhost
-		var files []map[string]interface{}
-		for _, file := range pendingFiles {
-			files = append(files, map[string]interface{}{
-				"filename": file.Filename,
-				"mxc_uri":  file.MxcURI,
-				"mimetype": file.MimeType,
-				"size":     file.Size,
-			})
-		}
-
-		// Extract content from message structure
-		finalPlainText := messageContent["body"].(string)
-		finalHTMLContent, _ := messageContent["formatted_body"].(string)
-
-		sendResponse, err = p.matrixClient.SendMessageWithFilesAsGhost(matrixRoomID, finalPlainText, finalHTMLContent, threadEventID, ghostUserID, files)
-		if err != nil {
-			return errors.Wrap(err, "failed to send message with files as ghost user")
-		}
-
 		p.API.LogDebug("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
-	} else {
-		// No files, send regular message
-		// Extract content from message structure
-		finalPlainText := messageContent["body"].(string)
-		finalHTMLContent, _ := messageContent["formatted_body"].(string)
-
-		sendResponse, err = p.matrixClient.SendMessageAsGhost(matrixRoomID, finalPlainText, finalHTMLContent, threadEventID, ghostUserID)
-		if err != nil {
-			return errors.Wrap(err, "failed to send message as ghost user")
-		}
 	}
 
 	// Store the Matrix event ID as a post property for reaction mapping
 	if sendResponse != nil && sendResponse.EventID != "" {
 		if post.Props == nil {
-			post.Props = make(map[string]interface{})
+			post.Props = make(map[string]any)
 		}
 		post.Props[propertyKey] = sendResponse.EventID
 
@@ -260,7 +260,7 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 	plainText, htmlContent := convertMattermostToMatrix(post.Message)
 
 	// Create Matrix message content structure
-	messageContent := map[string]interface{}{
+	messageContent := map[string]any{
 		"msgtype": "m.text",
 		"body":    plainText,
 	}
@@ -518,12 +518,12 @@ func (p *Plugin) removeReactionFromMatrix(reaction *model.Reaction, channelID st
 		}
 
 		// Check if this reaction has the matching emoji
-		content, ok := event["content"].(map[string]interface{})
+		content, ok := event["content"].(map[string]any)
 		if !ok {
 			continue
 		}
 
-		relatesTo, ok := content["m.relates_to"].(map[string]interface{})
+		relatesTo, ok := content["m.relates_to"].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -583,13 +583,13 @@ func (p *Plugin) extractMattermostMentions(post *model.Post) *MattermostMentionR
 }
 
 // addMatrixMentions converts Mattermost mentions to Matrix format and adds them to content
-func (p *Plugin) addMatrixMentions(content map[string]interface{}, post *model.Post) {
+func (p *Plugin) addMatrixMentions(content map[string]any, post *model.Post) {
 	mentions := p.extractMattermostMentions(post)
 	p.addMatrixMentionsWithData(content, post, mentions)
 }
 
 // addMatrixMentionsWithData converts Mattermost mentions to Matrix format using pre-extracted mention data
-func (p *Plugin) addMatrixMentionsWithData(content map[string]interface{}, post *model.Post, mentions *MattermostMentionResults) {
+func (p *Plugin) addMatrixMentionsWithData(content map[string]any, post *model.Post, mentions *MattermostMentionResults) {
 	// Only process if we have user mentions (ignore channel mentions for now)
 	if len(mentions.UserMentions) == 0 {
 		return
@@ -651,7 +651,7 @@ func (p *Plugin) addMatrixMentionsWithData(content map[string]interface{}, post 
 	}
 
 	// Add Matrix mentions structure
-	content["m.mentions"] = map[string]interface{}{
+	content["m.mentions"] = map[string]any{
 		"user_ids": matrixUserIDs,
 	}
 	content["formatted_body"] = updatedHTML

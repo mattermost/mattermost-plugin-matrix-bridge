@@ -13,7 +13,7 @@ import (
 
 // Logger interface for logging operations
 type Logger interface {
-	LogWarn(message string, keyValuePairs ...interface{})
+	LogWarn(message string, keyValuePairs ...any)
 }
 
 // getGhostUser retrieves the Matrix ghost user ID for a Mattermost user if it exists
@@ -162,17 +162,17 @@ func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, p
 		}
 
 		// Check if this is a reply relationship
-		content, ok := event["content"].(map[string]interface{})
+		content, ok := event["content"].(map[string]any)
 		if !ok {
 			continue
 		}
 
-		relatesTo, ok := content["m.relates_to"].(map[string]interface{})
+		relatesTo, ok := content["m.relates_to"].(map[string]any)
 		if !ok {
 			continue
 		}
 
-		inReplyTo, ok := relatesTo["m.in_reply_to"].(map[string]interface{})
+		inReplyTo, ok := relatesTo["m.in_reply_to"].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -285,7 +285,7 @@ func (p *Plugin) getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUse
 		}
 
 		// Get the content
-		content, ok := event["content"].(map[string]interface{})
+		content, ok := event["content"].(map[string]any)
 		if !ok {
 			continue
 		}
@@ -302,7 +302,7 @@ func (p *Plugin) getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUse
 			continue
 		}
 
-		fileAttachments, ok := fileAttachmentsRaw.([]interface{})
+		fileAttachments, ok := fileAttachmentsRaw.([]any)
 		if !ok {
 			continue
 		}
@@ -365,6 +365,17 @@ func (p *Plugin) extractMatrixMessageContent(event MatrixEvent) string {
 	}
 
 	return ""
+}
+
+// extractMattermostMetadata extracts Mattermost metadata from Matrix event content
+func (p *Plugin) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {
+	if mattermostPostID, exists := event.Content["mattermost_post_id"].(string); exists {
+		postID = mattermostPostID
+	}
+	if mattermostRemoteID, exists := event.Content["mattermost_remote_id"].(string); exists {
+		remoteID = mattermostRemoteID
+	}
+	return postID, remoteID
 }
 
 // convertHTMLToMarkdown converts Matrix HTML content to Mattermost-compatible markdown

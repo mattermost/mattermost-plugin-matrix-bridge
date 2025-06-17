@@ -214,7 +214,7 @@ func TestAddMatrixMentions(t *testing.T) {
 			}
 
 			// Create message content structure
-			content := map[string]interface{}{
+			content := map[string]any{
 				"msgtype": "m.text",
 				"body":    tt.message,
 			}
@@ -230,7 +230,7 @@ func TestAddMatrixMentions(t *testing.T) {
 
 			if tt.expectedMentionsAdded {
 				// Check mention structure
-				mentionMap, ok := mentions.(map[string]interface{})
+				mentionMap, ok := mentions.(map[string]any)
 				if !ok {
 					t.Errorf("Expected mentions to be a map")
 					return

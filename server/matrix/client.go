@@ -33,6 +33,27 @@ type MessageContent struct {
 	FormattedBody string `json:"formatted_body,omitempty"`
 }
 
+// FileAttachment represents a file attachment for Matrix messages.
+type FileAttachment struct {
+	Filename string `json:"filename"`
+	MxcURI   string `json:"mxc_uri"`
+	MimeType string `json:"mimetype"`
+	Size     int64  `json:"size"`
+}
+
+// MessageRequest represents a request to send a message as a ghost user with all optional parameters.
+type MessageRequest struct {
+	RoomID         string           `json:"room_id"`           // Required: Matrix room ID
+	GhostUserID    string           `json:"ghost_user_id"`     // Required: Ghost user ID to send as
+	Message        string           `json:"message"`           // Optional: Plain text message content
+	HTMLMessage    string           `json:"html_message"`      // Optional: HTML formatted message content
+	ThreadEventID  string           `json:"thread_event_id"`   // Optional: Event ID to thread/reply to
+	PostID         string           `json:"post_id"`           // Optional: Mattermost post ID metadata
+	RemoteID       string           `json:"remote_id"`         // Optional: Plugin remote ID metadata
+	Files          []FileAttachment `json:"files"`             // Optional: File attachments
+	ReplyToEventID string           `json:"reply_to_event_id"` // Optional: Event ID to reply to (for files)
+}
+
 // SendEventResponse represents the response from Matrix when sending events.
 type SendEventResponse struct {
 	EventID string `json:"event_id"`
@@ -50,77 +71,6 @@ func NewClient(serverURL, asToken string, api plugin.API) *Client {
 	}
 }
 
-// SendMessage sends a plain text message to a Matrix room.
-func (c *Client) SendMessage(roomID, message string) (*SendEventResponse, error) {
-	if c.serverURL == "" || c.asToken == "" {
-		return nil, errors.New("matrix client not configured")
-	}
-
-	content := MessageContent{
-		MsgType: "m.text",
-		Body:    message,
-	}
-
-	return c.sendEvent(roomID, "m.room.message", content)
-}
-
-// SendFormattedMessage sends a message with both plain text and HTML formatting to a Matrix room.
-func (c *Client) SendFormattedMessage(roomID, textBody, htmlBody string) (*SendEventResponse, error) {
-	if c.serverURL == "" || c.asToken == "" {
-		return nil, errors.New("matrix client not configured")
-	}
-
-	content := MessageContent{
-		MsgType:       "m.text",
-		Body:          textBody,
-		Format:        "org.matrix.custom.html",
-		FormattedBody: htmlBody,
-	}
-
-	return c.sendEvent(roomID, "m.room.message", content)
-}
-
-func (c *Client) sendEvent(roomID, eventType string, content interface{}) (*SendEventResponse, error) {
-	txnID := uuid.New().String()
-	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "send", eventType, txnID)
-	url := c.serverURL + endpoint
-
-	jsonData, err := json.Marshal(content)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to marshal event content")
-	}
-
-	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create request")
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.asToken)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to send request")
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read response body")
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(body))
-	}
-
-	var response SendEventResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, errors.Wrap(err, "failed to unmarshal response")
-	}
-
-	return &response, nil
-}
-
 // SendReactionAsGhost sends a reaction to a message as a ghost user
 func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {
@@ -128,8 +78,8 @@ func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string)
 	}
 
 	// Matrix reaction content structure
-	content := map[string]interface{}{
-		"m.relates_to": map[string]interface{}{
+	content := map[string]any{
+		"m.relates_to": map[string]any{
 			"rel_type": "m.annotation",
 			"event_id": eventID,
 			"key":      emoji,
@@ -146,7 +96,7 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 	}
 
 	// Empty content for redaction
-	content := map[string]interface{}{}
+	content := map[string]any{}
 
 	txnID := uuid.New().String()
 	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "redact", eventID, txnID)
@@ -194,7 +144,7 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 }
 
 // GetEventRelationsAsUser retrieves events related to a specific event (like reactions) as a specific user
-func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[string]interface{}, error) {
+func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[string]any, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return nil, errors.New("matrix client not configured")
 	}
@@ -229,7 +179,7 @@ func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[
 	}
 
 	var response struct {
-		Chunk []map[string]interface{} `json:"chunk"`
+		Chunk []map[string]any `json:"chunk"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, errors.Wrap(err, "failed to unmarshal relations response")
@@ -574,7 +524,7 @@ func (c *Client) CreateGhostUser(mattermostUserID, displayName string, avatarDat
 	ghostUserID := fmt.Sprintf("@%s:%s", ghostUsername, serverDomain)
 
 	// Registration data
-	regData := map[string]interface{}{
+	regData := map[string]any{
 		"type":     "m.login.application_service",
 		"username": ghostUsername,
 	}
@@ -670,7 +620,7 @@ func (c *Client) SetDisplayName(userID, displayName string) error {
 	}
 
 	// Content for the display name event
-	content := map[string]interface{}{
+	content := map[string]any{
 		"displayname": displayName,
 	}
 
@@ -718,7 +668,7 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 	}
 
 	// Content for the avatar URL event
-	content := map[string]interface{}{
+	content := map[string]any{
 		"avatar_url": avatarURL,
 	}
 
@@ -860,35 +810,6 @@ func (c *Client) UpdateGhostUserAvatar(userID string, avatarData []byte, avatarC
 	return nil
 }
 
-// SendMessageAsGhost sends a message as a ghost user, with optional HTML formatting and optional threading
-func (c *Client) SendMessageAsGhost(roomID, message, htmlMessage, threadEventID, ghostUserID string) (*SendEventResponse, error) {
-	if c.asToken == "" {
-		return nil, errors.New("application service token not configured")
-	}
-
-	// Use map for content to support threading
-	content := map[string]interface{}{
-		"msgtype": "m.text",
-		"body":    message,
-	}
-
-	// Add HTML formatting if provided
-	if htmlMessage != "" {
-		content["format"] = "org.matrix.custom.html"
-		content["formatted_body"] = htmlMessage
-	}
-
-	// Add threading if threadEventID is provided
-	if threadEventID != "" {
-		content["m.relates_to"] = map[string]interface{}{
-			"rel_type": "m.thread",
-			"event_id": threadEventID,
-		}
-	}
-
-	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
-}
-
 // EditMessageAsGhost edits an existing message as a ghost user, with optional HTML formatting
 func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {
@@ -896,7 +817,7 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 	}
 
 	// Matrix edit event content structure
-	newContent := map[string]interface{}{
+	newContent := map[string]any{
 		"msgtype": "m.text",
 		"body":    newMessage,
 	}
@@ -907,11 +828,11 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 		newContent["formatted_body"] = htmlMessage
 	}
 
-	content := map[string]interface{}{
+	content := map[string]any{
 		"msgtype":       "m.text",
 		"body":          " * " + newMessage, // Fallback for clients that don't support edits
 		"m.new_content": newContent,
-		"m.relates_to": map[string]interface{}{
+		"m.relates_to": map[string]any{
 			"rel_type": "m.replace",
 			"event_id": eventID,
 		},
@@ -920,128 +841,161 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
 }
 
-// SendFileMessageAsGhost sends a file attachment message as a ghost user, with optional threading
-func (c *Client) SendFileMessageAsGhost(roomID, filename, mxcURI, mimetype string, size int64, threadEventID, ghostUserID string) (*SendEventResponse, error) {
+// SendMessage sends a message as a ghost user with all optional parameters consolidated into a single request.
+func (c *Client) SendMessage(req MessageRequest) (*SendEventResponse, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
 	}
 
-	// Determine message type based on MIME type
-	var msgType string
-	switch {
-	case strings.HasPrefix(mimetype, "image/"):
-		msgType = "m.image"
-	case strings.HasPrefix(mimetype, "video/"):
-		msgType = "m.video"
-	case strings.HasPrefix(mimetype, "audio/"):
-		msgType = "m.audio"
-	default:
-		msgType = "m.file"
+	// Validate required fields
+	if req.RoomID == "" {
+		return nil, errors.New("room_id is required")
+	}
+	if req.GhostUserID == "" {
+		return nil, errors.New("ghost_user_id is required")
 	}
 
-	content := map[string]interface{}{
-		"msgtype": msgType,
-		"body":    filename,
-		"url":     mxcURI,
-		"info": map[string]interface{}{
-			"size":     size,
-			"mimetype": mimetype,
-		},
+	c.api.LogDebug("Sending message as ghost user", "room_id", req.RoomID, "ghost_user_id", req.GhostUserID, "file_count", len(req.Files), "has_text", req.Message != "" || req.HTMLMessage != "")
+
+	// Handle different message types based on content and files
+
+	// Case 1: No text content - send files as individual messages
+	if req.Message == "" && req.HTMLMessage == "" {
+		if len(req.Files) == 0 {
+			return nil, errors.New("no message content or files to send")
+		}
+		if len(req.Files) == 1 {
+			// Single file without text - send as file message
+			return c.sendSingleMessage(req)
+		}
+		// Multiple files without text - send each as individual file message
+		return c.sendMultipleFiles(req)
 	}
 
-	// Add threading if threadEventID is provided
-	if threadEventID != "" {
-		content["m.relates_to"] = map[string]interface{}{
-			"rel_type": "m.thread",
-			"event_id": threadEventID,
+	// Case 2: Has text content
+	if len(req.Files) == 0 {
+		// Text only - send as text message
+		return c.sendSingleMessage(req)
+	}
+	// Text + files - send text first, then files as replies
+	return c.sendMessageWithFiles(req)
+}
+
+// sendSingleMessage sends either a text message or a single file message
+func (c *Client) sendSingleMessage(req MessageRequest) (*SendEventResponse, error) {
+	// Start with empty content and populate based on message type
+	content := make(map[string]any)
+
+	// Determine if this is a file message or text message
+	if len(req.Files) == 1 && req.Message == "" && req.HTMLMessage == "" {
+		// Single file message
+		file := req.Files[0]
+
+		// Determine message type based on MIME type
+		switch {
+		case strings.HasPrefix(file.MimeType, "image/"):
+			content["msgtype"] = "m.image"
+		case strings.HasPrefix(file.MimeType, "video/"):
+			content["msgtype"] = "m.video"
+		case strings.HasPrefix(file.MimeType, "audio/"):
+			content["msgtype"] = "m.audio"
+		default:
+			content["msgtype"] = "m.file"
+		}
+
+		content["body"] = file.Filename
+		content["url"] = file.MxcURI
+		content["info"] = map[string]any{
+			"size":     file.Size,
+			"mimetype": file.MimeType,
+		}
+	} else {
+		// Text message
+		content["msgtype"] = "m.text"
+		content["body"] = req.Message
+
+		// Add HTML formatting if provided
+		if req.HTMLMessage != "" {
+			content["format"] = "org.matrix.custom.html"
+			content["formatted_body"] = req.HTMLMessage
 		}
 	}
 
-	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
+	// Add threading if provided
+	if req.ThreadEventID != "" {
+		content["m.relates_to"] = map[string]any{
+			"rel_type": "m.thread",
+			"event_id": req.ThreadEventID,
+		}
+	}
+
+	// Add Mattermost metadata if provided
+	if req.PostID != "" {
+		content["mattermost_post_id"] = req.PostID
+	}
+	if req.RemoteID != "" {
+		content["mattermost_remote_id"] = req.RemoteID
+	}
+
+	return c.sendEventAsUser(req.RoomID, "m.room.message", content, req.GhostUserID)
 }
 
-// SendFileReplyAsGhost sends a file attachment as a reply to another message
-func (c *Client) SendFileReplyAsGhost(roomID, filename, mxcURI, mimetype string, size int64, replyToEventID, ghostUserID string) (*SendEventResponse, error) {
-	if c.asToken == "" {
-		return nil, errors.New("application service token not configured")
+// sendMultipleFiles sends multiple files as individual messages (without accompanying text)
+func (c *Client) sendMultipleFiles(req MessageRequest) (*SendEventResponse, error) {
+	var firstResponse *SendEventResponse
+
+	for i, file := range req.Files {
+		// Create a request for this single file
+		fileReq := MessageRequest{
+			RoomID:        req.RoomID,
+			GhostUserID:   req.GhostUserID,
+			ThreadEventID: req.ThreadEventID,
+			PostID:        req.PostID,
+			RemoteID:      req.RemoteID,
+			Files:         []FileAttachment{file},
+		}
+
+		response, err := c.sendSingleMessage(fileReq)
+		if err != nil {
+			// If this is the first file and it fails, return the error
+			if i == 0 {
+				return nil, errors.Wrapf(err, "failed to send file %s", file.Filename)
+			}
+			// For subsequent files, log error but continue
+			c.api.LogWarn("Failed to send file attachment", "filename", file.Filename, "error", err)
+			continue
+		}
+
+		// Keep track of the first successful response to return as primary
+		if firstResponse == nil && response != nil {
+			firstResponse = response
+		}
 	}
 
-	// Determine message type based on MIME type
-	var msgType string
-	switch {
-	case strings.HasPrefix(mimetype, "image/"):
-		msgType = "m.image"
-	case strings.HasPrefix(mimetype, "video/"):
-		msgType = "m.video"
-	case strings.HasPrefix(mimetype, "audio/"):
-		msgType = "m.audio"
-	default:
-		msgType = "m.file"
+	if firstResponse == nil {
+		return nil, errors.New("failed to send any file attachments")
 	}
 
-	content := map[string]interface{}{
-		"msgtype": msgType,
-		"body":    filename,
-		"url":     mxcURI,
-		"info": map[string]interface{}{
-			"size":     size,
-			"mimetype": mimetype,
-		},
-		"m.relates_to": map[string]interface{}{
-			"m.in_reply_to": map[string]interface{}{
-				"event_id": replyToEventID,
-			},
-		},
-	}
-
-	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
+	return firstResponse, nil
 }
 
-// SendMessageWithFilesAsGhost sends a message with file attachments as a ghost user
-func (c *Client) SendMessageWithFilesAsGhost(roomID, message, htmlMessage, threadEventID, ghostUserID string, files []map[string]interface{}) (*SendEventResponse, error) {
-	if c.asToken == "" {
-		return nil, errors.New("application service token not configured")
-	}
-
-	c.api.LogDebug("Sending message with files as ghost user", "room_id", roomID, "ghost_user_id", ghostUserID, "file_count", len(files), "has_text", message != "" || htmlMessage != "")
-
-	// If no files, just send regular message
-	if len(files) == 0 {
-		return c.SendMessageAsGhost(roomID, message, htmlMessage, threadEventID, ghostUserID)
-	}
-
-	// If only one file and no text, send as a simple file message
-	if (message == "" && htmlMessage == "") && len(files) == 1 {
-		firstFile := files[0]
-		filename, _ := firstFile["filename"].(string)
-		mxcURI, _ := firstFile["mxc_uri"].(string)
-		mimetype, _ := firstFile["mimetype"].(string)
-		size, _ := firstFile["size"].(int64)
-
-		return c.SendFileMessageAsGhost(roomID, filename, mxcURI, mimetype, size, threadEventID, ghostUserID)
-	}
-
-	// For messages with text + files, send the text message first, then files as replies
-	// This creates a visually grouped conversation in Matrix clients
-
-	// Send the text message first
-	textResponse, err := c.SendMessageAsGhost(roomID, message, htmlMessage, threadEventID, ghostUserID)
+// sendMessageWithFiles sends a message with file attachments (text first, then files as replies)
+func (c *Client) sendMessageWithFiles(req MessageRequest) (*SendEventResponse, error) {
+	// Send the text message first (create a copy without files for the text part)
+	textReq := req
+	textReq.Files = nil
+	textResponse, err := c.sendSingleMessage(textReq)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to send text message")
 	}
 
 	// Send each file as a reply to the text message and collect their event IDs
 	var fileEventIDs []string
-	for _, fileData := range files {
-		filename, _ := fileData["filename"].(string)
-		mxcURI, _ := fileData["mxc_uri"].(string)
-		mimetype, _ := fileData["mimetype"].(string)
-		size, _ := fileData["size"].(int64)
-
-		fileResponse, err := c.SendFileReplyAsGhost(roomID, filename, mxcURI, mimetype, size, textResponse.EventID, ghostUserID)
+	for _, file := range req.Files {
+		fileResponse, err := c.sendFileReply(req.RoomID, file, textResponse.EventID, req.GhostUserID)
 		if err != nil {
 			// Log error but continue with other files
-			return textResponse, errors.Wrapf(err, "failed to send file attachment %s", filename)
+			return textResponse, errors.Wrapf(err, "failed to send file attachment %s", file.Filename)
 		}
 
 		if fileResponse != nil && fileResponse.EventID != "" {
@@ -1051,7 +1005,7 @@ func (c *Client) SendMessageWithFilesAsGhost(roomID, message, htmlMessage, threa
 
 	// If we have file attachments, update the text message with file event IDs metadata
 	if len(fileEventIDs) > 0 {
-		err := c.AddFileMetadataToMessage(roomID, textResponse.EventID, fileEventIDs, ghostUserID)
+		err := c.AddFileMetadataToMessage(req.RoomID, textResponse.EventID, fileEventIDs, req.GhostUserID)
 		if err != nil {
 			// Log error but don't fail - the messages were sent successfully
 			return textResponse, errors.Wrap(err, "failed to add file metadata to message")
@@ -1062,8 +1016,41 @@ func (c *Client) SendMessageWithFilesAsGhost(roomID, message, htmlMessage, threa
 	return textResponse, nil
 }
 
+// sendFileReply sends a file as a reply to another message
+func (c *Client) sendFileReply(roomID string, file FileAttachment, replyToEventID, ghostUserID string) (*SendEventResponse, error) {
+	// Determine message type based on MIME type
+	var msgType string
+	switch {
+	case strings.HasPrefix(file.MimeType, "image/"):
+		msgType = "m.image"
+	case strings.HasPrefix(file.MimeType, "video/"):
+		msgType = "m.video"
+	case strings.HasPrefix(file.MimeType, "audio/"):
+		msgType = "m.audio"
+	default:
+		msgType = "m.file"
+	}
+
+	content := map[string]any{
+		"msgtype": msgType,
+		"body":    file.Filename,
+		"url":     file.MxcURI,
+		"info": map[string]any{
+			"size":     file.Size,
+			"mimetype": file.MimeType,
+		},
+		"m.relates_to": map[string]any{
+			"m.in_reply_to": map[string]any{
+				"event_id": replyToEventID,
+			},
+		},
+	}
+
+	return c.sendEventAsUser(roomID, "m.room.message", content, ghostUserID)
+}
+
 // sendEventAsUser sends an event as a specific user (using application service impersonation)
-func (c *Client) sendEventAsUser(roomID, eventType string, content interface{}, userID string) (*SendEventResponse, error) {
+func (c *Client) sendEventAsUser(roomID, eventType string, content any, userID string) (*SendEventResponse, error) {
 	txnID := uuid.New().String()
 	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "send", eventType, txnID)
 	reqURL := c.serverURL + endpoint
@@ -1308,7 +1295,7 @@ func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
 
 	requestURL := c.serverURL + "/_matrix/client/v3/directory/list/room/" + url.PathEscape(roomID)
 
-	content := map[string]interface{}{
+	content := map[string]any{
 		"visibility": "public",
 	}
 	if !publish {
@@ -1354,11 +1341,11 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 
 	// Create a custom event to store the file attachment metadata
 	// We'll use a custom event type that won't be displayed by Matrix clients
-	content := map[string]interface{}{
+	content := map[string]any{
 		"file_attachments":   fileEventIDs,
 		"relates_to_message": messageEventID,
 		// Add proper Matrix relation so it's returned by the relations API
-		"m.relates_to": map[string]interface{}{
+		"m.relates_to": map[string]any{
 			"rel_type": "m.mattermost.file_metadata",
 			"event_id": messageEventID,
 		},
@@ -1376,7 +1363,7 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 }
 
 // sendCustomEventAsUser sends a custom event type as a specific user
-func (c *Client) sendCustomEventAsUser(roomID, eventType string, content interface{}, userID string) error {
+func (c *Client) sendCustomEventAsUser(roomID, eventType string, content any, userID string) error {
 	txnID := uuid.New().String()
 	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "send", eventType, txnID)
 	reqURL := c.serverURL + endpoint
@@ -1419,7 +1406,7 @@ func (c *Client) sendCustomEventAsUser(roomID, eventType string, content interfa
 
 // ServerVersionResponse represents the response from the Matrix server version endpoint
 type ServerVersionResponse struct {
-	Server map[string]interface{} `json:"server,omitempty"`
+	Server map[string]any `json:"server,omitempty"`
 }
 
 // ServerInfo contains server name and version information
