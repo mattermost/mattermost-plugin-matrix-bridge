@@ -3,274 +3,402 @@ package main
 import (
 	"testing"
 
-	"github.com/golang/mock/gomock"
-	"github.com/mattermost/mattermost/server/public/model"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/mocks"
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
-func TestExtractMattermostMentions(t *testing.T) {
+func setupPluginForTest() *Plugin {
+	api := &plugintest.API{}
+	
+	// Allow any logging calls since we're not testing logging behavior
+	api.On("LogDebug", mock.Anything, mock.Anything).Maybe()
+	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+	
+	plugin := &Plugin{}
+	plugin.SetAPI(api)
+	return plugin
+}
+
+func TestCompareTextContent(t *testing.T) {
+	plugin := setupPluginForTest()
+
 	tests := []struct {
-		name             string
-		message          string
-		expectedUsers    []string
-		expectedChannels bool
+		name           string
+		currentEvent   map[string]any
+		newPlainText   string
+		newHTMLContent string
+		expected       bool
+		description    string
 	}{
 		{
-			name:             "no mentions",
-			message:          "This is a regular message",
-			expectedUsers:    []string{},
-			expectedChannels: false,
+			name: "identical text content, no HTML",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+					"body":    "Hello world",
+				},
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "",
+			expected:       true,
+			description:    "Should return true when text content is identical",
 		},
 		{
-			name:             "single user mention",
-			message:          "Hello @alice, how are you?",
-			expectedUsers:    []string{"alice"},
-			expectedChannels: false,
+			name: "different text content",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+					"body":    "Hello world",
+				},
+			},
+			newPlainText:   "Hello universe",
+			newHTMLContent: "",
+			expected:       false,
+			description:    "Should return false when text content differs",
 		},
 		{
-			name:             "multiple user mentions",
-			message:          "@alice and @bob please review this",
-			expectedUsers:    []string{"alice", "bob"},
-			expectedChannels: false,
+			name: "identical text and HTML content",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype":        "m.text",
+					"body":           "Hello world",
+					"format":         "org.matrix.custom.html",
+					"formatted_body": "<b>Hello world</b>",
+				},
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "<b>Hello world</b>",
+			expected:       true,
+			description:    "Should return true when both text and HTML content are identical",
 		},
 		{
-			name:             "channel mention @here",
-			message:          "@here please see this announcement",
-			expectedUsers:    []string{},
-			expectedChannels: true,
+			name: "different HTML content",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype":        "m.text",
+					"body":           "Hello world",
+					"format":         "org.matrix.custom.html",
+					"formatted_body": "<b>Hello world</b>",
+				},
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "<i>Hello world</i>",
+			expected:       false,
+			description:    "Should return false when HTML content differs",
 		},
 		{
-			name:             "channel mention @channel",
-			message:          "@channel urgent update",
-			expectedUsers:    []string{},
-			expectedChannels: true,
+			name: "new HTML content, current has none",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+					"body":    "Hello world",
+				},
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "<b>Hello world</b>",
+			expected:       false,
+			description:    "Should return false when new content has HTML but current doesn't",
 		},
 		{
-			name:             "channel mention @all",
-			message:          "@all meeting in 5 minutes",
-			expectedUsers:    []string{},
-			expectedChannels: true,
+			name: "no content field in current event",
+			currentEvent: map[string]any{
+				"type": "m.room.message",
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "",
+			expected:       false,
+			description:    "Should return false when current event has no content field",
 		},
 		{
-			name:             "mixed mentions",
-			message:          "@alice @here @bob please join",
-			expectedUsers:    []string{"alice", "bob"},
-			expectedChannels: true,
+			name: "missing body in current event",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+				},
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "",
+			expected:       false,
+			description:    "Should return false when current event has no body field",
 		},
 		{
-			name:             "usernames with dots and hyphens",
-			message:          "Hi @john.doe and @jane-smith",
-			expectedUsers:    []string{"john.doe", "jane-smith"},
-			expectedChannels: false,
+			name: "current has HTML, new has none",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype":        "m.text",
+					"body":           "Hello world",
+					"format":         "org.matrix.custom.html",
+					"formatted_body": "<b>Hello world</b>",
+				},
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "",
+			expected:       false,
+			description:    "Should return false when current has HTML but new doesn't",
 		},
 		{
-			name:             "usernames with underscores",
-			message:          "@test_user and @user_123",
-			expectedUsers:    []string{"test_user", "user_123"},
-			expectedChannels: false,
-		},
-		{
-			name:             "at symbol without mention",
-			message:          "Email me at john@example.com",
-			expectedUsers:    []string{"example.com"},
-			expectedChannels: false,
+			name: "both have empty HTML",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype":        "m.text",
+					"body":           "Hello world",
+					"formatted_body": "",
+				},
+			},
+			newPlainText:   "Hello world",
+			newHTMLContent: "",
+			expected:       true,
+			description:    "Should return true when both have empty HTML content",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockAPI := mocks.NewMockAPI(ctrl)
-			// Allow unexpected calls to logging methods
-			mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
-			mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-			mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-
-			plugin := &Plugin{}
-			plugin.SetAPI(mockAPI)
-
-			post := &model.Post{
-				Id:      "test-post-id",
-				Message: tt.message,
-			}
-
-			result := plugin.extractMattermostMentions(post)
-
-			// Check user mentions
-			if len(result.UserMentions) != len(tt.expectedUsers) {
-				t.Errorf("Expected %d user mentions, got %d", len(tt.expectedUsers), len(result.UserMentions))
-			}
-
-			for i, expected := range tt.expectedUsers {
-				if i >= len(result.UserMentions) || result.UserMentions[i] != expected {
-					t.Errorf("Expected user mention '%s', got '%s'", expected, result.UserMentions[i])
-				}
-			}
-
-			// Check channel mentions
-			if result.ChannelMentions != tt.expectedChannels {
-				t.Errorf("Expected channel mentions: %v, got: %v", tt.expectedChannels, result.ChannelMentions)
-			}
+			result := plugin.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent)
+			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
 }
 
-func TestAddMatrixMentions(t *testing.T) {
+func TestCompareFileAttachments(t *testing.T) {
 	tests := []struct {
-		name                  string
-		message               string
-		setupMocks            func(*mocks.MockAPI, *mocks.MockKVStore)
-		expectedMentionsAdded bool
-		expectedUserIDs       []string
-		expectedFormattedBody string
+		name         string
+		currentFiles []matrix.FileAttachment
+		newFiles     []matrix.FileAttachment
+		expected     bool
+		description  string
 	}{
 		{
-			name:    "no mentions",
-			message: "This is a regular message",
-			setupMocks: func(_ *mocks.MockAPI, _ *mocks.MockKVStore) {
-				// No mocks needed for this test case
-			},
-			expectedMentionsAdded: false,
-			expectedUserIDs:       []string{},
+			name:         "both empty",
+			currentFiles: []matrix.FileAttachment{},
+			newFiles:     []matrix.FileAttachment{},
+			expected:     true,
+			description:  "Should return true when both have no files",
 		},
 		{
-			name:    "single mention with ghost user",
-			message: "Hello @alice, how are you?",
-			setupMocks: func(mockAPI *mocks.MockAPI, mockKVStore *mocks.MockKVStore) {
-				// Mock user lookup
-				user := &model.User{Id: "user123", Username: "alice"}
-				mockAPI.EXPECT().GetUserByUsername("alice").Return(user, nil)
-
-				// Mock ghost user lookup
-				mockKVStore.EXPECT().Get("ghost_user_user123").Return([]byte("@ghost_alice:matrix.example.com"), nil)
+			name: "identical single file",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
 			},
-			expectedMentionsAdded: true,
-			expectedUserIDs:       []string{"@ghost_alice:matrix.example.com"},
-			expectedFormattedBody: `Hello <a href="https://matrix.to/#/@ghost_alice:matrix.example.com">@alice</a>, how are you?`,
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+			},
+			expected:    true,
+			description: "Should return true when files are identical",
 		},
 		{
-			name:    "multiple mentions with mixed ghost users",
-			message: "@alice and @bob please review",
-			setupMocks: func(mockAPI *mocks.MockAPI, mockKVStore *mocks.MockKVStore) {
-				// Mock alice lookup - has ghost user
-				userAlice := &model.User{Id: "user123", Username: "alice"}
-				mockAPI.EXPECT().GetUserByUsername("alice").Return(userAlice, nil)
-				mockKVStore.EXPECT().Get("ghost_user_user123").Return([]byte("@ghost_alice:matrix.example.com"), nil)
-
-				// Mock bob lookup - no ghost user
-				userBob := &model.User{Id: "user456", Username: "bob"}
-				mockAPI.EXPECT().GetUserByUsername("bob").Return(userBob, nil)
-				mockKVStore.EXPECT().Get("ghost_user_user456").Return(nil, &model.AppError{})
-
-				// No logging mocks needed
+			name: "different filename",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
 			},
-			expectedMentionsAdded: true,
-			expectedUserIDs:       []string{"@ghost_alice:matrix.example.com"},
-			expectedFormattedBody: `<a href="https://matrix.to/#/@ghost_alice:matrix.example.com">@alice</a> and @bob please review`,
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "different.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+			},
+			expected:    false,
+			description: "Should return false when filename differs",
 		},
 		{
-			name:    "mention user not found",
-			message: "@nonexistent please help",
-			setupMocks: func(mockAPI *mocks.MockAPI, _ *mocks.MockKVStore) {
-				// Mock user lookup failure
-				mockAPI.EXPECT().GetUserByUsername("nonexistent").Return(nil, &model.AppError{})
-
-				// No logging mocks needed
+			name: "different MXC URI",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
 			},
-			expectedMentionsAdded: false,
-			expectedUserIDs:       []string{},
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/different",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+			},
+			expected:    false,
+			description: "Should return false when MXC URI differs",
+		},
+		{
+			name: "different MIME type",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+			},
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/png",
+					Size:     12345,
+				},
+			},
+			expected:    false,
+			description: "Should return false when MIME type differs",
+		},
+		{
+			name: "different size",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+			},
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "test.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     54321,
+				},
+			},
+			expected:    false,
+			description: "Should return false when size differs",
+		},
+		{
+			name: "different count - more current files",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test1.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+				{
+					Filename: "test2.jpg",
+					MxcURI:   "mxc://example.com/efgh5678",
+					MimeType: "image/jpeg",
+					Size:     67890,
+				},
+			},
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "test1.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+			},
+			expected:    false,
+			description: "Should return false when current has more files",
+		},
+		{
+			name: "different count - more new files",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test1.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+			},
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "test1.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+				{
+					Filename: "test2.jpg",
+					MxcURI:   "mxc://example.com/efgh5678",
+					MimeType: "image/jpeg",
+					Size:     67890,
+				},
+			},
+			expected:    false,
+			description: "Should return false when new has more files",
+		},
+		{
+			name: "identical multiple files",
+			currentFiles: []matrix.FileAttachment{
+				{
+					Filename: "test1.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+				{
+					Filename: "test2.pdf",
+					MxcURI:   "mxc://example.com/efgh5678",
+					MimeType: "application/pdf",
+					Size:     67890,
+				},
+			},
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "test1.jpg",
+					MxcURI:   "mxc://example.com/abcd1234",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+				{
+					Filename: "test2.pdf",
+					MxcURI:   "mxc://example.com/efgh5678",
+					MimeType: "application/pdf",
+					Size:     67890,
+				},
+			},
+			expected:    true,
+			description: "Should return true when multiple files are identical",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockAPI := mocks.NewMockAPI(ctrl)
-			mockKVStore := mocks.NewMockKVStore(ctrl)
-
-			// Allow unexpected calls to logging methods
-			mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
-			mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-			mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-			mockAPI.EXPECT().LogInfo(gomock.Any(), gomock.Any()).AnyTimes()
-			mockAPI.EXPECT().LogInfo(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-			mockAPI.EXPECT().LogInfo(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-
-			plugin := &Plugin{
-				kvstore: mockKVStore,
-			}
-			plugin.SetAPI(mockAPI)
-
-			// Setup mocks
-			tt.setupMocks(mockAPI, mockKVStore)
-
-			post := &model.Post{
-				Id:      "test-post-id",
-				Message: tt.message,
-			}
-
-			// Create message content structure
-			content := map[string]any{
-				"msgtype": "m.text",
-				"body":    tt.message,
-			}
-
-			// Call the function
-			plugin.addMatrixMentions(content, post)
-
-			// Check if mentions were added
-			mentions, hasMentions := content["m.mentions"]
-			if tt.expectedMentionsAdded != hasMentions {
-				t.Errorf("Expected mentions added: %v, got: %v", tt.expectedMentionsAdded, hasMentions)
-			}
-
-			if tt.expectedMentionsAdded {
-				// Check mention structure
-				mentionMap, ok := mentions.(map[string]any)
-				if !ok {
-					t.Errorf("Expected mentions to be a map")
-					return
-				}
-
-				userIDs, ok := mentionMap["user_ids"].([]string)
-				if !ok {
-					t.Errorf("Expected user_ids to be a string slice")
-					return
-				}
-
-				// Check user IDs
-				if len(userIDs) != len(tt.expectedUserIDs) {
-					t.Errorf("Expected %d user IDs, got %d", len(tt.expectedUserIDs), len(userIDs))
-				}
-
-				for i, expected := range tt.expectedUserIDs {
-					if i >= len(userIDs) || userIDs[i] != expected {
-						t.Errorf("Expected user ID '%s', got '%s'", expected, userIDs[i])
-					}
-				}
-
-				// Check formatted body if specified
-				if tt.expectedFormattedBody != "" {
-					formattedBody, hasFormatted := content["formatted_body"].(string)
-					if !hasFormatted {
-						t.Errorf("Expected formatted_body to be present")
-						return
-					}
-					if formattedBody != tt.expectedFormattedBody {
-						t.Errorf("Expected formatted body '%s', got '%s'", tt.expectedFormattedBody, formattedBody)
-					}
-				}
-
-				// Check that format is set
-				format, hasFormat := content["format"].(string)
-				if !hasFormat || format != "org.matrix.custom.html" {
-					t.Errorf("Expected format to be 'org.matrix.custom.html', got '%s'", format)
-				}
-			}
+			result := compareFileAttachmentArrays(tt.currentFiles, tt.newFiles)
+			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
+}
+
+// Helper function to compare file attachment arrays
+func compareFileAttachmentArrays(currentFiles, newFiles []matrix.FileAttachment) bool {
+	if len(currentFiles) != len(newFiles) {
+		return false
+	}
+
+	for i, newFile := range newFiles {
+		if i >= len(currentFiles) {
+			return false
+		}
+
+		currentFile := currentFiles[i]
+		if currentFile.Filename != newFile.Filename ||
+			currentFile.MxcURI != newFile.MxcURI ||
+			currentFile.MimeType != newFile.MimeType ||
+			currentFile.Size != newFile.Size {
+			return false
+		}
+	}
+
+	return true
 }
