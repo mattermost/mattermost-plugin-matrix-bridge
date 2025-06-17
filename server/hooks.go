@@ -126,7 +126,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 	p.pendingFiles.AddFile(post.Id, pendingFile)
 
-	p.API.LogInfo("Successfully uploaded attachment to Matrix (pending post)", "filename", fi.Name, "size", fi.Size, "post_id", post.Id, "mxc_uri", mxcURI)
+	p.API.LogDebug("Successfully uploaded attachment to Matrix (pending post)", "filename", fi.Name, "size", fi.Size, "post_id", post.Id, "mxc_uri", mxcURI)
 	return nil
 }
 
@@ -136,7 +136,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 
 	// First, try to remove from pending files (if the post hasn't been synced yet)
 	if p.pendingFiles.RemoveFile(post.Id, fi.Id) {
-		p.API.LogInfo("Removed file from pending uploads", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
+		p.API.LogDebug("Removed file from pending uploads", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
 		return nil
 	}
 
@@ -194,7 +194,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 		return errors.Wrap(err, "failed to find and delete file message in Matrix")
 	}
 
-	p.API.LogInfo("Successfully deleted file attachment from Matrix", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
+	p.API.LogDebug("Successfully deleted file attachment from Matrix", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
 	return nil
 }
 
@@ -239,6 +239,6 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, _ *model.
 		return errors.Wrap(err, "failed to update ghost user avatar on Matrix")
 	}
 
-	p.API.LogInfo("Successfully updated ghost user avatar", "user_id", user.Id, "username", user.Username, "ghost_user_id", ghostUserID)
+	p.API.LogDebug("Successfully updated ghost user avatar", "user_id", user.Id, "username", user.Username, "ghost_user_id", ghostUserID)
 	return nil
 }

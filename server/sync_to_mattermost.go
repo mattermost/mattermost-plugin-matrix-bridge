@@ -77,7 +77,7 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 		return errors.Wrap(appErr, "failed to create Mattermost post")
 	}
 
-	p.API.LogInfo("Successfully synced Matrix message to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "sender", event.Sender, "channel_id", channelID)
+	p.API.LogDebug("Successfully synced Matrix message to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "sender", event.Sender, "channel_id", channelID)
 	return nil
 }
 
@@ -119,7 +119,7 @@ func (p *Plugin) handleMatrixMessageEdit(event MatrixEvent, channelID string) er
 		return errors.Wrap(appErr, "failed to update post")
 	}
 
-	p.API.LogInfo("Successfully updated Mattermost post from Matrix edit", "original_matrix_event_id", originalEventID, "edit_matrix_event_id", event.EventID, "mattermost_post_id", updatedPost.Id)
+	p.API.LogDebug("Successfully updated Mattermost post from Matrix edit", "original_matrix_event_id", originalEventID, "edit_matrix_event_id", event.EventID, "mattermost_post_id", updatedPost.Id)
 	return nil
 }
 
@@ -174,7 +174,7 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 		return errors.Wrap(appErr, "failed to add reaction to Mattermost")
 	}
 
-	p.API.LogInfo("Successfully synced Matrix reaction to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", postID, "emoji", emojiName, "sender", event.Sender)
+	p.API.LogDebug("Successfully synced Matrix reaction to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", postID, "emoji", emojiName, "sender", event.Sender)
 	return nil
 }
 
@@ -200,7 +200,7 @@ func (p *Plugin) syncMatrixRedactionToMattermost(event MatrixEvent, channelID st
 		return errors.Wrap(appErr, "failed to delete post")
 	}
 
-	p.API.LogInfo("Successfully deleted Mattermost post from Matrix redaction", "redacted_matrix_event_id", redactsEventID, "redaction_matrix_event_id", event.EventID, "mattermost_post_id", postID)
+	p.API.LogDebug("Successfully deleted Mattermost post from Matrix redaction", "redacted_matrix_event_id", redactsEventID, "redaction_matrix_event_id", event.EventID, "mattermost_post_id", postID)
 	return nil
 }
 
@@ -318,7 +318,7 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string, channelID string
 		p.API.LogWarn("Failed to store Matrix user mapping", "error", err, "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id)
 	}
 
-	p.API.LogInfo("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
+	p.API.LogDebug("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
 	return createdUser.Id, nil
 }
 
@@ -344,7 +344,7 @@ func (p *Plugin) addUserToChannelTeam(userID, channelID string) error {
 		return errors.Wrap(appErr, "failed to add user to team")
 	}
 
-	p.API.LogInfo("Added Matrix user to team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
+	p.API.LogDebug("Added Matrix user to team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
 	return nil
 }
 
@@ -570,7 +570,7 @@ func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixU
 		// Update nickname (display name)
 		if updatedUser.Nickname != profile.DisplayName {
 			if context.Source == "event" {
-				p.API.LogInfo("Updating user display name from Matrix event", "user_id", mattermostUser.Id, "old_name", mattermostUser.Nickname, "new_name", profile.DisplayName, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+				p.API.LogDebug("Updating user display name from Matrix event", "user_id", mattermostUser.Id, "old_name", mattermostUser.Nickname, "new_name", profile.DisplayName, "matrix_user_id", matrixUserID, "event_id", context.EventID)
 			} else {
 				p.API.LogDebug("Updating display name from proactive check", "user_id", mattermostUser.Id, "old", mattermostUser.Nickname, "new", profile.DisplayName)
 			}
@@ -599,9 +599,9 @@ func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixU
 			}
 		} else {
 			if context.Source == "event" {
-				p.API.LogInfo("Successfully updated Mattermost user profile from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName, "event_id", context.EventID)
+				p.API.LogDebug("Successfully updated Mattermost user profile from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName, "event_id", context.EventID)
 			} else {
-				p.API.LogInfo("Updated Mattermost user profile from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName)
+				p.API.LogDebug("Updated Mattermost user profile from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName)
 			}
 		}
 	}
@@ -657,9 +657,9 @@ func (p *Plugin) updateMattermostUserAvatar(mattermostUser *model.User, matrixUs
 
 	// Log successful avatar update
 	if context.Source == "event" {
-		p.API.LogInfo("Successfully updated Mattermost user avatar from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID, "size_bytes", len(newAvatarData))
+		p.API.LogDebug("Successfully updated Mattermost user avatar from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID, "size_bytes", len(newAvatarData))
 	} else {
-		p.API.LogInfo("Updated Mattermost user avatar from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "size_bytes", len(newAvatarData))
+		p.API.LogDebug("Updated Mattermost user avatar from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "size_bytes", len(newAvatarData))
 	}
 }
 

@@ -72,9 +72,9 @@ func (p *Plugin) createOrGetGhostUser(mattermostUserID string) (string, error) {
 	}
 
 	if displayName != "" {
-		p.API.LogInfo("Created new ghost user with display name", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID, "display_name", displayName)
+		p.API.LogDebug("Created new ghost user with display name", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID, "display_name", displayName)
 	} else {
-		p.API.LogInfo("Created new ghost user", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID)
+		p.API.LogDebug("Created new ghost user", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID)
 	}
 	return ghostUser.UserID, nil
 }
@@ -216,7 +216,7 @@ func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, p
 		return errors.Wrap(err, "failed to redact file message in Matrix")
 	}
 
-	p.API.LogInfo("Successfully deleted file message from Matrix", "filename", filename, "file_event_id", fileEventID, "post_event_id", postEventID)
+	p.API.LogDebug("Successfully deleted file message from Matrix", "filename", filename, "file_event_id", fileEventID, "post_event_id", postEventID)
 	return nil
 }
 
@@ -254,7 +254,7 @@ func (p *Plugin) deleteAllFileReplies(matrixRoomID, postEventID, ghostUserID str
 	}
 
 	if deletedCount > 0 {
-		p.API.LogInfo("Deleted file attachments using metadata", "count", deletedCount, "post_event_id", postEventID)
+		p.API.LogDebug("Deleted file attachments using metadata", "count", deletedCount, "post_event_id", postEventID)
 	}
 
 	return firstError

@@ -363,13 +363,12 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 	}
 
 	roomData := map[string]any{
-		"name":       name,
-		"topic":      topic,
-		"preset":     "public_chat",
-		"visibility": "public",
-		"is_direct":  false, // Explicitly mark as not a direct message room
-		// Explicitly set room version and directory visibility
-		"room_version": "10",
+		"name":         name,
+		"topic":        topic,
+		"preset":       "public_chat",
+		"visibility":   "public",
+		"is_direct":    false, // Explicitly mark as not a direct message room
+		"room_version": "10",  // Explicitly set room version and directory visibility
 		"initial_state": []map[string]any{
 			{
 				"type":      "m.room.guest_access",
@@ -447,12 +446,12 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 		if err := c.PublishRoomToDirectory(response.RoomID, true); err != nil {
 			// Log warning but don't fail room creation - the room was created successfully
 			c.api.LogWarn("Failed to publish room to public directory", "room_id", response.RoomID, "error", err)
-			c.api.LogInfo("Room created but not published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
+			c.api.LogDebug("Room created but not published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
 		} else {
-			c.api.LogInfo("Room created and published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
+			c.api.LogDebug("Room created and published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
 		}
 	} else {
-		c.api.LogInfo("Room created (not published to directory)", "room_id", response.RoomID, "room_alias", roomAlias)
+		c.api.LogDebug("Room created (not published to directory)", "room_id", response.RoomID, "room_alias", roomAlias)
 	}
 
 	// Log successful room creation
@@ -471,7 +470,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 			c.api.LogWarn("Failed to add bridge filtering alias", "error", err, "bridge_alias", bridgeAlias, "room_id", response.RoomID)
 			// Continue - user alias still works, bridge filtering just won't work for this room
 		} else {
-			c.api.LogInfo("Successfully added bridge filtering alias", "room_id", response.RoomID, "bridge_alias", bridgeAlias, "user_alias", roomAlias)
+			c.api.LogDebug("Successfully added bridge filtering alias", "room_id", response.RoomID, "bridge_alias", bridgeAlias, "user_alias", roomAlias)
 		}
 	}
 
@@ -546,7 +545,7 @@ func (c *Client) AddRoomAlias(roomID, alias string) error {
 		return fmt.Errorf("failed to add room alias: %d %s", resp.StatusCode, string(body))
 	}
 
-	c.api.LogInfo("Successfully added room alias", "room_id", roomID, "alias", alias)
+	c.api.LogDebug("Successfully added room alias", "room_id", roomID, "alias", alias)
 	return nil
 }
 

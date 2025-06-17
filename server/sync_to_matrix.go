@@ -36,7 +36,7 @@ func (p *Plugin) syncUserToMatrix(user *model.User) error {
 			p.API.LogError("Failed to update ghost user display name", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID, "display_name", displayName)
 			return errors.Wrap(err, "failed to update ghost user display name on Matrix")
 		}
-		p.API.LogInfo("Updated ghost user display name", "user_id", user.Id, "ghost_user_id", ghostUserID, "display_name", displayName)
+		p.API.LogDebug("Updated ghost user display name", "user_id", user.Id, "ghost_user_id", ghostUserID, "display_name", displayName)
 	}
 
 	return nil
@@ -199,7 +199,7 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 			return errors.Wrap(err, "failed to send message with files as ghost user")
 		}
 
-		p.API.LogInfo("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
+		p.API.LogDebug("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
 	} else {
 		// No files, send regular message
 		// Extract content from message structure
@@ -657,5 +657,5 @@ func (p *Plugin) addMatrixMentionsWithData(content map[string]interface{}, post 
 	content["formatted_body"] = updatedHTML
 	content["format"] = "org.matrix.custom.html"
 
-	p.API.LogInfo("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs)
+	p.API.LogDebug("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs)
 }
