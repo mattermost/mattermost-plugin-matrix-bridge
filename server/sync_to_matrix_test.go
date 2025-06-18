@@ -11,12 +11,12 @@ import (
 
 func setupPluginForTest() *Plugin {
 	api := &plugintest.API{}
-	
+
 	// Allow any logging calls since we're not testing logging behavior
 	api.On("LogDebug", mock.Anything, mock.Anything).Maybe()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
-	
+
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	return plugin

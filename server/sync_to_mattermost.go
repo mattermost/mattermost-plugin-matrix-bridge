@@ -285,7 +285,7 @@ func (p *Plugin) syncMatrixRedactionToMattermost(event MatrixEvent, channelID st
 func (p *Plugin) handleReactionDeletion(redactedReactionEvent map[string]any, channelID, redactionEventID string) error {
 	p.API.LogDebug("Handling Matrix reaction deletion", "redaction_event_id", redactionEventID, "channel_id", channelID)
 
-	// Get the redacted Matrix reaction event ID 
+	// Get the redacted Matrix reaction event ID
 	redactedEventID, ok := redactedReactionEvent["event_id"].(string)
 	if !ok {
 		return errors.New("redacted reaction event missing event_id")
@@ -576,7 +576,7 @@ func (p *Plugin) getPostIDFromMatrixEvent(matrixEventID, channelID string) strin
 	return ""
 }
 
-// getPostIDFromRelatedMatrixEvent finds a Mattermost post ID by checking if the Matrix event 
+// getPostIDFromRelatedMatrixEvent finds a Mattermost post ID by checking if the Matrix event
 // is related to a primary message that has a Mattermost post ID
 func (p *Plugin) getPostIDFromRelatedMatrixEvent(matrixEventID, channelID string) string {
 	// Get the Matrix room ID for this channel

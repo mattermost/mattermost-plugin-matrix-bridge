@@ -275,7 +275,7 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 
 	// Get file attachments for this post (for comparison purposes)
 	var currentFiles []matrix.FileAttachment
-	
+
 	// First check pending files (for new posts that haven't been sent yet)
 	pendingFiles := p.pendingFiles.GetFiles(post.Id)
 	for _, file := range pendingFiles {
@@ -286,7 +286,7 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 			Size:     file.Size,
 		})
 	}
-	
+
 	// If no pending files, get file attachments from the post itself (for existing posts)
 	if len(currentFiles) == 0 && len(post.FileIds) > 0 {
 		for _, fileID := range post.FileIds {
@@ -635,12 +635,6 @@ func (p *Plugin) extractMattermostMentions(post *model.Post) *MattermostMentionR
 
 	p.API.LogDebug("Extracted mentions from Mattermost post", "post_id", post.Id, "user_mentions", results.UserMentions, "channel_mentions", results.ChannelMentions)
 	return results
-}
-
-// addMatrixMentions converts Mattermost mentions to Matrix format and adds them to content
-func (p *Plugin) addMatrixMentions(content map[string]any, post *model.Post) {
-	mentions := p.extractMattermostMentions(post)
-	p.addMatrixMentionsWithData(content, post, mentions)
 }
 
 // addMatrixMentionsWithData converts Mattermost mentions to Matrix format using pre-extracted mention data
