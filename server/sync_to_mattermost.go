@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -18,6 +19,22 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 	mattermostPostID, mattermostRemoteID := p.extractMattermostMetadata(event)
 	if mattermostPostID != "" || mattermostRemoteID != "" {
 		p.API.LogDebug("Found Mattermost metadata in Matrix event", "event_id", event.EventID, "mattermost_post_id", mattermostPostID, "mattermost_remote_id", mattermostRemoteID)
+	}
+
+	// Check if this Matrix event originated from Mattermost to prevent loops
+	if mattermostPostID != "" {
+		// This event contains a Mattermost post ID - check if we already have this post
+		if existingPost, appErr := p.API.GetPost(mattermostPostID); appErr == nil && existingPost != nil {
+			p.API.LogDebug("Skipping Matrix message that originated from Mattermost", "event_id", event.EventID, "mattermost_post_id", mattermostPostID, "existing_post_id", existingPost.Id)
+			return nil // Skip processing - this is our own post echoed back from Matrix
+		}
+		// If GetPost fails, the post might have been deleted, so continue processing
+	}
+
+	// Also check remote ID for additional loop prevention
+	if mattermostRemoteID != "" && mattermostRemoteID == p.remoteID {
+		p.API.LogDebug("Skipping Matrix message from our own remote ID", "event_id", event.EventID, "remote_id", mattermostRemoteID)
+		return nil // Skip processing - this originated from our bridge
 	}
 
 	// Extract message content (prefer formatted_body if available)
@@ -152,8 +169,14 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 	// Find the Mattermost post corresponding to the target Matrix event
 	postID := p.getPostIDFromMatrixEvent(targetEventID, channelID)
 	if postID == "" {
-		p.API.LogWarn("Cannot find Mattermost post for Matrix reaction", "target_event_id", targetEventID, "reaction_event_id", event.EventID)
-		return nil // Post not found, maybe it wasn't synced
+		// If we can't find a direct match, check if this is a reaction to a file message
+		// that's related to a primary message
+		postID = p.getPostIDFromRelatedMatrixEvent(targetEventID, channelID)
+		if postID == "" {
+			p.API.LogWarn("Cannot find Mattermost post for Matrix reaction", "target_event_id", targetEventID, "reaction_event_id", event.EventID)
+			return nil // Post not found, maybe it wasn't synced
+		}
+		p.API.LogDebug("Found Mattermost post via related Matrix event", "target_event_id", targetEventID, "mattermost_post_id", postID)
 	}
 
 	// Get or create Mattermost user for the reaction sender
@@ -180,6 +203,21 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 		return errors.Wrap(appErr, "failed to add reaction to Mattermost")
 	}
 
+	// Store mapping of Matrix reaction event ID to Mattermost reaction info for deletion purposes
+	// We need to store the info to reconstruct the model.Reaction object for deletion
+	reactionKey := "matrix_reaction_" + event.EventID
+	reactionInfo := map[string]string{
+		"post_id":    postID,
+		"user_id":    mattermostUserID,
+		"emoji_name": emojiName,
+	}
+	reactionInfoBytes, _ := json.Marshal(reactionInfo)
+	if err := p.kvstore.Set(reactionKey, reactionInfoBytes); err != nil {
+		p.API.LogWarn("Failed to store Matrix reaction mapping", "error", err, "reaction_event_id", event.EventID)
+	} else {
+		p.API.LogDebug("Stored Matrix reaction mapping", "reaction_event_id", event.EventID, "post_id", postID, "emoji", emojiName)
+	}
+
 	p.API.LogDebug("Successfully synced Matrix reaction to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", postID, "emoji", emojiName, "sender", event.Sender)
 	return nil
 }
@@ -194,10 +232,118 @@ func (p *Plugin) syncMatrixRedactionToMattermost(event MatrixEvent, channelID st
 		return errors.New("redaction event missing redacts field")
 	}
 
+	// Get the Matrix room ID to fetch the redacted event details
+	matrixRoomIdentifier, err := p.getMatrixRoomID(channelID)
+	if err != nil {
+		p.API.LogWarn("Failed to get Matrix room identifier for redaction", "error", err, "channel_id", channelID)
+		return nil
+	}
+
+	if matrixRoomIdentifier == "" {
+		p.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+		return nil
+	}
+
+	// Resolve room alias to room ID if needed
+	matrixRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		p.API.LogWarn("Failed to resolve Matrix room identifier for redaction", "error", err, "room_identifier", matrixRoomIdentifier)
+		return nil
+	}
+
+	// Get the redacted event to determine its type
+	redactedEvent, err := p.matrixClient.GetEvent(matrixRoomID, redactsEventID)
+	if err != nil {
+		p.API.LogWarn("Failed to get redacted Matrix event", "error", err, "redacted_event_id", redactsEventID)
+		// If we can't get the event details, try to handle it as a post deletion (fallback)
+		return p.handlePostDeletion(redactsEventID, channelID, event.EventID)
+	}
+
+	// Check the type of the redacted event
+	redactedEventType, ok := redactedEvent["type"].(string)
+	if !ok {
+		p.API.LogWarn("Redacted Matrix event has no type field", "redacted_event_id", redactsEventID)
+		return nil
+	}
+
+	p.API.LogDebug("Processing redaction", "redacted_event_type", redactedEventType, "redacted_event_id", redactsEventID)
+
+	switch redactedEventType {
+	case "m.reaction":
+		// This is a reaction removal
+		return p.handleReactionDeletion(redactedEvent, channelID, event.EventID)
+	case "m.room.message":
+		// This is a message deletion
+		return p.handlePostDeletion(redactsEventID, channelID, event.EventID)
+	default:
+		p.API.LogDebug("Ignoring redaction of unsupported event type", "redacted_event_type", redactedEventType, "redacted_event_id", redactsEventID)
+		return nil
+	}
+}
+
+// handleReactionDeletion handles the removal of a Matrix reaction from Mattermost
+func (p *Plugin) handleReactionDeletion(redactedReactionEvent map[string]any, channelID, redactionEventID string) error {
+	p.API.LogDebug("Handling Matrix reaction deletion", "redaction_event_id", redactionEventID, "channel_id", channelID)
+
+	// Get the redacted Matrix reaction event ID 
+	redactedEventID, ok := redactedReactionEvent["event_id"].(string)
+	if !ok {
+		return errors.New("redacted reaction event missing event_id")
+	}
+
+	// Look up the stored Mattermost reaction info using the Matrix reaction event ID
+	reactionKey := "matrix_reaction_" + redactedEventID
+	reactionInfoBytes, err := p.kvstore.Get(reactionKey)
+	if err != nil {
+		p.API.LogWarn("Cannot find stored Matrix reaction mapping", "matrix_event_id", redactedEventID, "redaction_event_id", redactionEventID)
+		return nil // Reaction mapping not found, maybe it wasn't stored or already deleted
+	}
+
+	// Parse the stored reaction info
+	var reactionInfo map[string]string
+	if err := json.Unmarshal(reactionInfoBytes, &reactionInfo); err != nil {
+		p.API.LogWarn("Failed to parse stored Matrix reaction info", "error", err, "matrix_event_id", redactedEventID)
+		// Clean up the corrupted mapping
+		_ = p.kvstore.Delete(reactionKey)
+		return nil
+	}
+
+	postID := reactionInfo["post_id"]
+	userID := reactionInfo["user_id"]
+	emojiName := reactionInfo["emoji_name"]
+
+	p.API.LogDebug("Found stored Matrix reaction mapping", "matrix_event_id", redactedEventID, "post_id", postID, "user_id", userID, "emoji", emojiName)
+
+	// Create reaction object for removal
+	reaction := &model.Reaction{
+		UserId:    userID,
+		PostId:    postID,
+		EmojiName: emojiName,
+	}
+
+	// Remove the reaction
+	if appErr := p.API.RemoveReaction(reaction); appErr != nil {
+		p.API.LogWarn("Failed to remove Matrix reaction from Mattermost", "error", appErr, "post_id", postID, "emoji", emojiName)
+		return errors.Wrap(appErr, "failed to remove reaction from Mattermost")
+	}
+
+	// Clean up the mapping after successful deletion
+	if err := p.kvstore.Delete(reactionKey); err != nil {
+		p.API.LogWarn("Failed to clean up Matrix reaction mapping", "error", err, "key", reactionKey)
+	}
+
+	p.API.LogDebug("Successfully removed Matrix reaction from Mattermost", "matrix_event_id", redactedEventID, "post_id", postID, "emoji", emojiName, "redaction_event_id", redactionEventID)
+	return nil
+}
+
+// handlePostDeletion handles the deletion of a Matrix message from Mattermost
+func (p *Plugin) handlePostDeletion(redactsEventID, channelID, redactionEventID string) error {
+	p.API.LogDebug("Handling Matrix post deletion", "redacted_event_id", redactsEventID, "redaction_event_id", redactionEventID, "channel_id", channelID)
+
 	// Find the Mattermost post corresponding to the redacted Matrix event
 	postID := p.getPostIDFromMatrixEvent(redactsEventID, channelID)
 	if postID == "" {
-		p.API.LogWarn("Cannot find Mattermost post for Matrix redaction", "redacted_event_id", redactsEventID, "redaction_event_id", event.EventID)
+		p.API.LogWarn("Cannot find Mattermost post for Matrix redaction", "redacted_event_id", redactsEventID, "redaction_event_id", redactionEventID)
 		return nil // Post not found, maybe it wasn't synced
 	}
 
@@ -206,7 +352,7 @@ func (p *Plugin) syncMatrixRedactionToMattermost(event MatrixEvent, channelID st
 		return errors.Wrap(appErr, "failed to delete post")
 	}
 
-	p.API.LogDebug("Successfully deleted Mattermost post from Matrix redaction", "redacted_matrix_event_id", redactsEventID, "redaction_matrix_event_id", event.EventID, "mattermost_post_id", postID)
+	p.API.LogDebug("Successfully deleted Mattermost post from Matrix redaction", "redacted_matrix_event_id", redactsEventID, "redaction_matrix_event_id", redactionEventID, "mattermost_post_id", postID)
 	return nil
 }
 
@@ -428,6 +574,58 @@ func (p *Plugin) getPostIDFromMatrixEvent(matrixEventID, channelID string) strin
 	}
 
 	return ""
+}
+
+// getPostIDFromRelatedMatrixEvent finds a Mattermost post ID by checking if the Matrix event 
+// is related to a primary message that has a Mattermost post ID
+func (p *Plugin) getPostIDFromRelatedMatrixEvent(matrixEventID, channelID string) string {
+	// Get the Matrix room ID for this channel
+	matrixRoomIdentifier, err := p.getMatrixRoomID(channelID)
+	if err != nil {
+		p.API.LogWarn("Failed to get Matrix room identifier for related event lookup", "error", err, "channel_id", channelID)
+		return ""
+	}
+
+	if matrixRoomIdentifier == "" {
+		return ""
+	}
+
+	// Resolve room alias to room ID if needed
+	matrixRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		p.API.LogWarn("Failed to resolve Matrix room identifier for related event lookup", "error", err, "room_identifier", matrixRoomIdentifier)
+		return ""
+	}
+
+	// Get the Matrix event to check if it's related to another event
+	event, err := p.matrixClient.GetEvent(matrixRoomID, matrixEventID)
+	if err != nil {
+		p.API.LogWarn("Failed to get Matrix event for related lookup", "error", err, "event_id", matrixEventID)
+		return ""
+	}
+
+	// Check if this event is related to another event (file message related to primary message)
+	content, ok := event["content"].(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	relatesTo, ok := content["m.relates_to"].(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	// Check if this is a file attachment relation
+	relType, ok := relatesTo["rel_type"].(string)
+	primaryEventID, hasEventID := relatesTo["event_id"].(string)
+	if !ok || relType != "m.mattermost.post" || !hasEventID {
+		return ""
+	}
+
+	p.API.LogDebug("Found file message related to primary message", "file_event_id", matrixEventID, "primary_event_id", primaryEventID)
+
+	// Now look up the Mattermost post ID using the primary event ID
+	return p.getPostIDFromMatrixEvent(primaryEventID, channelID)
 }
 
 // convertMatrixToMattermost converts Matrix message format to Mattermost

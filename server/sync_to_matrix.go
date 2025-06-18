@@ -273,13 +273,11 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 	// Add Matrix mentions if any @mentions exist in the post
 	p.addMatrixMentionsWithData(messageContent, post, mentionData)
 
-	// Extract content from message structure
-	finalPlainText := messageContent["body"].(string)
-	finalHTMLContent, _ := messageContent["formatted_body"].(string)
-
-	// Check for pending file attachments for this post
-	pendingFiles := p.pendingFiles.GetFiles(post.Id)
+	// Get file attachments for this post (for comparison purposes)
 	var currentFiles []matrix.FileAttachment
+	
+	// First check pending files (for new posts that haven't been sent yet)
+	pendingFiles := p.pendingFiles.GetFiles(post.Id)
 	for _, file := range pendingFiles {
 		currentFiles = append(currentFiles, matrix.FileAttachment{
 			Filename: file.Filename,
@@ -287,6 +285,39 @@ func (p *Plugin) updatePostInMatrix(post *model.Post, matrixRoomID string, event
 			MimeType: file.MimeType,
 			Size:     file.Size,
 		})
+	}
+	
+	// If no pending files, get file attachments from the post itself (for existing posts)
+	if len(currentFiles) == 0 && len(post.FileIds) > 0 {
+		for _, fileID := range post.FileIds {
+			fileInfo, appErr := p.API.GetFileInfo(fileID)
+			if appErr != nil {
+				p.API.LogWarn("Failed to get file info for comparison", "error", appErr, "file_id", fileID, "post_id", post.Id)
+				continue
+			}
+			// We don't have the MXC URI for existing files, but we have the filename which is what we need for comparison
+			currentFiles = append(currentFiles, matrix.FileAttachment{
+				Filename: fileInfo.Name,
+				MxcURI:   "", // Not available for existing files, but not needed for text comparison
+				MimeType: fileInfo.MimeType,
+				Size:     fileInfo.Size,
+			})
+		}
+	}
+
+	// Extract content from message structure
+	finalPlainText := messageContent["body"].(string)
+	finalHTMLContent, _ := messageContent["formatted_body"].(string)
+
+	p.API.LogDebug("Preparing to compare Matrix content", "post_id", post.Id, "new_plain_text", finalPlainText, "new_html_content", finalHTMLContent, "file_count", len(currentFiles))
+	if len(currentFiles) > 0 {
+		p.API.LogDebug("Files for comparison", "post_id", post.Id, "filenames", func() []string {
+			var names []string
+			for _, f := range currentFiles {
+				names = append(names, f.Filename)
+			}
+			return names
+		}())
 	}
 
 	// Fetch the current Matrix event content to compare
@@ -687,11 +718,30 @@ func (p *Plugin) addMatrixMentionsWithData(content map[string]any, post *model.P
 // isMatrixContentIdentical compares current Matrix event content with new content to detect if update is needed
 func (p *Plugin) isMatrixContentIdentical(currentEvent map[string]any, newPlainText, newHTMLContent, matrixRoomID, eventID string, newFiles []matrix.FileAttachment) bool {
 	// First check text content
-	if !p.compareTextContent(currentEvent, newPlainText, newHTMLContent) {
+	if !p.compareTextContent(currentEvent, newPlainText, newHTMLContent, newFiles) {
 		return false
 	}
 
-	// Then compare file attachments by checking related events
+	// For file-only posts where text content matches (empty new text + filename match),
+	// skip file attachment comparison since the text comparison already handled the equivalence
+	if newPlainText == "" && len(newFiles) > 0 {
+		// Extract current content to check if this is a file-only post
+		if content, ok := currentEvent["content"].(map[string]any); ok {
+			if currentBody, hasBody := content["body"].(string); hasBody && currentBody != "" {
+				// Check if current body matches any filename (file-only post scenario)
+				for _, file := range newFiles {
+					if currentBody == file.Filename {
+						p.API.LogDebug("File-only post detected with matching text content, skipping file attachment comparison", "current_body", currentBody, "filename", file.Filename)
+						// Text comparison already verified equivalence, so content is identical
+						p.API.LogDebug("Matrix message content and attachments are identical, no update needed")
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	// For non-file-only posts, compare file attachments by checking related events
 	if !p.areFileAttachmentsIdentical(matrixRoomID, eventID, newFiles) {
 		p.API.LogDebug("Matrix message file attachments differ")
 		return false
@@ -703,7 +753,7 @@ func (p *Plugin) isMatrixContentIdentical(currentEvent map[string]any, newPlainT
 }
 
 // compareTextContent compares text and HTML content between current and new message content
-func (p *Plugin) compareTextContent(currentEvent map[string]any, newPlainText, newHTMLContent string) bool {
+func (p *Plugin) compareTextContent(currentEvent map[string]any, newPlainText, newHTMLContent string, newFiles []matrix.FileAttachment) bool {
 	// Extract current content from Matrix event
 	content, ok := currentEvent["content"].(map[string]any)
 	if !ok {
@@ -714,8 +764,28 @@ func (p *Plugin) compareTextContent(currentEvent map[string]any, newPlainText, n
 	// Compare plain text body
 	currentBody, hasBody := content["body"].(string)
 	if !hasBody || currentBody != newPlainText {
-		p.API.LogDebug("Matrix message body differs", "current", currentBody, "new", newPlainText)
-		return false
+		// Special case: file-only posts
+		// If new content is empty and we have files, check if current content is just a filename
+		if newPlainText == "" && len(newFiles) > 0 && hasBody {
+			// Check if current body matches any of the new filenames (file-only post scenario)
+			filenameMatch := false
+			for _, file := range newFiles {
+				if currentBody == file.Filename {
+					p.API.LogDebug("File-only post: current Matrix body matches filename, treating as identical", "current", currentBody, "filename", file.Filename)
+					filenameMatch = true
+					break
+				}
+			}
+			// If current body doesn't match any filename, content differs
+			if !filenameMatch {
+				p.API.LogDebug("Matrix message body differs (not a filename match)", "current", currentBody, "new", newPlainText)
+				return false
+			}
+			// If we found a filename match, continue to check HTML content below
+		} else {
+			p.API.LogDebug("Matrix message body differs", "current", currentBody, "new", newPlainText)
+			return false
+		}
 	}
 
 	// Compare HTML formatted content if present

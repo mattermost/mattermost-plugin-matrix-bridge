@@ -157,7 +157,119 @@ func TestCompareTextContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent)
+			result := plugin.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, []matrix.FileAttachment{})
+			assert.Equal(t, tt.expected, result, tt.description)
+		})
+	}
+}
+
+func TestCompareTextContentFileOnly(t *testing.T) {
+	plugin := setupPluginForTest()
+
+	tests := []struct {
+		name           string
+		currentEvent   map[string]any
+		newPlainText   string
+		newHTMLContent string
+		newFiles       []matrix.FileAttachment
+		expected       bool
+		description    string
+	}{
+		{
+			name: "file-only post: Matrix body matches filename",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+					"body":    "Eye_of_Beholder.webp",
+				},
+			},
+			newPlainText:   "",
+			newHTMLContent: "",
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "Eye_of_Beholder.webp",
+					MxcURI:   "mxc://example.com/abc123",
+					MimeType: "image/webp",
+					Size:     12345,
+				},
+			},
+			expected:    true,
+			description: "Should return true when Matrix body matches filename for file-only post",
+		},
+		{
+			name: "file-only post: Matrix body doesn't match filename",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+					"body":    "different.jpg",
+				},
+			},
+			newPlainText:   "",
+			newHTMLContent: "",
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "Eye_of_Beholder.webp",
+					MxcURI:   "mxc://example.com/abc123",
+					MimeType: "image/webp",
+					Size:     12345,
+				},
+			},
+			expected:    false,
+			description: "Should return false when Matrix body doesn't match filename",
+		},
+		{
+			name: "file-only post: multiple files, matches one",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+					"body":    "second.pdf",
+				},
+			},
+			newPlainText:   "",
+			newHTMLContent: "",
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "first.jpg",
+					MxcURI:   "mxc://example.com/abc123",
+					MimeType: "image/jpeg",
+					Size:     12345,
+				},
+				{
+					Filename: "second.pdf",
+					MxcURI:   "mxc://example.com/def456",
+					MimeType: "application/pdf",
+					Size:     67890,
+				},
+			},
+			expected:    true,
+			description: "Should return true when Matrix body matches any filename",
+		},
+		{
+			name: "not file-only: has text content",
+			currentEvent: map[string]any{
+				"content": map[string]any{
+					"msgtype": "m.text",
+					"body":    "some text content",
+				},
+			},
+			newPlainText:   "",
+			newHTMLContent: "",
+			newFiles: []matrix.FileAttachment{
+				{
+					Filename: "Eye_of_Beholder.webp",
+					MxcURI:   "mxc://example.com/abc123",
+					MimeType: "image/webp",
+					Size:     12345,
+				},
+			},
+			expected:    false,
+			description: "Should return false when not a file-only post (has different text)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := plugin.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, tt.newFiles)
 			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
