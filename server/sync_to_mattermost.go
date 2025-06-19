@@ -275,6 +275,7 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 	return nil
 }
 
+
 // syncMatrixReactionToMattermost handles syncing Matrix reactions to Mattermost
 func (b *MatrixToMattermostBridge) syncMatrixReactionToMattermost(event MatrixEvent, channelID string) error {
 	b.API.LogDebug("Syncing Matrix reaction to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
