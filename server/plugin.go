@@ -16,6 +16,13 @@ import (
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
+const (
+	// DefaultMaxProfileImageSize is the default maximum size for profile images (6MB)
+	DefaultMaxProfileImageSize = 6 * 1024 * 1024
+	// DefaultMaxFileSize is the default maximum size for file attachments (50MB)
+	DefaultMaxFileSize = 50 * 1024 * 1024
+)
+
 // Plugin implements the interface expected by the Mattermost server to communicate between the server and plugin processes.
 type Plugin struct {
 	plugin.MattermostPlugin
@@ -52,6 +59,12 @@ type Plugin struct {
 
 	// Logr instance specifically for logging Matrix transactions.
 	transactionLogger logr.Logger
+
+	// maxProfileImageSize is the maximum size for profile images in bytes
+	maxProfileImageSize int64
+
+	// maxFileSize is the maximum size for file attachments in bytes
+	maxFileSize int64
 }
 
 // OnActivate is invoked when the plugin is activated. If an error is returned, the plugin will be deactivated.
@@ -68,6 +81,10 @@ func (p *Plugin) OnActivate() error {
 
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	p.pendingFiles = NewPendingFileTracker()
+
+	// Initialize file size limits with default values
+	p.maxProfileImageSize = DefaultMaxProfileImageSize
+	p.maxFileSize = DefaultMaxFileSize
 
 	p.initMatrixClient()
 
