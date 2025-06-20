@@ -1029,42 +1029,85 @@ func (b *MatrixToMattermostBridge) syncMatrixMemberEventToMattermost(event Matri
 		return nil
 	}
 
-	// We only care about profile changes for existing members
-	// Profile changes happen when membership is "join" and there are profile fields
-	if membership != "join" {
-		b.API.LogDebug("Ignoring non-join member event", "event_id", event.EventID, "sender", event.Sender, "membership", membership)
-		return nil
-	}
-
-	// Check if this is a profile change (has displayname or avatar_url in content)
-	displayName, hasDisplayName := event.Content["displayname"].(string)
-	avatarURL, hasAvatarURL := event.Content["avatar_url"].(string)
-
-	if !hasDisplayName && !hasAvatarURL {
-		b.API.LogDebug("Member event has no profile information", "event_id", event.EventID, "sender", event.Sender)
-		return nil
-	}
-
-	b.API.LogDebug("Detected Matrix profile change", "event_id", event.EventID, "sender", event.Sender, "display_name", displayName, "avatar_url", avatarURL)
-
 	// Check if we have a Mattermost user for this Matrix user
 	userMapKey := "matrix_user_" + event.Sender
 	userIDBytes, err := b.kvstore.Get(userMapKey)
-	if err != nil || len(userIDBytes) == 0 {
-		b.API.LogDebug("No Mattermost user found for Matrix user profile change", "matrix_user_id", event.Sender, "event_id", event.EventID)
-		return nil // User doesn't exist in Mattermost yet, ignore profile change
+	existingUserID := ""
+	userExists := false
+	if err == nil && len(userIDBytes) > 0 {
+		existingUserID = string(userIDBytes)
+		userExists = true
 	}
 
-	mattermostUserID := string(userIDBytes)
+	switch membership {
+	case "join":
+		return b.handleMatrixMemberJoin(event, channelID, existingUserID, userExists)
+	case "leave", "ban":
+		return b.handleMatrixMemberLeave(event, channelID, existingUserID, userExists)
+	default:
+		b.API.LogDebug("Ignoring unsupported membership state", "event_id", event.EventID, "sender", event.Sender, "membership", membership)
+		return nil
+	}
+}
 
-	// Get the existing Mattermost user
-	mattermostUser, appErr := b.API.GetUser(mattermostUserID)
-	if appErr != nil {
-		b.API.LogWarn("Failed to get Mattermost user for profile update", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", event.Sender)
+// handleMatrixMemberJoin processes Matrix member join events - both new joins and profile changes
+func (b *MatrixToMattermostBridge) handleMatrixMemberJoin(event MatrixEvent, channelID, existingUserID string, userExists bool) error {
+	// Check if this is a profile change (has displayname or avatar_url in content)
+	displayName, hasDisplayName := event.Content["displayname"].(string)
+	avatarURL, hasAvatarURL := event.Content["avatar_url"].(string)
+	hasProfileData := hasDisplayName || hasAvatarURL
+
+	if userExists {
+		// Existing user joining - always ensure they're in the channel first
+		b.API.LogDebug("Ensuring existing Matrix user is in Mattermost channel", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+		if err := b.ensureUserInChannel(existingUserID, channelID); err != nil {
+			b.API.LogWarn("Failed to ensure existing user is in channel", "error", err, "user_id", existingUserID, "channel_id", channelID)
+		}
+
+		// Also handle profile change if profile data is present
+		if hasProfileData {
+			b.API.LogDebug("Detected Matrix profile change for existing user", "event_id", event.EventID, "sender", event.Sender, "display_name", displayName, "avatar_url", avatarURL)
+			return b.updateExistingUserProfile(existingUserID, event.Sender, event.EventID, displayName, avatarURL)
+		}
+
 		return nil
 	}
 
-	b.API.LogDebug("Found Mattermost user for profile update", "user_id", mattermostUser.Id, "username", mattermostUser.Username, "matrix_user_id", event.Sender)
+	// New user joining - create them and add to channel
+	b.API.LogDebug("New Matrix user joining room", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+	mattermostUserID, err := b.getOrCreateMattermostUser(event.Sender, channelID)
+	if err != nil {
+		return errors.Wrap(err, "failed to create Mattermost user for Matrix join")
+	}
+
+	// Add the new user to the channel
+	return b.addUserToChannel(mattermostUserID, channelID)
+}
+
+// handleMatrixMemberLeave processes Matrix member leave/ban events
+func (b *MatrixToMattermostBridge) handleMatrixMemberLeave(event MatrixEvent, channelID, existingUserID string, userExists bool) error {
+	if !userExists {
+		b.API.LogDebug("Matrix user leaving room but no Mattermost user exists", "event_id", event.EventID, "sender", event.Sender)
+		return nil
+	}
+
+	membership := event.Content["membership"].(string)
+	b.API.LogDebug("Matrix user leaving room", "event_id", event.EventID, "sender", event.Sender, "membership", membership, "channel_id", channelID)
+
+	// Remove user from the Mattermost channel
+	return b.removeUserFromChannel(existingUserID, channelID)
+}
+
+// updateExistingUserProfile updates an existing user's profile from Matrix event data
+func (b *MatrixToMattermostBridge) updateExistingUserProfile(mattermostUserID, matrixUserID, eventID, displayName, avatarURL string) error {
+	// Get the existing Mattermost user
+	mattermostUser, appErr := b.API.GetUser(mattermostUserID)
+	if appErr != nil {
+		b.API.LogWarn("Failed to get Mattermost user for profile update", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", matrixUserID)
+		return nil
+	}
+
+	b.API.LogDebug("Found Mattermost user for profile update", "user_id", mattermostUser.Id, "username", mattermostUser.Username, "matrix_user_id", matrixUserID)
 
 	// Create profile data from Matrix event
 	eventProfile := &matrix.UserProfile{
@@ -1074,11 +1117,53 @@ func (b *MatrixToMattermostBridge) syncMatrixMemberEventToMattermost(event Matri
 
 	// Update the user's profile using the unified method
 	context := &ProfileUpdateContext{
-		EventID: event.EventID,
+		EventID: eventID,
 		Source:  "event",
 	}
 
-	b.updateMattermostUserProfile(mattermostUser, event.Sender, context, eventProfile)
+	b.updateMattermostUserProfile(mattermostUser, matrixUserID, context, eventProfile)
+	return nil
+}
 
+// ensureUserInChannel ensures a user is a member of the specified channel
+func (b *MatrixToMattermostBridge) ensureUserInChannel(userID, channelID string) error {
+	// Check if user is already a channel member
+	_, appErr := b.API.GetChannelMember(channelID, userID)
+	if appErr == nil {
+		// User is already a channel member
+		b.API.LogDebug("User already member of channel", "user_id", userID, "channel_id", channelID)
+		return nil
+	}
+
+	// Add user to the channel
+	return b.addUserToChannel(userID, channelID)
+}
+
+// addUserToChannel adds a user to a Mattermost channel
+func (b *MatrixToMattermostBridge) addUserToChannel(userID, channelID string) error {
+	// Ensure user is in the team first
+	if err := b.addUserToChannelTeam(userID, channelID); err != nil {
+		return errors.Wrap(err, "failed to add user to team")
+	}
+
+	// Add user to the channel
+	_, appErr := b.API.AddChannelMember(channelID, userID)
+	if appErr != nil {
+		return errors.Wrap(appErr, "failed to add user to channel")
+	}
+
+	b.API.LogDebug("Added Matrix user to Mattermost channel", "user_id", userID, "channel_id", channelID)
+	return nil
+}
+
+// removeUserFromChannel removes a user from a Mattermost channel
+func (b *MatrixToMattermostBridge) removeUserFromChannel(userID, channelID string) error {
+	// Remove user from the channel
+	appErr := b.API.DeleteChannelMember(channelID, userID)
+	if appErr != nil {
+		return errors.Wrap(appErr, "failed to remove user from channel")
+	}
+
+	b.API.LogDebug("Removed Matrix user from Mattermost channel", "user_id", userID, "channel_id", channelID)
 	return nil
 }

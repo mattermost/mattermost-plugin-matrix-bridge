@@ -984,7 +984,6 @@ func (b *MattermostToMatrixBridge) getOriginalMatrixUserID(mattermostUserID stri
 
 	return ""
 }
-}
 
 // isMatrixContentIdentical compares current Matrix event content with new content to detect if update is needed
 func (b *MattermostToMatrixBridge) isMatrixContentIdentical(currentEvent map[string]any, newPlainText, newHTMLContent, matrixRoomID, eventID string, newFiles []matrix.FileAttachment) bool {
