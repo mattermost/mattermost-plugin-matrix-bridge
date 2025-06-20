@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -572,74 +571,4 @@ func (p *Plugin) downloadMatrixFile(mxcURL string) ([]byte, error) {
 
 	// Delegate to the Matrix client's download method with plugin's max file size
 	return p.matrixClient.DownloadFile(mxcURL, p.maxFileSize, "")
-}
-
-// detectMimeType attempts to detect the MIME type of a file based on filename and content
-func (p *Plugin) detectMimeType(filename string, fileData []byte) string {
-	// Common MIME type mappings based on file extension
-	extension := strings.ToLower(filepath.Ext(filename))
-
-	switch extension {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	case ".svg":
-		return "image/svg+xml"
-	case ".mp4":
-		return "video/mp4"
-	case ".webm":
-		return "video/webm"
-	case ".avi":
-		return "video/x-msvideo"
-	case ".mov":
-		return "video/quicktime"
-	case ".mp3":
-		return "audio/mpeg"
-	case ".wav":
-		return "audio/wav"
-	case ".ogg":
-		return "audio/ogg"
-	case ".pdf":
-		return "application/pdf"
-	case ".txt":
-		return "text/plain"
-	case ".html":
-		return "text/html"
-	case ".json":
-		return "application/json"
-	case ".xml":
-		return "application/xml"
-	case ".zip":
-		return "application/zip"
-	default:
-		// Try to detect based on file content
-		if len(fileData) > 0 {
-			// Check for common image file signatures
-			if len(fileData) >= 4 {
-				// PNG signature
-				if fileData[0] == 0x89 && fileData[1] == 0x50 && fileData[2] == 0x4E && fileData[3] == 0x47 {
-					return "image/png"
-				}
-				// JPEG signature
-				if fileData[0] == 0xFF && fileData[1] == 0xD8 {
-					return "image/jpeg"
-				}
-				// GIF signature
-				if fileData[0] == 0x47 && fileData[1] == 0x49 && fileData[2] == 0x46 {
-					return "image/gif"
-				}
-				// WebP signature
-				if len(fileData) >= 12 && fileData[0] == 0x52 && fileData[1] == 0x49 && fileData[2] == 0x46 && fileData[3] == 0x46 &&
-					fileData[8] == 0x57 && fileData[9] == 0x45 && fileData[10] == 0x42 && fileData[11] == 0x50 {
-					return "image/webp"
-				}
-			}
-		}
-		return "application/octet-stream"
-	}
 }

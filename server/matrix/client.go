@@ -1276,7 +1276,6 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	return nil, errors.Wrapf(lastErr, "failed to download file from any endpoint for MXC URI: %s", mxcURI)
 }
 
-
 // PublishRoomToDirectory explicitly publishes a room to the public directory
 func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
 	if c.asToken == "" {

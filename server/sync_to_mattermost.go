@@ -74,11 +74,27 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 	// Check if this is a threaded message (reply)
 	var rootID string
 	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
-		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
-			if parentEventID, exists := relatesTo["event_id"].(string); exists {
+		// Check for Matrix reply structure (m.in_reply_to)
+		if inReplyTo, hasInReplyTo := relatesTo["m.in_reply_to"].(map[string]any); hasInReplyTo {
+			if parentEventID, hasEventID := inReplyTo["event_id"].(string); hasEventID {
 				// Find the Mattermost post ID for this Matrix event
 				if mattermostPostID := p.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
 					rootID = mattermostPostID
+					p.API.LogDebug("Found Matrix reply, setting root ID", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "mattermost_root_id", rootID)
+				} else {
+					p.API.LogDebug("Matrix reply parent not found in Mattermost", "matrix_event_id", event.EventID, "parent_event_id", parentEventID)
+				}
+			}
+		}
+		// Also check for thread relation (m.thread) as fallback
+		if rootID == "" {
+			if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
+				if parentEventID, exists := relatesTo["event_id"].(string); exists {
+					// Find the Mattermost post ID for this Matrix event
+					if mattermostPostID := p.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+						rootID = mattermostPostID
+						p.API.LogDebug("Found Matrix thread, setting root ID", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "mattermost_root_id", rootID)
+					}
 				}
 			}
 		}
@@ -171,18 +187,6 @@ func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string)
 		return nil
 	}
 
-	// Extract file info if available
-	var fileSize int64
-	var mimeType string
-	if info, hasInfo := event.Content["info"].(map[string]any); hasInfo {
-		if size, hasSize := info["size"].(float64); hasSize {
-			fileSize = int64(size)
-		}
-		if mime, hasMime := info["mimetype"].(string); hasMime {
-			mimeType = mime
-		}
-	}
-
 	// Get or create Mattermost user for the Matrix sender
 	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender, channelID)
 	if err != nil {
@@ -195,19 +199,6 @@ func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string)
 		return errors.Wrap(err, "failed to download Matrix file")
 	}
 
-	// Create file info for Mattermost
-	fileInfo := &model.FileInfo{
-		Name:     body,
-		Size:     fileSize,
-		MimeType: mimeType,
-		Content:  string(fileData),
-	}
-
-	// If no mime type was provided, try to detect it
-	if fileInfo.MimeType == "" {
-		fileInfo.MimeType = p.detectMimeType(body, fileData)
-	}
-
 	// Upload file to Mattermost
 	uploadedFileInfo, appErr := p.API.UploadFile(fileData, channelID, body)
 	if appErr != nil {
@@ -217,11 +208,27 @@ func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string)
 	// Check if this is a threaded message (reply)
 	var rootID string
 	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
-		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
-			if parentEventID, exists := relatesTo["event_id"].(string); exists {
+		// Check for Matrix reply structure (m.in_reply_to)
+		if inReplyTo, hasInReplyTo := relatesTo["m.in_reply_to"].(map[string]any); hasInReplyTo {
+			if parentEventID, hasEventID := inReplyTo["event_id"].(string); hasEventID {
 				// Find the Mattermost post ID for this Matrix event
 				if mattermostPostID := p.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
 					rootID = mattermostPostID
+					p.API.LogDebug("Found Matrix file reply, setting root ID", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "mattermost_root_id", rootID)
+				} else {
+					p.API.LogDebug("Matrix file reply parent not found in Mattermost", "matrix_event_id", event.EventID, "parent_event_id", parentEventID)
+				}
+			}
+		}
+		// Also check for thread relation (m.thread) as fallback
+		if rootID == "" {
+			if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
+				if parentEventID, exists := relatesTo["event_id"].(string); exists {
+					// Find the Mattermost post ID for this Matrix event
+					if mattermostPostID := p.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+						rootID = mattermostPostID
+						p.API.LogDebug("Found Matrix file thread, setting root ID", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "mattermost_root_id", rootID)
+					}
 				}
 			}
 		}
