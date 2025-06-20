@@ -52,6 +52,7 @@ type MessageRequest struct {
 	PostID         string           `json:"post_id"`           // Optional: Mattermost post ID metadata
 	Files          []FileAttachment `json:"files"`             // Optional: File attachments
 	ReplyToEventID string           `json:"reply_to_event_id"` // Optional: Event ID to reply to (for files)
+	Mentions       map[string]any   `json:"mentions"`          // Optional: Matrix mentions structure (m.mentions)
 }
 
 // SendEventResponse represents the response from Matrix when sending events.
@@ -987,6 +988,11 @@ func (c *Client) sendTextMessage(req MessageRequest, rootEventID string) (*SendE
 		content["mattermost_remote_id"] = c.remoteID
 	}
 
+	// Add mentions if provided
+	if len(req.Mentions) > 0 {
+		content["m.mentions"] = req.Mentions
+	}
+
 	return c.sendEventAsUser(req.RoomID, "m.room.message", content, req.GhostUserID)
 }
 
@@ -1034,6 +1040,11 @@ func (c *Client) sendFileMessage(req MessageRequest, file FileAttachment, rootEv
 	}
 	if c.remoteID != "" {
 		content["mattermost_remote_id"] = c.remoteID
+	}
+
+	// Add mentions if provided
+	if len(req.Mentions) > 0 {
+		content["m.mentions"] = req.Mentions
 	}
 
 	return c.sendEventAsUser(req.RoomID, "m.room.message", content, req.GhostUserID)
