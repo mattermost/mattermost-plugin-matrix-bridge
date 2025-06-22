@@ -37,6 +37,9 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 		return nil // Skip processing - this originated from our bridge
 	}
 
+	// Extract message content (prefer formatted_body if available)
+	content := p.extractMatrixMessageContent(event)
+
 	// Check if this is a message edit (has m.relates_to with rel_type: m.replace)
 	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.replace" {
@@ -44,17 +47,6 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 			return p.handleMatrixMessageEdit(event, channelID)
 		}
 	}
-
-	// Check if this is a file/image attachment
-	if msgType, exists := event.Content["msgtype"].(string); exists {
-		switch msgType {
-		case "m.image", "m.file", "m.video", "m.audio":
-			return p.syncMatrixFileToMattermost(event, channelID)
-		}
-	}
-
-	// Extract message content (prefer formatted_body if available)
-	content := p.extractMatrixMessageContent(event)
 
 	// For new messages (not edits), skip if content is empty
 	if content == "" {
@@ -151,108 +143,6 @@ func (p *Plugin) handleMatrixMessageEdit(event MatrixEvent, channelID string) er
 	}
 
 	p.API.LogDebug("Successfully updated Mattermost post from Matrix edit", "original_matrix_event_id", originalEventID, "edit_matrix_event_id", event.EventID, "mattermost_post_id", updatedPost.Id)
-	return nil
-}
-
-// syncMatrixFileToMattermost handles syncing Matrix file attachments to Mattermost
-func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string) error {
-	p.API.LogDebug("Syncing Matrix file to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
-
-	// Extract file metadata
-	body, exists := event.Content["body"].(string)
-	if !exists {
-		p.API.LogWarn("Matrix file message missing body field", "event_id", event.EventID)
-		return nil
-	}
-
-	url, exists := event.Content["url"].(string)
-	if !exists {
-		p.API.LogWarn("Matrix file message missing url field", "event_id", event.EventID)
-		return nil
-	}
-
-	// Extract file info if available
-	var fileSize int64
-	var mimeType string
-	if info, hasInfo := event.Content["info"].(map[string]any); hasInfo {
-		if size, hasSize := info["size"].(float64); hasSize {
-			fileSize = int64(size)
-		}
-		if mime, hasMime := info["mimetype"].(string); hasMime {
-			mimeType = mime
-		}
-	}
-
-	// Get or create Mattermost user for the Matrix sender
-	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender, channelID)
-	if err != nil {
-		return errors.Wrap(err, "failed to get or create Mattermost user for file")
-	}
-
-	// Download the file from Matrix
-	fileData, err := p.downloadMatrixFile(url)
-	if err != nil {
-		return errors.Wrap(err, "failed to download Matrix file")
-	}
-
-	// Create file info for Mattermost
-	fileInfo := &model.FileInfo{
-		Name:     body,
-		Size:     fileSize,
-		MimeType: mimeType,
-		Content:  string(fileData),
-	}
-
-	// If no mime type was provided, try to detect it
-	if fileInfo.MimeType == "" {
-		fileInfo.MimeType = p.detectMimeType(body, fileData)
-	}
-
-	// Upload file to Mattermost
-	uploadedFileInfo, appErr := p.API.UploadFile(fileData, channelID, body)
-	if appErr != nil {
-		return errors.Wrap(appErr, "failed to upload file to Mattermost")
-	}
-
-	// Check if this is a threaded message (reply)
-	var rootID string
-	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
-		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
-			if parentEventID, exists := relatesTo["event_id"].(string); exists {
-				// Find the Mattermost post ID for this Matrix event
-				if mattermostPostID := p.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
-					rootID = mattermostPostID
-				}
-			}
-		}
-	}
-
-	// Create Mattermost post with file attachment (no message text needed)
-	post := &model.Post{
-		UserId:    mattermostUserID,
-		ChannelId: channelID,
-		Message:   "", // Empty message - like chess, the file attachment speaks for itself
-		CreateAt:  event.Timestamp,
-		RootId:    rootID,
-		RemoteId:  &p.remoteID,
-		FileIds:   []string{uploadedFileInfo.Id},
-		Props:     make(map[string]any),
-	}
-
-	// Store Matrix event ID in post properties for reaction mapping and edit tracking
-	config := p.getConfiguration()
-	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
-	post.Props[propertyKey] = event.EventID
-	post.Props["from_matrix"] = true
-
-	// Create the post in Mattermost
-	createdPost, appErr := p.API.CreatePost(post)
-	if appErr != nil {
-		return errors.Wrap(appErr, "failed to create Mattermost post with file attachment")
-	}
-
-	p.API.LogDebug("Successfully synced Matrix file to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "filename", body, "file_id", uploadedFileInfo.Id)
 	return nil
 }
 
@@ -840,8 +730,8 @@ func (p *Plugin) downloadMatrixAvatar(avatarURL string) ([]byte, error) {
 		return nil, errors.New("Matrix client not configured")
 	}
 
-	// Use the Matrix client's download method with size limit and image content type validation
-	return p.matrixClient.DownloadFile(avatarURL, p.maxProfileImageSize, "image/")
+	// Use the Matrix client's dedicated avatar download method
+	return p.matrixClient.DownloadAvatar(avatarURL)
 }
 
 // ProfileUpdateContext provides context information for profile updates
