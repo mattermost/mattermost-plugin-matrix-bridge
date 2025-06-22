@@ -562,3 +562,13 @@ func cleanupMarkdown(markdown string) string {
 
 	return cleaned
 }
+
+// downloadMatrixFile downloads a file from Matrix using the MXC URI
+func (p *Plugin) downloadMatrixFile(mxcURL string) ([]byte, error) {
+	if p.matrixClient == nil {
+		return nil, errors.New("Matrix client not configured")
+	}
+
+	// Delegate to the Matrix client's download method with plugin's max file size
+	return p.matrixClient.DownloadFile(mxcURL, p.maxFileSize, "")
+}
