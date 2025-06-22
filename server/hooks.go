@@ -19,7 +19,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 
 	// Process user sync events first (display name changes, etc.)
 	for _, user := range msg.Users {
-		if err := p.syncUserToMatrix(user); err != nil {
+		if err := p.mattermostToMatrixBridge.SyncUserToMatrix(user); err != nil {
 			p.API.LogError("Failed to sync user to Matrix", "error", err, "user_id", user.Id, "username", user.Username)
 			continue
 		}
@@ -32,7 +32,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 			continue
 		}
 
-		if err := p.syncPostToMatrix(post, msg.ChannelId); err != nil {
+		if err := p.mattermostToMatrixBridge.SyncPostToMatrix(post, msg.ChannelId); err != nil {
 			p.API.LogError("Failed to sync post to Matrix", "error", err, "post_id", post.Id)
 			continue
 		}
@@ -45,7 +45,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 			continue
 		}
 
-		if err := p.syncReactionToMatrix(reaction, msg.ChannelId); err != nil {
+		if err := p.mattermostToMatrixBridge.SyncReactionToMatrix(reaction, msg.ChannelId); err != nil {
 			p.API.LogError("Failed to sync reaction to Matrix", "error", err, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName)
 			continue
 		}
@@ -109,7 +109,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 
 	// Get the Matrix room identifier for this channel
-	matrixRoomIdentifier, err := p.getMatrixRoomID(post.ChannelId)
+	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.getMatrixRoomID(post.ChannelId)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for attachment")
 	}
@@ -157,7 +157,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 
 	// If not in pending files, the file was already posted to Matrix - need to delete from Matrix
 	// Get the Matrix room identifier for this channel
-	matrixRoomIdentifier, err := p.getMatrixRoomID(post.ChannelId)
+	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.getMatrixRoomID(post.ChannelId)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for file deletion")
 	}

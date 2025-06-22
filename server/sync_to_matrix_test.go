@@ -3,27 +3,24 @@ package main
 import (
 	"testing"
 
-	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
+	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
-
-func setupPluginForTest() *Plugin {
-	api := &plugintest.API{}
-
-	// Allow any logging calls since we're not testing logging behavior
-	api.On("LogDebug", mock.Anything, mock.Anything).Maybe()
-	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
-	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
-
-	plugin := &Plugin{}
-	plugin.SetAPI(api)
-	return plugin
-}
 
 func TestCompareTextContent(t *testing.T) {
 	plugin := setupPluginForTest()
+	// Set up required fields for bridge initialization
+	plugin.maxProfileImageSize = DefaultMaxProfileImageSize
+	plugin.maxFileSize = DefaultMaxFileSize
+	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	plugin.pendingFiles = NewPendingFileTracker()
+	plugin.client = pluginapi.NewClient(plugin.API, nil)
+	plugin.kvstore = kvstore.NewKVStore(plugin.client)
+	plugin.matrixClient = matrix.NewClient("", "", "", plugin.API)
+	// Initialize bridges for testing
+	plugin.initBridges()
 
 	tests := []struct {
 		name           string
@@ -157,7 +154,7 @@ func TestCompareTextContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, []matrix.FileAttachment{})
+			result := plugin.mattermostToMatrixBridge.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, []matrix.FileAttachment{})
 			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
@@ -165,6 +162,13 @@ func TestCompareTextContent(t *testing.T) {
 
 func TestCompareTextContentFileOnly(t *testing.T) {
 	plugin := setupPluginForTest()
+	// Set up required fields for bridge initialization
+	plugin.maxProfileImageSize = DefaultMaxProfileImageSize
+	plugin.maxFileSize = DefaultMaxFileSize
+	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	plugin.pendingFiles = NewPendingFileTracker()
+	// Initialize bridges for testing
+	plugin.initBridges()
 
 	tests := []struct {
 		name           string
@@ -269,7 +273,7 @@ func TestCompareTextContentFileOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, tt.newFiles)
+			result := plugin.mattermostToMatrixBridge.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, tt.newFiles)
 			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
@@ -490,27 +494,4 @@ func TestCompareFileAttachments(t *testing.T) {
 			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
-}
-
-// Helper function to compare file attachment arrays
-func compareFileAttachmentArrays(currentFiles, newFiles []matrix.FileAttachment) bool {
-	if len(currentFiles) != len(newFiles) {
-		return false
-	}
-
-	for i, newFile := range newFiles {
-		if i >= len(currentFiles) {
-			return false
-		}
-
-		currentFile := currentFiles[i]
-		if currentFile.Filename != newFile.Filename ||
-			currentFile.MxcURI != newFile.MxcURI ||
-			currentFile.MimeType != newFile.MimeType ||
-			currentFile.Size != newFile.Size {
-			return false
-		}
-	}
-
-	return true
 }

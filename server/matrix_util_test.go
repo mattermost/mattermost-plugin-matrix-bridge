@@ -158,6 +158,14 @@ func (m *mockLogger) LogDebug(message string, _ ...any) {
 	m.logs = append(m.logs, message)
 }
 
+func (m *mockLogger) LogInfo(message string, _ ...any) {
+	m.logs = append(m.logs, message)
+}
+
+func (m *mockLogger) LogError(message string, _ ...any) {
+	m.logs = append(m.logs, message)
+}
+
 func TestExtractServerDomain(t *testing.T) {
 	tests := []struct {
 		name      string

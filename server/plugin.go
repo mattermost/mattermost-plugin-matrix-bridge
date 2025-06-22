@@ -65,6 +65,10 @@ type Plugin struct {
 
 	// maxFileSize is the maximum size for file attachments in bytes
 	maxFileSize int64
+
+	// Bridge components for dependency injection architecture
+	mattermostToMatrixBridge *MattermostToMatrixBridge
+	matrixToMattermostBridge *MatrixToMattermostBridge
 }
 
 // OnActivate is invoked when the plugin is activated. If an error is returned, the plugin will be deactivated.
@@ -87,6 +91,9 @@ func (p *Plugin) OnActivate() error {
 	p.maxFileSize = DefaultMaxFileSize
 
 	p.initMatrixClient()
+
+	// Initialize bridge components
+	p.initBridges()
 
 	p.commandClient = command.NewCommandHandler(p)
 
@@ -131,6 +138,24 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
 	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken, p.remoteID, p.API)
+}
+
+func (p *Plugin) initBridges() {
+	// Create shared utilities
+	sharedUtils := NewBridgeUtils(BridgeUtilsConfig{
+		Logger:              p.API,
+		API:                 p.API,
+		KVStore:             p.kvstore,
+		MatrixClient:        p.matrixClient,
+		RemoteID:            p.remoteID,
+		MaxProfileImageSize: p.maxProfileImageSize,
+		MaxFileSize:         p.maxFileSize,
+		ConfigGetter:        p,
+	})
+
+	// Create bridge instances
+	p.mattermostToMatrixBridge = NewMattermostToMatrixBridge(sharedUtils, p.pendingFiles, p.postTracker)
+	p.matrixToMattermostBridge = NewMatrixToMattermostBridge(sharedUtils)
 }
 
 func (p *Plugin) registerForSharedChannels() error {
@@ -190,7 +215,7 @@ func (p *Plugin) GetConfiguration() command.Configuration {
 
 // CreateOrGetGhostUser gets an existing ghost user or creates a new one for a Mattermost user
 func (p *Plugin) CreateOrGetGhostUser(mattermostUserID string) (string, error) {
-	return p.createOrGetGhostUser(mattermostUserID)
+	return p.mattermostToMatrixBridge.CreateOrGetGhostUser(mattermostUserID)
 }
 
 // GetPluginAPI returns the Mattermost plugin API

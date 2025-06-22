@@ -11,29 +11,41 @@ import (
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
+// MatrixToMattermostBridge handles syncing FROM Matrix TO Mattermost
+type MatrixToMattermostBridge struct {
+	*BridgeUtils
+}
+
+// NewMatrixToMattermostBridge creates a new MatrixToMattermostBridge instance
+func NewMatrixToMattermostBridge(utils *BridgeUtils) *MatrixToMattermostBridge {
+	return &MatrixToMattermostBridge{
+		BridgeUtils: utils,
+	}
+}
+
 // syncMatrixMessageToMattermost handles syncing Matrix messages to Mattermost posts
-func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID string) error {
-	p.API.LogDebug("Syncing Matrix message to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEvent, channelID string) error {
+	b.API.LogDebug("Syncing Matrix message to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
 	// Extract Mattermost metadata if present
-	mattermostPostID, mattermostRemoteID := p.extractMattermostMetadata(event)
+	mattermostPostID, mattermostRemoteID := b.extractMattermostMetadata(event)
 	if mattermostPostID != "" || mattermostRemoteID != "" {
-		p.API.LogDebug("Found Mattermost metadata in Matrix event", "event_id", event.EventID, "mattermost_post_id", mattermostPostID, "mattermost_remote_id", mattermostRemoteID)
+		b.API.LogDebug("Found Mattermost metadata in Matrix event", "event_id", event.EventID, "mattermost_post_id", mattermostPostID, "mattermost_remote_id", mattermostRemoteID)
 	}
 
 	// Check if this Matrix event originated from Mattermost to prevent loops
 	if mattermostPostID != "" {
 		// This event contains a Mattermost post ID - check if we already have this post
-		if existingPost, appErr := p.API.GetPost(mattermostPostID); appErr == nil && existingPost != nil {
-			p.API.LogDebug("Skipping Matrix message that originated from Mattermost", "event_id", event.EventID, "mattermost_post_id", mattermostPostID, "existing_post_id", existingPost.Id)
+		if existingPost, appErr := b.API.GetPost(mattermostPostID); appErr == nil && existingPost != nil {
+			b.API.LogDebug("Skipping Matrix message that originated from Mattermost", "event_id", event.EventID, "mattermost_post_id", mattermostPostID, "existing_post_id", existingPost.Id)
 			return nil // Skip processing - this is our own post echoed back from Matrix
 		}
 		// If GetPost fails, the post might have been deleted, so continue processing
 	}
 
 	// Also check remote ID for additional loop prevention
-	if mattermostRemoteID != "" && mattermostRemoteID == p.remoteID {
-		p.API.LogDebug("Skipping Matrix message from our own remote ID", "event_id", event.EventID, "remote_id", mattermostRemoteID)
+	if mattermostRemoteID != "" && mattermostRemoteID == b.remoteID {
+		b.API.LogDebug("Skipping Matrix message from our own remote ID", "event_id", event.EventID, "remote_id", mattermostRemoteID)
 		return nil // Skip processing - this originated from our bridge
 	}
 
@@ -41,7 +53,7 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.replace" {
 			// This is an edit - handle separately (allow empty content for deletions)
-			return p.handleMatrixMessageEdit(event, channelID)
+			return b.handleMatrixMessageEdit(event, channelID)
 		}
 	}
 
@@ -49,27 +61,27 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 	if msgType, exists := event.Content["msgtype"].(string); exists {
 		switch msgType {
 		case "m.image", "m.file", "m.video", "m.audio":
-			return p.syncMatrixFileToMattermost(event, channelID)
+			return b.syncMatrixFileToMattermost(event, channelID)
 		}
 	}
 
 	// Extract message content (prefer formatted_body if available)
-	content := p.extractMatrixMessageContent(event)
+	content := b.extractMatrixMessageContent(event)
 
 	// For new messages (not edits), skip if content is empty
 	if content == "" {
-		p.API.LogDebug("Matrix message has no body content, skipping new message", "event_id", event.EventID, "content", event.Content)
+		b.API.LogDebug("Matrix message has no body content, skipping new message", "event_id", event.EventID, "content", event.Content)
 		return nil // Empty new messages don't need to be synced
 	}
 
 	// Get or create Mattermost user for the Matrix sender
-	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender, channelID)
+	mattermostUserID, err := b.getOrCreateMattermostUser(event.Sender, channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get or create Mattermost user")
 	}
 
 	// Convert Matrix content to Mattermost format
-	mattermostContent := p.convertMatrixToMattermost(content)
+	mattermostContent := b.convertMatrixToMattermost(content)
 
 	// Check if this is a threaded message (reply)
 	var rootID string
@@ -77,7 +89,7 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
 			if parentEventID, exists := relatesTo["event_id"].(string); exists {
 				// Find the Mattermost post ID for this Matrix event
-				if mattermostPostID := p.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+				if mattermostPostID := b.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
 					rootID = mattermostPostID
 				}
 			}
@@ -91,31 +103,31 @@ func (p *Plugin) syncMatrixMessageToMattermost(event MatrixEvent, channelID stri
 		Message:   mattermostContent,
 		CreateAt:  event.Timestamp,
 		RootId:    rootID,
-		RemoteId:  &p.remoteID, // Attribute to Matrix remote
+		RemoteId:  &b.remoteID, // Attribute to Matrix remote
 		Props:     make(map[string]any),
 	}
 
 	// Store Matrix event ID in post properties for reaction mapping and edit tracking
-	config := p.getConfiguration()
-	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
+	config := b.getConfiguration()
+	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 	post.Props[propertyKey] = event.EventID
 	post.Props["from_matrix"] = true
 
 	// Create the post in Mattermost
-	createdPost, appErr := p.API.CreatePost(post)
+	createdPost, appErr := b.API.CreatePost(post)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to create Mattermost post")
 	}
 
-	p.API.LogDebug("Successfully synced Matrix message to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "sender", event.Sender, "channel_id", channelID)
+	b.API.LogDebug("Successfully synced Matrix message to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "sender", event.Sender, "channel_id", channelID)
 	return nil
 }
 
 // handleMatrixMessageEdit handles Matrix message edits by updating the corresponding Mattermost post
-func (p *Plugin) handleMatrixMessageEdit(event MatrixEvent, channelID string) error {
+func (b *MatrixToMattermostBridge) handleMatrixMessageEdit(event MatrixEvent, channelID string) error {
 	// Extract the new content from the edit event
-	newContent := p.extractMatrixMessageContent(event)
+	newContent := b.extractMatrixMessageContent(event)
 	// Extract the original event ID being edited
 	relatesTo, exists := event.Content["m.relates_to"].(map[string]any)
 	if !exists {
@@ -128,46 +140,46 @@ func (p *Plugin) handleMatrixMessageEdit(event MatrixEvent, channelID string) er
 	}
 
 	// Find the Mattermost post corresponding to the original Matrix event
-	postID := p.getPostIDFromMatrixEvent(originalEventID, channelID)
+	postID := b.getPostIDFromMatrixEvent(originalEventID, channelID)
 	if postID == "" {
-		p.API.LogWarn("Cannot find Mattermost post for Matrix edit", "original_event_id", originalEventID, "edit_event_id", event.EventID)
+		b.API.LogWarn("Cannot find Mattermost post for Matrix edit", "original_event_id", originalEventID, "edit_event_id", event.EventID)
 		return nil // Post not found, maybe it wasn't synced
 	}
 
 	// Get the existing post
-	post, appErr := p.API.GetPost(postID)
+	post, appErr := b.API.GetPost(postID)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to get post for edit")
 	}
 
 	// Update the post content (allow empty content - user may have deleted all text)
-	post.Message = p.convertMatrixToMattermost(newContent)
+	post.Message = b.convertMatrixToMattermost(newContent)
 	post.EditAt = event.Timestamp
 
 	// Update the post
-	updatedPost, appErr := p.API.UpdatePost(post)
+	updatedPost, appErr := b.API.UpdatePost(post)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to update post")
 	}
 
-	p.API.LogDebug("Successfully updated Mattermost post from Matrix edit", "original_matrix_event_id", originalEventID, "edit_matrix_event_id", event.EventID, "mattermost_post_id", updatedPost.Id)
+	b.API.LogDebug("Successfully updated Mattermost post from Matrix edit", "original_matrix_event_id", originalEventID, "edit_matrix_event_id", event.EventID, "mattermost_post_id", updatedPost.Id)
 	return nil
 }
 
 // syncMatrixFileToMattermost handles syncing Matrix file attachments to Mattermost
-func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string) error {
-	p.API.LogDebug("Syncing Matrix file to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent, channelID string) error {
+	b.API.LogDebug("Syncing Matrix file to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
 	// Extract file metadata
 	body, exists := event.Content["body"].(string)
 	if !exists {
-		p.API.LogWarn("Matrix file message missing body field", "event_id", event.EventID)
+		b.API.LogWarn("Matrix file message missing body field", "event_id", event.EventID)
 		return nil
 	}
 
 	url, exists := event.Content["url"].(string)
 	if !exists {
-		p.API.LogWarn("Matrix file message missing url field", "event_id", event.EventID)
+		b.API.LogWarn("Matrix file message missing url field", "event_id", event.EventID)
 		return nil
 	}
 
@@ -184,13 +196,13 @@ func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string)
 	}
 
 	// Get or create Mattermost user for the Matrix sender
-	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender, channelID)
+	mattermostUserID, err := b.getOrCreateMattermostUser(event.Sender, channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get or create Mattermost user for file")
 	}
 
 	// Download the file from Matrix
-	fileData, err := p.downloadMatrixFile(url)
+	fileData, err := b.downloadMatrixFile(url)
 	if err != nil {
 		return errors.Wrap(err, "failed to download Matrix file")
 	}
@@ -205,11 +217,11 @@ func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string)
 
 	// If no mime type was provided, try to detect it
 	if fileInfo.MimeType == "" {
-		fileInfo.MimeType = p.detectMimeType(body, fileData)
+		fileInfo.MimeType = b.detectMimeType(body)
 	}
 
 	// Upload file to Mattermost
-	uploadedFileInfo, appErr := p.API.UploadFile(fileData, channelID, body)
+	uploadedFileInfo, appErr := b.API.UploadFile(fileData, channelID, body)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to upload file to Mattermost")
 	}
@@ -220,7 +232,7 @@ func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string)
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
 			if parentEventID, exists := relatesTo["event_id"].(string); exists {
 				// Find the Mattermost post ID for this Matrix event
-				if mattermostPostID := p.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+				if mattermostPostID := b.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
 					rootID = mattermostPostID
 				}
 			}
@@ -234,31 +246,31 @@ func (p *Plugin) syncMatrixFileToMattermost(event MatrixEvent, channelID string)
 		Message:   "", // Empty message - like chess, the file attachment speaks for itself
 		CreateAt:  event.Timestamp,
 		RootId:    rootID,
-		RemoteId:  &p.remoteID,
+		RemoteId:  &b.remoteID,
 		FileIds:   []string{uploadedFileInfo.Id},
 		Props:     make(map[string]any),
 	}
 
 	// Store Matrix event ID in post properties for reaction mapping and edit tracking
-	config := p.getConfiguration()
-	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
+	config := b.getConfiguration()
+	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 	post.Props[propertyKey] = event.EventID
 	post.Props["from_matrix"] = true
 
 	// Create the post in Mattermost
-	createdPost, appErr := p.API.CreatePost(post)
+	createdPost, appErr := b.API.CreatePost(post)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to create Mattermost post with file attachment")
 	}
 
-	p.API.LogDebug("Successfully synced Matrix file to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "filename", body, "file_id", uploadedFileInfo.Id)
+	b.API.LogDebug("Successfully synced Matrix file to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "filename", body, "file_id", uploadedFileInfo.Id)
 	return nil
 }
 
 // syncMatrixReactionToMattermost handles syncing Matrix reactions to Mattermost
-func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID string) error {
-	p.API.LogDebug("Syncing Matrix reaction to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+func (b *MatrixToMattermostBridge) syncMatrixReactionToMattermost(event MatrixEvent, channelID string) error {
+	b.API.LogDebug("Syncing Matrix reaction to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
 	// Extract reaction key (emoji)
 	relatesTo, exists := event.Content["m.relates_to"].(map[string]any)
@@ -277,26 +289,26 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 	}
 
 	// Find the Mattermost post corresponding to the target Matrix event
-	postID := p.getPostIDFromMatrixEvent(targetEventID, channelID)
+	postID := b.getPostIDFromMatrixEvent(targetEventID, channelID)
 	if postID == "" {
 		// If we can't find a direct match, check if this is a reaction to a file message
 		// that's related to a primary message
-		postID = p.getPostIDFromRelatedMatrixEvent(targetEventID, channelID)
+		postID = b.getPostIDFromRelatedMatrixEvent(targetEventID, channelID)
 		if postID == "" {
-			p.API.LogWarn("Cannot find Mattermost post for Matrix reaction", "target_event_id", targetEventID, "reaction_event_id", event.EventID)
+			b.API.LogWarn("Cannot find Mattermost post for Matrix reaction", "target_event_id", targetEventID, "reaction_event_id", event.EventID)
 			return nil // Post not found, maybe it wasn't synced
 		}
-		p.API.LogDebug("Found Mattermost post via related Matrix event", "target_event_id", targetEventID, "mattermost_post_id", postID)
+		b.API.LogDebug("Found Mattermost post via related Matrix event", "target_event_id", targetEventID, "mattermost_post_id", postID)
 	}
 
 	// Get or create Mattermost user for the reaction sender
-	mattermostUserID, err := p.getOrCreateMattermostUser(event.Sender, channelID)
+	mattermostUserID, err := b.getOrCreateMattermostUser(event.Sender, channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get or create Mattermost user for reaction")
 	}
 
 	// Convert Matrix emoji to Mattermost format
-	emojiName := p.convertMatrixEmojiToMattermost(key)
+	emojiName := b.convertMatrixEmojiToMattermost(key)
 
 	// Create Mattermost reaction
 	reaction := &model.Reaction{
@@ -304,11 +316,11 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 		PostId:    postID,
 		EmojiName: emojiName,
 		CreateAt:  event.Timestamp,
-		RemoteId:  &p.remoteID, // Attribute to Matrix remote
+		RemoteId:  &b.remoteID, // Attribute to Matrix remote
 	}
 
 	// Add the reaction
-	_, appErr := p.API.AddReaction(reaction)
+	_, appErr := b.API.AddReaction(reaction)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to add reaction to Mattermost")
 	}
@@ -322,19 +334,19 @@ func (p *Plugin) syncMatrixReactionToMattermost(event MatrixEvent, channelID str
 		"emoji_name": emojiName,
 	}
 	reactionInfoBytes, _ := json.Marshal(reactionInfo)
-	if err := p.kvstore.Set(reactionKey, reactionInfoBytes); err != nil {
-		p.API.LogWarn("Failed to store Matrix reaction mapping", "error", err, "reaction_event_id", event.EventID)
+	if err := b.kvstore.Set(reactionKey, reactionInfoBytes); err != nil {
+		b.API.LogWarn("Failed to store Matrix reaction mapping", "error", err, "reaction_event_id", event.EventID)
 	} else {
-		p.API.LogDebug("Stored Matrix reaction mapping", "reaction_event_id", event.EventID, "post_id", postID, "emoji", emojiName)
+		b.API.LogDebug("Stored Matrix reaction mapping", "reaction_event_id", event.EventID, "post_id", postID, "emoji", emojiName)
 	}
 
-	p.API.LogDebug("Successfully synced Matrix reaction to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", postID, "emoji", emojiName, "sender", event.Sender)
+	b.API.LogDebug("Successfully synced Matrix reaction to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", postID, "emoji", emojiName, "sender", event.Sender)
 	return nil
 }
 
 // syncMatrixRedactionToMattermost handles Matrix message deletions (redactions)
-func (p *Plugin) syncMatrixRedactionToMattermost(event MatrixEvent, channelID string) error {
-	p.API.LogDebug("Syncing Matrix redaction to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+func (b *MatrixToMattermostBridge) syncMatrixRedactionToMattermost(event MatrixEvent, channelID string) error {
+	b.API.LogDebug("Syncing Matrix redaction to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
 	// Extract the redacted event ID
 	redactsEventID, exists := event.Content["redacts"].(string)
@@ -343,57 +355,57 @@ func (p *Plugin) syncMatrixRedactionToMattermost(event MatrixEvent, channelID st
 	}
 
 	// Get the Matrix room ID to fetch the redacted event details
-	matrixRoomIdentifier, err := p.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
 	if err != nil {
-		p.API.LogWarn("Failed to get Matrix room identifier for redaction", "error", err, "channel_id", channelID)
+		b.API.LogWarn("Failed to get Matrix room identifier for redaction", "error", err, "channel_id", channelID)
 		return nil
 	}
 
 	if matrixRoomIdentifier == "" {
-		p.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+		b.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
 		return nil
 	}
 
 	// Resolve room alias to room ID if needed
-	matrixRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	matrixRoomID, err := b.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
 	if err != nil {
-		p.API.LogWarn("Failed to resolve Matrix room identifier for redaction", "error", err, "room_identifier", matrixRoomIdentifier)
+		b.API.LogWarn("Failed to resolve Matrix room identifier for redaction", "error", err, "room_identifier", matrixRoomIdentifier)
 		return nil
 	}
 
 	// Get the redacted event to determine its type
-	redactedEvent, err := p.matrixClient.GetEvent(matrixRoomID, redactsEventID)
+	redactedEvent, err := b.matrixClient.GetEvent(matrixRoomID, redactsEventID)
 	if err != nil {
-		p.API.LogWarn("Failed to get redacted Matrix event", "error", err, "redacted_event_id", redactsEventID)
+		b.API.LogWarn("Failed to get redacted Matrix event", "error", err, "redacted_event_id", redactsEventID)
 		// If we can't get the event details, try to handle it as a post deletion (fallback)
-		return p.handlePostDeletion(redactsEventID, channelID, event.EventID)
+		return b.handlePostDeletion(redactsEventID, channelID, event.EventID)
 	}
 
 	// Check the type of the redacted event
 	redactedEventType, ok := redactedEvent["type"].(string)
 	if !ok {
-		p.API.LogWarn("Redacted Matrix event has no type field", "redacted_event_id", redactsEventID)
+		b.API.LogWarn("Redacted Matrix event has no type field", "redacted_event_id", redactsEventID)
 		return nil
 	}
 
-	p.API.LogDebug("Processing redaction", "redacted_event_type", redactedEventType, "redacted_event_id", redactsEventID)
+	b.API.LogDebug("Processing redaction", "redacted_event_type", redactedEventType, "redacted_event_id", redactsEventID)
 
 	switch redactedEventType {
 	case "m.reaction":
 		// This is a reaction removal
-		return p.handleReactionDeletion(redactedEvent, channelID, event.EventID)
+		return b.handleReactionDeletion(redactedEvent, channelID, event.EventID)
 	case "m.room.message":
 		// This is a message deletion
-		return p.handlePostDeletion(redactsEventID, channelID, event.EventID)
+		return b.handlePostDeletion(redactsEventID, channelID, event.EventID)
 	default:
-		p.API.LogDebug("Ignoring redaction of unsupported event type", "redacted_event_type", redactedEventType, "redacted_event_id", redactsEventID)
+		b.API.LogDebug("Ignoring redaction of unsupported event type", "redacted_event_type", redactedEventType, "redacted_event_id", redactsEventID)
 		return nil
 	}
 }
 
 // handleReactionDeletion handles the removal of a Matrix reaction from Mattermost
-func (p *Plugin) handleReactionDeletion(redactedReactionEvent map[string]any, channelID, redactionEventID string) error {
-	p.API.LogDebug("Handling Matrix reaction deletion", "redaction_event_id", redactionEventID, "channel_id", channelID)
+func (b *MatrixToMattermostBridge) handleReactionDeletion(redactedReactionEvent map[string]any, channelID, redactionEventID string) error {
+	b.API.LogDebug("Handling Matrix reaction deletion", "redaction_event_id", redactionEventID, "channel_id", channelID)
 
 	// Get the redacted Matrix reaction event ID
 	redactedEventID, ok := redactedReactionEvent["event_id"].(string)
@@ -403,18 +415,18 @@ func (p *Plugin) handleReactionDeletion(redactedReactionEvent map[string]any, ch
 
 	// Look up the stored Mattermost reaction info using the Matrix reaction event ID
 	reactionKey := "matrix_reaction_" + redactedEventID
-	reactionInfoBytes, err := p.kvstore.Get(reactionKey)
+	reactionInfoBytes, err := b.kvstore.Get(reactionKey)
 	if err != nil {
-		p.API.LogWarn("Cannot find stored Matrix reaction mapping", "matrix_event_id", redactedEventID, "redaction_event_id", redactionEventID)
+		b.API.LogWarn("Cannot find stored Matrix reaction mapping", "matrix_event_id", redactedEventID, "redaction_event_id", redactionEventID)
 		return nil // Reaction mapping not found, maybe it wasn't stored or already deleted
 	}
 
 	// Parse the stored reaction info
 	var reactionInfo map[string]string
 	if err := json.Unmarshal(reactionInfoBytes, &reactionInfo); err != nil {
-		p.API.LogWarn("Failed to parse stored Matrix reaction info", "error", err, "matrix_event_id", redactedEventID)
+		b.API.LogWarn("Failed to parse stored Matrix reaction info", "error", err, "matrix_event_id", redactedEventID)
 		// Clean up the corrupted mapping
-		_ = p.kvstore.Delete(reactionKey)
+		_ = b.kvstore.Delete(reactionKey)
 		return nil
 	}
 
@@ -422,7 +434,7 @@ func (p *Plugin) handleReactionDeletion(redactedReactionEvent map[string]any, ch
 	userID := reactionInfo["user_id"]
 	emojiName := reactionInfo["emoji_name"]
 
-	p.API.LogDebug("Found stored Matrix reaction mapping", "matrix_event_id", redactedEventID, "post_id", postID, "user_id", userID, "emoji", emojiName)
+	b.API.LogDebug("Found stored Matrix reaction mapping", "matrix_event_id", redactedEventID, "post_id", postID, "user_id", userID, "emoji", emojiName)
 
 	// Create reaction object for removal
 	reaction := &model.Reaction{
@@ -432,55 +444,55 @@ func (p *Plugin) handleReactionDeletion(redactedReactionEvent map[string]any, ch
 	}
 
 	// Remove the reaction
-	if appErr := p.API.RemoveReaction(reaction); appErr != nil {
-		p.API.LogWarn("Failed to remove Matrix reaction from Mattermost", "error", appErr, "post_id", postID, "emoji", emojiName)
+	if appErr := b.API.RemoveReaction(reaction); appErr != nil {
+		b.API.LogWarn("Failed to remove Matrix reaction from Mattermost", "error", appErr, "post_id", postID, "emoji", emojiName)
 		return errors.Wrap(appErr, "failed to remove reaction from Mattermost")
 	}
 
 	// Clean up the mapping after successful deletion
-	if err := p.kvstore.Delete(reactionKey); err != nil {
-		p.API.LogWarn("Failed to clean up Matrix reaction mapping", "error", err, "key", reactionKey)
+	if err := b.kvstore.Delete(reactionKey); err != nil {
+		b.API.LogWarn("Failed to clean up Matrix reaction mapping", "error", err, "key", reactionKey)
 	}
 
-	p.API.LogDebug("Successfully removed Matrix reaction from Mattermost", "matrix_event_id", redactedEventID, "post_id", postID, "emoji", emojiName, "redaction_event_id", redactionEventID)
+	b.API.LogDebug("Successfully removed Matrix reaction from Mattermost", "matrix_event_id", redactedEventID, "post_id", postID, "emoji", emojiName, "redaction_event_id", redactionEventID)
 	return nil
 }
 
 // handlePostDeletion handles the deletion of a Matrix message from Mattermost
-func (p *Plugin) handlePostDeletion(redactsEventID, channelID, redactionEventID string) error {
-	p.API.LogDebug("Handling Matrix post deletion", "redacted_event_id", redactsEventID, "redaction_event_id", redactionEventID, "channel_id", channelID)
+func (b *MatrixToMattermostBridge) handlePostDeletion(redactsEventID, channelID, redactionEventID string) error {
+	b.API.LogDebug("Handling Matrix post deletion", "redacted_event_id", redactsEventID, "redaction_event_id", redactionEventID, "channel_id", channelID)
 
 	// Find the Mattermost post corresponding to the redacted Matrix event
-	postID := p.getPostIDFromMatrixEvent(redactsEventID, channelID)
+	postID := b.getPostIDFromMatrixEvent(redactsEventID, channelID)
 	if postID == "" {
-		p.API.LogWarn("Cannot find Mattermost post for Matrix redaction", "redacted_event_id", redactsEventID, "redaction_event_id", redactionEventID)
+		b.API.LogWarn("Cannot find Mattermost post for Matrix redaction", "redacted_event_id", redactsEventID, "redaction_event_id", redactionEventID)
 		return nil // Post not found, maybe it wasn't synced
 	}
 
 	// Delete the post
-	if appErr := p.API.DeletePost(postID); appErr != nil {
+	if appErr := b.API.DeletePost(postID); appErr != nil {
 		return errors.Wrap(appErr, "failed to delete post")
 	}
 
-	p.API.LogDebug("Successfully deleted Mattermost post from Matrix redaction", "redacted_matrix_event_id", redactsEventID, "redaction_matrix_event_id", redactionEventID, "mattermost_post_id", postID)
+	b.API.LogDebug("Successfully deleted Mattermost post from Matrix redaction", "redacted_matrix_event_id", redactsEventID, "redaction_matrix_event_id", redactionEventID, "mattermost_post_id", postID)
 	return nil
 }
 
 // getOrCreateMattermostUser gets or creates a Mattermost user for a Matrix user
 // If channelID is provided, ensures the user is added to the team associated with that channel
-func (p *Plugin) getOrCreateMattermostUser(matrixUserID string, channelID string) (string, error) {
+func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string, channelID string) (string, error) {
 	// Check if we already have a mapping for this Matrix user
 	userMapKey := "matrix_user_" + matrixUserID
-	userIDBytes, err := p.kvstore.Get(userMapKey)
+	userIDBytes, err := b.kvstore.Get(userMapKey)
 	if err == nil && len(userIDBytes) > 0 {
 		mattermostUserID := string(userIDBytes)
 
 		// Verify the user still exists
-		if existingUser, appErr := p.API.GetUser(mattermostUserID); appErr == nil {
+		if existingUser, appErr := b.API.GetUser(mattermostUserID); appErr == nil {
 			// User exists, ensure they're in the team for this channel
 			if channelID != "" {
-				if err := p.addUserToChannelTeam(mattermostUserID, channelID); err != nil {
-					p.API.LogWarn("Failed to add existing Matrix user to team", "error", err, "user_id", mattermostUserID, "channel_id", channelID, "matrix_user_id", matrixUserID)
+				if err := b.addUserToChannelTeam(mattermostUserID, channelID); err != nil {
+					b.API.LogWarn("Failed to add existing Matrix user to team", "error", err, "user_id", mattermostUserID, "channel_id", channelID, "matrix_user_id", matrixUserID)
 				}
 			}
 
@@ -489,34 +501,34 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string, channelID string
 				EventID: "",
 				Source:  "api",
 			}
-			p.updateMattermostUserProfile(existingUser, matrixUserID, context)
+			b.updateMattermostUserProfile(existingUser, matrixUserID, context)
 			return mattermostUserID, nil
 		}
 
 		// User no longer exists, remove the mapping
-		if err := p.kvstore.Delete(userMapKey); err != nil {
-			p.API.LogWarn("Failed to delete user mapping", "error", err, "key", userMapKey)
+		if err := b.kvstore.Delete(userMapKey); err != nil {
+			b.API.LogWarn("Failed to delete user mapping", "error", err, "key", userMapKey)
 		}
 	}
 
 	// Extract username from Matrix user ID (@username:server.com -> username)
-	username := p.extractUsernameFromMatrixUserID(matrixUserID)
+	username := b.extractUsernameFromMatrixUserID(matrixUserID)
 	if username == "" {
 		return "", errors.New("failed to extract username from Matrix user ID")
 	}
 
 	// Create a unique Mattermost username
-	mattermostUsername := p.generateMattermostUsername(username)
+	mattermostUsername := b.generateMattermostUsername(username)
 
 	// Get real display name and avatar from Matrix profile
 	var displayName string
 	var firstName, lastName string
 	var avatarData []byte
 
-	if p.matrixClient != nil {
-		profile, err := p.matrixClient.GetUserProfile(matrixUserID)
+	if b.matrixClient != nil {
+		profile, err := b.matrixClient.GetUserProfile(matrixUserID)
 		if err != nil {
-			p.API.LogWarn("Failed to get Matrix user profile", "error", err, "user_id", matrixUserID)
+			b.API.LogWarn("Failed to get Matrix user profile", "error", err, "user_id", matrixUserID)
 			displayName = username // Fallback to username
 		} else {
 			if profile.DisplayName != "" {
@@ -529,9 +541,9 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string, channelID string
 
 			// Download avatar if available
 			if profile.AvatarURL != "" {
-				avatarData, err = p.downloadMatrixAvatar(profile.AvatarURL)
+				avatarData, err = b.downloadMatrixAvatar(profile.AvatarURL)
 				if err != nil {
-					p.API.LogWarn("Failed to download Matrix user avatar", "error", err, "user_id", matrixUserID, "avatar_url", profile.AvatarURL)
+					b.API.LogWarn("Failed to download Matrix user avatar", "error", err, "user_id", matrixUserID, "avatar_url", profile.AvatarURL)
 				}
 			}
 		}
@@ -549,69 +561,69 @@ func (p *Plugin) getOrCreateMattermostUser(matrixUserID string, channelID string
 		LastName:    lastName,                                            // Parsed from display name if possible
 		AuthData:    nil,
 		AuthService: "",
-		RemoteId:    &p.remoteID, // Attribute to Matrix remote
+		RemoteId:    &b.remoteID, // Attribute to Matrix remote
 	}
 
-	createdUser, appErr := p.API.CreateUser(user)
+	createdUser, appErr := b.API.CreateUser(user)
 	if appErr != nil {
 		return "", errors.Wrap(appErr, "failed to create Mattermost user")
 	}
 
 	// Set avatar if we downloaded one
 	if len(avatarData) > 0 {
-		appErr = p.API.SetProfileImage(createdUser.Id, avatarData)
+		appErr = b.API.SetProfileImage(createdUser.Id, avatarData)
 		if appErr != nil {
-			p.API.LogWarn("Failed to set Matrix user avatar", "error", appErr, "user_id", createdUser.Id, "matrix_user_id", matrixUserID)
+			b.API.LogWarn("Failed to set Matrix user avatar", "error", appErr, "user_id", createdUser.Id, "matrix_user_id", matrixUserID)
 		} else {
-			p.API.LogDebug("Successfully set avatar for Matrix user", "user_id", createdUser.Id, "matrix_user_id", matrixUserID)
+			b.API.LogDebug("Successfully set avatar for Matrix user", "user_id", createdUser.Id, "matrix_user_id", matrixUserID)
 		}
 	}
 
 	// Add user to team if channelID is provided
 	if channelID != "" {
-		if err := p.addUserToChannelTeam(createdUser.Id, channelID); err != nil {
-			p.API.LogWarn("Failed to add new Matrix user to team", "error", err, "user_id", createdUser.Id, "channel_id", channelID, "matrix_user_id", matrixUserID)
+		if err := b.addUserToChannelTeam(createdUser.Id, channelID); err != nil {
+			b.API.LogWarn("Failed to add new Matrix user to team", "error", err, "user_id", createdUser.Id, "channel_id", channelID, "matrix_user_id", matrixUserID)
 		}
 	}
 
 	// Store the mapping
-	err = p.kvstore.Set(userMapKey, []byte(createdUser.Id))
+	err = b.kvstore.Set(userMapKey, []byte(createdUser.Id))
 	if err != nil {
-		p.API.LogWarn("Failed to store Matrix user mapping", "error", err, "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id)
+		b.API.LogWarn("Failed to store Matrix user mapping", "error", err, "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id)
 	}
 
-	p.API.LogDebug("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
+	b.API.LogDebug("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
 	return createdUser.Id, nil
 }
 
 // addUserToChannelTeam adds a user to the team that owns the specified channel
-func (p *Plugin) addUserToChannelTeam(userID, channelID string) error {
+func (b *MatrixToMattermostBridge) addUserToChannelTeam(userID, channelID string) error {
 	// Get the channel to find its team ID
-	channel, appErr := p.API.GetChannel(channelID)
+	channel, appErr := b.API.GetChannel(channelID)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to get channel")
 	}
 
 	// Check if user is already a member of the team
-	_, appErr = p.API.GetTeamMember(channel.TeamId, userID)
+	_, appErr = b.API.GetTeamMember(channel.TeamId, userID)
 	if appErr == nil {
 		// User is already a team member
-		p.API.LogDebug("User already member of team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
+		b.API.LogDebug("User already member of team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
 		return nil
 	}
 
 	// Add user to the team
-	_, appErr = p.API.CreateTeamMember(channel.TeamId, userID)
+	_, appErr = b.API.CreateTeamMember(channel.TeamId, userID)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to add user to team")
 	}
 
-	p.API.LogDebug("Added Matrix user to team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
+	b.API.LogDebug("Added Matrix user to team", "user_id", userID, "team_id", channel.TeamId, "channel_id", channelID)
 	return nil
 }
 
 // extractUsernameFromMatrixUserID extracts username from Matrix user ID
-func (p *Plugin) extractUsernameFromMatrixUserID(userID string) string {
+func (b *MatrixToMattermostBridge) extractUsernameFromMatrixUserID(userID string) string {
 	// Matrix user IDs are in format @username:server.com
 	if !strings.HasPrefix(userID, "@") {
 		return ""
@@ -626,7 +638,7 @@ func (p *Plugin) extractUsernameFromMatrixUserID(userID string) string {
 }
 
 // generateMattermostUsername creates a unique Mattermost username
-func (p *Plugin) generateMattermostUsername(baseUsername string) string {
+func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername string) string {
 	// Sanitize username for Mattermost (following Shared Channels convention)
 	sanitized := strings.ToLower(baseUsername)
 	sanitized = regexp.MustCompile(`[^a-z0-9\-_]`).ReplaceAllString(sanitized, "_")
@@ -639,7 +651,7 @@ func (p *Plugin) generateMattermostUsername(baseUsername string) string {
 	originalUsername := username
 
 	for {
-		if _, appErr := p.API.GetUserByUsername(username); appErr != nil {
+		if _, appErr := b.API.GetUserByUsername(username); appErr != nil {
 			// Username doesn't exist, we can use it
 			break
 		}
@@ -660,16 +672,16 @@ func (p *Plugin) generateMattermostUsername(baseUsername string) string {
 }
 
 // getPostIDFromMatrixEvent finds the Mattermost post ID for a Matrix event ID
-func (p *Plugin) getPostIDFromMatrixEvent(matrixEventID, channelID string) string {
+func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, channelID string) string {
 	// Search through posts in the channel to find one with matching Matrix event ID
-	config := p.getConfiguration()
-	serverDomain := extractServerDomain(p.API, config.MatrixServerURL)
+	config := b.getConfiguration()
+	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	// Get recent posts in the channel (Matrix events are usually recent)
-	postList, appErr := p.API.GetPostsForChannel(channelID, 0, 100)
+	postList, appErr := b.API.GetPostsForChannel(channelID, 0, 100)
 	if appErr != nil {
-		p.API.LogWarn("Failed to get posts for channel", "error", appErr, "channel_id", channelID)
+		b.API.LogWarn("Failed to get posts for channel", "error", appErr, "channel_id", channelID)
 		return ""
 	}
 
@@ -688,11 +700,11 @@ func (p *Plugin) getPostIDFromMatrixEvent(matrixEventID, channelID string) strin
 
 // getPostIDFromRelatedMatrixEvent finds a Mattermost post ID by checking if the Matrix event
 // is related to a primary message that has a Mattermost post ID
-func (p *Plugin) getPostIDFromRelatedMatrixEvent(matrixEventID, channelID string) string {
+func (b *MatrixToMattermostBridge) getPostIDFromRelatedMatrixEvent(matrixEventID, channelID string) string {
 	// Get the Matrix room ID for this channel
-	matrixRoomIdentifier, err := p.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
 	if err != nil {
-		p.API.LogWarn("Failed to get Matrix room identifier for related event lookup", "error", err, "channel_id", channelID)
+		b.API.LogWarn("Failed to get Matrix room identifier for related event lookup", "error", err, "channel_id", channelID)
 		return ""
 	}
 
@@ -701,16 +713,16 @@ func (p *Plugin) getPostIDFromRelatedMatrixEvent(matrixEventID, channelID string
 	}
 
 	// Resolve room alias to room ID if needed
-	matrixRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	matrixRoomID, err := b.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
 	if err != nil {
-		p.API.LogWarn("Failed to resolve Matrix room identifier for related event lookup", "error", err, "room_identifier", matrixRoomIdentifier)
+		b.API.LogWarn("Failed to resolve Matrix room identifier for related event lookup", "error", err, "room_identifier", matrixRoomIdentifier)
 		return ""
 	}
 
 	// Get the Matrix event to check if it's related to another event
-	event, err := p.matrixClient.GetEvent(matrixRoomID, matrixEventID)
+	event, err := b.matrixClient.GetEvent(matrixRoomID, matrixEventID)
 	if err != nil {
-		p.API.LogWarn("Failed to get Matrix event for related lookup", "error", err, "event_id", matrixEventID)
+		b.API.LogWarn("Failed to get Matrix event for related lookup", "error", err, "event_id", matrixEventID)
 		return ""
 	}
 
@@ -732,14 +744,14 @@ func (p *Plugin) getPostIDFromRelatedMatrixEvent(matrixEventID, channelID string
 		return ""
 	}
 
-	p.API.LogDebug("Found file message related to primary message", "file_event_id", matrixEventID, "primary_event_id", primaryEventID)
+	b.API.LogDebug("Found file message related to primary message", "file_event_id", matrixEventID, "primary_event_id", primaryEventID)
 
 	// Now look up the Mattermost post ID using the primary event ID
-	return p.getPostIDFromMatrixEvent(primaryEventID, channelID)
+	return b.getPostIDFromMatrixEvent(primaryEventID, channelID)
 }
 
 // convertMatrixToMattermost converts Matrix message format to Mattermost
-func (p *Plugin) convertMatrixToMattermost(content string) string {
+func (b *MatrixToMattermostBridge) convertMatrixToMattermost(content string) string {
 	// Basic conversion - can be enhanced later
 	// Matrix uses different markdown syntax in some cases
 
@@ -750,7 +762,7 @@ func (p *Plugin) convertMatrixToMattermost(content string) string {
 }
 
 // convertMatrixEmojiToMattermost converts Matrix emoji format to Mattermost
-func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
+func (b *MatrixToMattermostBridge) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 	// Matrix reactions can be Unicode emoji or custom emoji
 
 	// If it's already a simple name (like "thumbsup"), validate it exists in Mattermost
@@ -821,7 +833,7 @@ func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 		// If we can't find a match, use a safe fallback
 		// Check if this is a complex emoji sequence that we should just skip
 		if len([]rune(matrixEmoji)) > 3 {
-			p.API.LogWarn("Unknown complex emoji from Matrix", "emoji", matrixEmoji)
+			b.API.LogWarn("Unknown complex emoji from Matrix", "emoji", matrixEmoji)
 			return "question" // Use question mark emoji as fallback
 		}
 
@@ -835,13 +847,13 @@ func (p *Plugin) convertMatrixEmojiToMattermost(matrixEmoji string) string {
 }
 
 // downloadMatrixAvatar downloads an avatar image from a Matrix MXC URI
-func (p *Plugin) downloadMatrixAvatar(avatarURL string) ([]byte, error) {
-	if p.matrixClient == nil {
+func (b *MatrixToMattermostBridge) downloadMatrixAvatar(avatarURL string) ([]byte, error) {
+	if b.matrixClient == nil {
 		return nil, errors.New("Matrix client not configured")
 	}
 
 	// Use the Matrix client's download method with size limit and image content type validation
-	return p.matrixClient.DownloadFile(avatarURL, p.maxProfileImageSize, "image/")
+	return b.matrixClient.DownloadFile(avatarURL, b.maxProfileImageSize, "image/")
 }
 
 // ProfileUpdateContext provides context information for profile updates
@@ -852,8 +864,8 @@ type ProfileUpdateContext struct {
 
 // updateMattermostUserProfile updates an existing Mattermost user's profile from Matrix
 // Can be called either proactively (fetching current profile) or reactively (from Matrix events)
-func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixUserID string, context *ProfileUpdateContext, profileData ...*matrix.UserProfile) {
-	if p.matrixClient == nil {
+func (b *MatrixToMattermostBridge) updateMattermostUserProfile(mattermostUser *model.User, matrixUserID string, context *ProfileUpdateContext, profileData ...*matrix.UserProfile) {
+	if b.matrixClient == nil {
 		return
 	}
 
@@ -866,9 +878,9 @@ func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixU
 		profile = profileData[0]
 	} else {
 		// Fetch current Matrix profile (proactive check)
-		profile, err = p.matrixClient.GetUserProfile(matrixUserID)
+		profile, err = b.matrixClient.GetUserProfile(matrixUserID)
 		if err != nil {
-			p.API.LogWarn("Failed to get Matrix user profile for update", "error", err, "user_id", matrixUserID)
+			b.API.LogWarn("Failed to get Matrix user profile for update", "error", err, "user_id", matrixUserID)
 			return
 		}
 	}
@@ -884,9 +896,9 @@ func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixU
 		// Update nickname (display name)
 		if updatedUser.Nickname != profile.DisplayName {
 			if context.Source == "event" {
-				p.API.LogDebug("Updating user display name from Matrix event", "user_id", mattermostUser.Id, "old_name", mattermostUser.Nickname, "new_name", profile.DisplayName, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+				b.API.LogDebug("Updating user display name from Matrix event", "user_id", mattermostUser.Id, "old_name", mattermostUser.Nickname, "new_name", profile.DisplayName, "matrix_user_id", matrixUserID, "event_id", context.EventID)
 			} else {
-				p.API.LogDebug("Updating display name from proactive check", "user_id", mattermostUser.Id, "old", mattermostUser.Nickname, "new", profile.DisplayName)
+				b.API.LogDebug("Updating display name from proactive check", "user_id", mattermostUser.Id, "old", mattermostUser.Nickname, "new", profile.DisplayName)
 			}
 			updatedUser.Nickname = profile.DisplayName
 			needsUpdate = true
@@ -905,81 +917,81 @@ func (p *Plugin) updateMattermostUserProfile(mattermostUser *model.User, matrixU
 
 	// Update user profile if needed
 	if needsUpdate {
-		if _, appErr := p.API.UpdateUser(&updatedUser); appErr != nil {
+		if _, appErr := b.API.UpdateUser(&updatedUser); appErr != nil {
 			if context.Source == "event" {
-				p.API.LogError("Failed to update Mattermost user profile from Matrix event", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+				b.API.LogError("Failed to update Mattermost user profile from Matrix event", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
 			} else {
-				p.API.LogWarn("Failed to update Mattermost user profile from proactive check", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
+				b.API.LogWarn("Failed to update Mattermost user profile from proactive check", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
 			}
 		} else {
 			if context.Source == "event" {
-				p.API.LogDebug("Successfully updated Mattermost user profile from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName, "event_id", context.EventID)
+				b.API.LogDebug("Successfully updated Mattermost user profile from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName, "event_id", context.EventID)
 			} else {
-				p.API.LogDebug("Updated Mattermost user profile from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName)
+				b.API.LogDebug("Updated Mattermost user profile from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "display_name", profile.DisplayName)
 			}
 		}
 	}
 
 	// Check avatar updates
 	if profile.AvatarURL != "" {
-		p.updateMattermostUserAvatar(mattermostUser, matrixUserID, profile.AvatarURL, context)
+		b.updateMattermostUserAvatar(mattermostUser, matrixUserID, profile.AvatarURL, context)
 	}
 }
 
 // updateMattermostUserAvatar updates a Mattermost user's profile image from Matrix
 // Compares current and new image data to avoid unnecessary updates
-func (p *Plugin) updateMattermostUserAvatar(mattermostUser *model.User, matrixUserID, matrixAvatarURL string, context *ProfileUpdateContext) {
+func (b *MatrixToMattermostBridge) updateMattermostUserAvatar(mattermostUser *model.User, matrixUserID, matrixAvatarURL string, context *ProfileUpdateContext) {
 	// Get current Mattermost profile image
-	currentAvatarData, appErr := p.API.GetProfileImage(mattermostUser.Id)
+	currentAvatarData, appErr := b.API.GetProfileImage(mattermostUser.Id)
 	if appErr != nil {
 		if context.Source == "event" {
-			p.API.LogWarn("Failed to get current Mattermost profile image for comparison", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+			b.API.LogWarn("Failed to get current Mattermost profile image for comparison", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
 		} else {
-			p.API.LogDebug("Failed to get current Mattermost profile image for comparison", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
+			b.API.LogDebug("Failed to get current Mattermost profile image for comparison", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
 		}
 		// Continue with update even if we can't get current image
 		currentAvatarData = nil
 	}
 
 	// Download Matrix avatar image
-	newAvatarData, err := p.downloadMatrixAvatar(matrixAvatarURL)
+	newAvatarData, err := b.downloadMatrixAvatar(matrixAvatarURL)
 	if err != nil {
 		if context.Source == "event" {
-			p.API.LogWarn("Failed to download Matrix avatar for comparison", "error", err, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID)
+			b.API.LogWarn("Failed to download Matrix avatar for comparison", "error", err, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID)
 		} else {
-			p.API.LogDebug("Failed to download Matrix avatar for comparison", "error", err, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL)
+			b.API.LogDebug("Failed to download Matrix avatar for comparison", "error", err, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL)
 		}
 		return
 	}
 
 	// Compare image data to see if update is needed
-	if currentAvatarData != nil && p.compareImageData(currentAvatarData, newAvatarData) {
-		p.API.LogDebug("Matrix avatar unchanged, skipping update", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "source", context.Source)
+	if currentAvatarData != nil && b.compareImageData(currentAvatarData, newAvatarData) {
+		b.API.LogDebug("Matrix avatar unchanged, skipping update", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "source", context.Source)
 		return
 	}
 
 	// Images are different, update the profile image
-	appErr = p.API.SetProfileImage(mattermostUser.Id, newAvatarData)
+	appErr = b.API.SetProfileImage(mattermostUser.Id, newAvatarData)
 	if appErr != nil {
 		if context.Source == "event" {
-			p.API.LogError("Failed to update Mattermost user avatar from Matrix event", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
+			b.API.LogError("Failed to update Mattermost user avatar from Matrix event", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "event_id", context.EventID)
 		} else {
-			p.API.LogWarn("Failed to update Mattermost user avatar from proactive check", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
+			b.API.LogWarn("Failed to update Mattermost user avatar from proactive check", "error", appErr, "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID)
 		}
 		return
 	}
 
 	// Log successful avatar update
 	if context.Source == "event" {
-		p.API.LogDebug("Successfully updated Mattermost user avatar from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID, "size_bytes", len(newAvatarData))
+		b.API.LogDebug("Successfully updated Mattermost user avatar from Matrix event", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "event_id", context.EventID, "size_bytes", len(newAvatarData))
 	} else {
-		p.API.LogDebug("Updated Mattermost user avatar from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "size_bytes", len(newAvatarData))
+		b.API.LogDebug("Updated Mattermost user avatar from proactive check", "user_id", mattermostUser.Id, "matrix_user_id", matrixUserID, "avatar_url", matrixAvatarURL, "size_bytes", len(newAvatarData))
 	}
 }
 
 // compareImageData compares two image byte arrays to determine if they're the same
 // Uses a simple byte comparison for now, could be enhanced with more sophisticated comparison
-func (p *Plugin) compareImageData(currentData, newData []byte) bool {
+func (b *MatrixToMattermostBridge) compareImageData(currentData, newData []byte) bool {
 	// Quick size check first
 	if len(currentData) != len(newData) {
 		return false
@@ -1001,26 +1013,26 @@ func (p *Plugin) compareImageData(currentData, newData []byte) bool {
 }
 
 // syncMatrixMemberEventToMattermost handles Matrix member events (joins, leaves, profile changes)
-func (p *Plugin) syncMatrixMemberEventToMattermost(event MatrixEvent, channelID string) error {
-	p.API.LogDebug("Processing Matrix member event", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
+func (b *MatrixToMattermostBridge) syncMatrixMemberEventToMattermost(event MatrixEvent, channelID string) error {
+	b.API.LogDebug("Processing Matrix member event", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
 	// Skip events from our own ghost users to prevent loops
-	if p.isGhostUser(event.Sender) {
-		p.API.LogDebug("Ignoring member event from ghost user", "sender", event.Sender, "event_id", event.EventID)
+	if b.isGhostUser(event.Sender) {
+		b.API.LogDebug("Ignoring member event from ghost user", "sender", event.Sender, "event_id", event.EventID)
 		return nil
 	}
 
 	// Extract membership state and content
 	membership, ok := event.Content["membership"].(string)
 	if !ok {
-		p.API.LogDebug("Member event missing membership field", "event_id", event.EventID, "sender", event.Sender)
+		b.API.LogDebug("Member event missing membership field", "event_id", event.EventID, "sender", event.Sender)
 		return nil
 	}
 
 	// We only care about profile changes for existing members
 	// Profile changes happen when membership is "join" and there are profile fields
 	if membership != "join" {
-		p.API.LogDebug("Ignoring non-join member event", "event_id", event.EventID, "sender", event.Sender, "membership", membership)
+		b.API.LogDebug("Ignoring non-join member event", "event_id", event.EventID, "sender", event.Sender, "membership", membership)
 		return nil
 	}
 
@@ -1029,30 +1041,30 @@ func (p *Plugin) syncMatrixMemberEventToMattermost(event MatrixEvent, channelID 
 	avatarURL, hasAvatarURL := event.Content["avatar_url"].(string)
 
 	if !hasDisplayName && !hasAvatarURL {
-		p.API.LogDebug("Member event has no profile information", "event_id", event.EventID, "sender", event.Sender)
+		b.API.LogDebug("Member event has no profile information", "event_id", event.EventID, "sender", event.Sender)
 		return nil
 	}
 
-	p.API.LogDebug("Detected Matrix profile change", "event_id", event.EventID, "sender", event.Sender, "display_name", displayName, "avatar_url", avatarURL)
+	b.API.LogDebug("Detected Matrix profile change", "event_id", event.EventID, "sender", event.Sender, "display_name", displayName, "avatar_url", avatarURL)
 
 	// Check if we have a Mattermost user for this Matrix user
 	userMapKey := "matrix_user_" + event.Sender
-	userIDBytes, err := p.kvstore.Get(userMapKey)
+	userIDBytes, err := b.kvstore.Get(userMapKey)
 	if err != nil || len(userIDBytes) == 0 {
-		p.API.LogDebug("No Mattermost user found for Matrix user profile change", "matrix_user_id", event.Sender, "event_id", event.EventID)
+		b.API.LogDebug("No Mattermost user found for Matrix user profile change", "matrix_user_id", event.Sender, "event_id", event.EventID)
 		return nil // User doesn't exist in Mattermost yet, ignore profile change
 	}
 
 	mattermostUserID := string(userIDBytes)
 
 	// Get the existing Mattermost user
-	mattermostUser, appErr := p.API.GetUser(mattermostUserID)
+	mattermostUser, appErr := b.API.GetUser(mattermostUserID)
 	if appErr != nil {
-		p.API.LogWarn("Failed to get Mattermost user for profile update", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", event.Sender)
+		b.API.LogWarn("Failed to get Mattermost user for profile update", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", event.Sender)
 		return nil
 	}
 
-	p.API.LogDebug("Found Mattermost user for profile update", "user_id", mattermostUser.Id, "username", mattermostUser.Username, "matrix_user_id", event.Sender)
+	b.API.LogDebug("Found Mattermost user for profile update", "user_id", mattermostUser.Id, "username", mattermostUser.Username, "matrix_user_id", event.Sender)
 
 	// Create profile data from Matrix event
 	eventProfile := &matrix.UserProfile{
@@ -1066,7 +1078,7 @@ func (p *Plugin) syncMatrixMemberEventToMattermost(event MatrixEvent, channelID 
 		Source:  "event",
 	}
 
-	p.updateMattermostUserProfile(mattermostUser, event.Sender, context, eventProfile)
+	b.updateMattermostUserProfile(mattermostUser, event.Sender, context, eventProfile)
 
 	return nil
 }

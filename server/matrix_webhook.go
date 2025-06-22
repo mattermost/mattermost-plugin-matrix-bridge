@@ -145,13 +145,13 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 	// Route event based on type
 	switch event.Type {
 	case "m.room.message":
-		return p.syncMatrixMessageToMattermost(event, channelID)
+		return p.matrixToMattermostBridge.syncMatrixMessageToMattermost(event, channelID)
 	case "m.reaction":
-		return p.syncMatrixReactionToMattermost(event, channelID)
+		return p.matrixToMattermostBridge.syncMatrixReactionToMattermost(event, channelID)
 	case "m.room.member":
-		return p.syncMatrixMemberEventToMattermost(event, channelID)
+		return p.matrixToMattermostBridge.syncMatrixMemberEventToMattermost(event, channelID)
 	case "m.room.redaction":
-		return p.syncMatrixRedactionToMattermost(event, channelID)
+		return p.matrixToMattermostBridge.syncMatrixRedactionToMattermost(event, channelID)
 	default:
 		p.API.LogDebug("Ignoring unsupported event type", "event_type", event.Type, "event_id", event.EventID, "room_id", event.RoomID)
 		return nil

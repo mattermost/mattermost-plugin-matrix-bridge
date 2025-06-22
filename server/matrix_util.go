@@ -3,18 +3,19 @@ package main
 import (
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"strings"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
-	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 )
 
 // Logger interface for logging operations
 type Logger interface {
+	LogDebug(message string, keyValuePairs ...any)
+	LogInfo(message string, keyValuePairs ...any)
 	LogWarn(message string, keyValuePairs ...any)
+	LogError(message string, keyValuePairs ...any)
 }
 
 // getGhostUser retrieves the Matrix ghost user ID for a Mattermost user if it exists
@@ -25,96 +26,6 @@ func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
 		return string(ghostUserIDBytes), true
 	}
 	return "", false
-}
-
-// createOrGetGhostUser creates a new Matrix ghost user for a Mattermost user, or returns existing one
-func (p *Plugin) createOrGetGhostUser(mattermostUserID string) (string, error) {
-	// First check if ghost user already exists
-	if ghostUserID, exists := p.getGhostUser(mattermostUserID); exists {
-		return ghostUserID, nil
-	}
-
-	// Ghost user doesn't exist, create a new one
-	// Get the Mattermost user to fetch display name and avatar
-	user, appErr := p.API.GetUser(mattermostUserID)
-	if appErr != nil {
-		return "", errors.Wrap(appErr, "failed to get Mattermost user for ghost user creation")
-	}
-
-	// Get display name
-	displayName := user.GetDisplayName(model.ShowFullName)
-
-	// Get user's avatar image data
-	var avatarData []byte
-	var avatarContentType string
-	if imageData, appErr := p.API.GetProfileImage(mattermostUserID); appErr == nil {
-		avatarData = imageData
-		avatarContentType = "image/png" // Mattermost typically returns PNG
-	}
-
-	// Create new ghost user with display name and avatar
-	ghostUser, err := p.matrixClient.CreateGhostUser(mattermostUserID, displayName, avatarData, avatarContentType)
-	if err != nil {
-		// Check if this is a display name error (user was created but display name failed)
-		if ghostUser != nil && ghostUser.UserID != "" {
-			p.API.LogWarn("Ghost user created but display name setting failed", "error", err, "ghost_user_id", ghostUser.UserID, "display_name", displayName)
-			// Continue with caching - user creation was successful
-		} else {
-			return "", errors.Wrap(err, "failed to create ghost user")
-		}
-	}
-
-	// Cache the ghost user ID
-	ghostUserKey := "ghost_user_" + mattermostUserID
-	err = p.kvstore.Set(ghostUserKey, []byte(ghostUser.UserID))
-	if err != nil {
-		p.API.LogWarn("Failed to cache ghost user ID", "error", err, "ghost_user_id", ghostUser.UserID)
-		// Continue anyway, the ghost user was created successfully
-	}
-
-	if displayName != "" {
-		p.API.LogDebug("Created new ghost user with display name", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID, "display_name", displayName)
-	} else {
-		p.API.LogDebug("Created new ghost user", "mattermost_user_id", mattermostUserID, "ghost_user_id", ghostUser.UserID)
-	}
-	return ghostUser.UserID, nil
-}
-
-// ensureGhostUserInRoom ensures that a ghost user is joined to a specific Matrix room
-func (p *Plugin) ensureGhostUserInRoom(ghostUserID, matrixRoomID, mattermostUserID string) error {
-	// Check if we've already confirmed this ghost user is in this room
-	roomMembershipKey := "ghost_room_" + mattermostUserID + "_" + matrixRoomID
-	membershipBytes, err := p.kvstore.Get(roomMembershipKey)
-	if err == nil && len(membershipBytes) > 0 && string(membershipBytes) == "joined" {
-		// Ghost user is already confirmed to be in this room
-		return nil
-	}
-
-	// Attempt to join the ghost user to the room
-	err = p.matrixClient.JoinRoomAsUser(matrixRoomID, ghostUserID)
-	if err != nil {
-		p.API.LogWarn("Failed to join ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_id", matrixRoomID)
-		return errors.Wrap(err, "failed to join ghost user to room")
-	}
-
-	// Cache the successful join
-	err = p.kvstore.Set(roomMembershipKey, []byte("joined"))
-	if err != nil {
-		p.API.LogWarn("Failed to cache ghost user room membership", "error", err, "ghost_user_id", ghostUserID, "room_id", matrixRoomID)
-		// Continue anyway, the join was successful
-	}
-
-	p.API.LogDebug("Ghost user joined room successfully", "ghost_user_id", ghostUserID, "room_id", matrixRoomID)
-	return nil
-}
-
-// getMatrixRoomID retrieves the Matrix room identifier for a given Mattermost channel
-func (p *Plugin) getMatrixRoomID(channelID string) (string, error) {
-	roomID, err := p.kvstore.Get("channel_mapping_" + channelID)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to get room mapping from store")
-	}
-	return string(roomID), nil
 }
 
 // extractServerDomain extracts the hostname from a Matrix server URL
@@ -221,107 +132,6 @@ func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, p
 	return nil
 }
 
-// deleteAllFileReplies finds and deletes all file attachment messages using custom metadata
-func (p *Plugin) deleteAllFileReplies(matrixRoomID, postEventID, ghostUserID string) error {
-	// Look for the file metadata event that contains the file attachment event IDs
-	fileEventIDs, err := p.getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUserID)
-	if err != nil {
-		p.API.LogWarn("Failed to get file event IDs from metadata", "error", err, "post_event_id", postEventID)
-		return nil // Don't fail - the main message will still be deleted
-	}
-
-	if len(fileEventIDs) == 0 {
-		p.API.LogDebug("No file attachments found in metadata for post deletion", "post_event_id", postEventID)
-		return nil
-	}
-
-	p.API.LogDebug("Found file attachments from metadata", "post_event_id", postEventID, "file_count", len(fileEventIDs))
-
-	var deletedCount int
-	var firstError error
-
-	// Delete each file attachment event
-	for _, fileEventID := range fileEventIDs {
-		_, err := p.matrixClient.RedactEventAsGhost(matrixRoomID, fileEventID, ghostUserID)
-		if err != nil {
-			p.API.LogWarn("Failed to delete file attachment", "error", err, "file_event_id", fileEventID, "post_event_id", postEventID)
-			if firstError == nil {
-				firstError = err
-			}
-		} else {
-			deletedCount++
-			p.API.LogDebug("Deleted file attachment", "file_event_id", fileEventID, "post_event_id", postEventID)
-		}
-	}
-
-	if deletedCount > 0 {
-		p.API.LogDebug("Deleted file attachments using metadata", "count", deletedCount, "post_event_id", postEventID)
-	}
-
-	return firstError
-}
-
-// getFileEventIDsFromMetadata retrieves file attachment event IDs from custom metadata
-func (p *Plugin) getFileEventIDsFromMetadata(matrixRoomID, postEventID, ghostUserID string) ([]string, error) {
-	// Get relations to find the metadata event
-	relations, err := p.matrixClient.GetEventRelationsAsUser(matrixRoomID, postEventID, ghostUserID)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to get event relations from Matrix")
-	}
-
-	p.API.LogDebug("Searching for file metadata", "post_event_id", postEventID, "relations_count", len(relations))
-
-	// Look for our custom metadata event
-	for _, event := range relations {
-		p.API.LogDebug("Processing relation for metadata search", "event_type", event["type"], "sender", event["sender"])
-		eventType, ok := event["type"].(string)
-		if !ok || eventType != "m.mattermost.file_metadata" {
-			continue
-		}
-
-		// Check if this event is from our ghost user
-		sender, ok := event["sender"].(string)
-		if !ok || sender != ghostUserID {
-			continue
-		}
-
-		// Get the content
-		content, ok := event["content"].(map[string]any)
-		if !ok {
-			continue
-		}
-
-		// Check if this metadata is for our message
-		relatedMessage, ok := content["relates_to_message"].(string)
-		if !ok || relatedMessage != postEventID {
-			continue
-		}
-
-		// Extract file attachment event IDs
-		fileAttachmentsRaw, ok := content["file_attachments"]
-		if !ok {
-			continue
-		}
-
-		fileAttachments, ok := fileAttachmentsRaw.([]any)
-		if !ok {
-			continue
-		}
-
-		var fileEventIDs []string
-		for _, attachment := range fileAttachments {
-			if eventID, ok := attachment.(string); ok {
-				fileEventIDs = append(fileEventIDs, eventID)
-			}
-		}
-
-		p.API.LogDebug("Found file metadata", "post_event_id", postEventID, "file_event_ids", fileEventIDs)
-		return fileEventIDs, nil
-	}
-
-	return nil, errors.New("no file metadata found")
-}
-
 // parseDisplayName attempts to parse a display name into first and last name components
 func parseDisplayName(displayName string) (firstName, lastName string) {
 	if displayName == "" {
@@ -348,35 +158,6 @@ func parseDisplayName(displayName string) (firstName, lastName string) {
 		// Multiple parts - use first as first name, join rest as last name
 		return parts[0], strings.Join(parts[1:], " ")
 	}
-}
-
-// extractMatrixMessageContent extracts content from Matrix event, preferring formatted_body over body
-func (p *Plugin) extractMatrixMessageContent(event MatrixEvent) string {
-	// Check if there's HTML formatted content
-	if format, hasFormat := event.Content["format"].(string); hasFormat && format == "org.matrix.custom.html" {
-		if formattedBody, hasFormatted := event.Content["formatted_body"].(string); hasFormatted && formattedBody != "" {
-			// Convert HTML to Markdown with mention processing
-			return p.convertHTMLToMarkdownWithMentions(formattedBody, event)
-		}
-	}
-
-	// Fall back to plain text body
-	if body, hasBody := event.Content["body"].(string); hasBody {
-		return body
-	}
-
-	return ""
-}
-
-// extractMattermostMetadata extracts Mattermost metadata from Matrix event content
-func (p *Plugin) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {
-	if mattermostPostID, exists := event.Content["mattermost_post_id"].(string); exists {
-		postID = mattermostPostID
-	}
-	if mattermostRemoteID, exists := event.Content["mattermost_remote_id"].(string); exists {
-		remoteID = mattermostRemoteID
-	}
-	return postID, remoteID
 }
 
 // convertHTMLToMarkdown converts Matrix HTML content to Mattermost-compatible markdown
@@ -562,84 +343,4 @@ func cleanupMarkdown(markdown string) string {
 	cleaned = strings.TrimSpace(cleaned)
 
 	return cleaned
-}
-
-// downloadMatrixFile downloads a file from Matrix using the MXC URI
-func (p *Plugin) downloadMatrixFile(mxcURL string) ([]byte, error) {
-	if p.matrixClient == nil {
-		return nil, errors.New("Matrix client not configured")
-	}
-
-	// Delegate to the Matrix client's download method with plugin's max file size
-	return p.matrixClient.DownloadFile(mxcURL, p.maxFileSize, "")
-}
-
-// detectMimeType attempts to detect the MIME type of a file based on filename and content
-func (p *Plugin) detectMimeType(filename string, fileData []byte) string {
-	// Common MIME type mappings based on file extension
-	extension := strings.ToLower(filepath.Ext(filename))
-
-	switch extension {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	case ".svg":
-		return "image/svg+xml"
-	case ".mp4":
-		return "video/mp4"
-	case ".webm":
-		return "video/webm"
-	case ".avi":
-		return "video/x-msvideo"
-	case ".mov":
-		return "video/quicktime"
-	case ".mp3":
-		return "audio/mpeg"
-	case ".wav":
-		return "audio/wav"
-	case ".ogg":
-		return "audio/ogg"
-	case ".pdf":
-		return "application/pdf"
-	case ".txt":
-		return "text/plain"
-	case ".html":
-		return "text/html"
-	case ".json":
-		return "application/json"
-	case ".xml":
-		return "application/xml"
-	case ".zip":
-		return "application/zip"
-	default:
-		// Try to detect based on file content
-		if len(fileData) > 0 {
-			// Check for common image file signatures
-			if len(fileData) >= 4 {
-				// PNG signature
-				if fileData[0] == 0x89 && fileData[1] == 0x50 && fileData[2] == 0x4E && fileData[3] == 0x47 {
-					return "image/png"
-				}
-				// JPEG signature
-				if fileData[0] == 0xFF && fileData[1] == 0xD8 {
-					return "image/jpeg"
-				}
-				// GIF signature
-				if fileData[0] == 0x47 && fileData[1] == 0x49 && fileData[2] == 0x46 {
-					return "image/gif"
-				}
-				// WebP signature
-				if len(fileData) >= 12 && fileData[0] == 0x52 && fileData[1] == 0x49 && fileData[2] == 0x46 && fileData[3] == 0x46 &&
-					fileData[8] == 0x57 && fileData[9] == 0x45 && fileData[10] == 0x42 && fileData[11] == 0x50 {
-					return "image/webp"
-				}
-			}
-		}
-		return "application/octet-stream"
-	}
 }

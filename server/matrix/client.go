@@ -19,11 +19,12 @@ import (
 
 // Client represents a Matrix HTTP client for communicating with Matrix servers.
 type Client struct {
-	serverURL  string
-	asToken    string // Application Service token for all operations
-	remoteID   string // Plugin remote ID for metadata
-	httpClient *http.Client
-	api        plugin.API
+	serverURL    string
+	asToken      string // Application Service token for all operations
+	remoteID     string // Plugin remote ID for metadata
+	httpClient   *http.Client
+	api          plugin.API
+	serverDomain string // explicit server domain for testing
 }
 
 // MessageContent represents the content structure for Matrix messages.
@@ -52,6 +53,7 @@ type MessageRequest struct {
 	PostID         string           `json:"post_id"`           // Optional: Mattermost post ID metadata
 	Files          []FileAttachment `json:"files"`             // Optional: File attachments
 	ReplyToEventID string           `json:"reply_to_event_id"` // Optional: Event ID to reply to (for files)
+	Mentions       map[string]any   `json:"mentions"`          // Optional: Matrix mentions data (m.mentions field)
 }
 
 // SendEventResponse represents the response from Matrix when sending events.
@@ -70,6 +72,11 @@ func NewClient(serverURL, asToken, remoteID string, api plugin.API) *Client {
 		},
 		api: api,
 	}
+}
+
+// SetServerDomain sets an explicit server domain (used for testing)
+func (c *Client) SetServerDomain(domain string) {
+	c.serverDomain = domain
 }
 
 // SendReactionAsGhost sends a reaction to a message as a ghost user
@@ -473,6 +480,11 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 
 // extractServerDomain extracts the hostname from the Matrix server URL
 func (c *Client) extractServerDomain() (string, error) {
+	// Use explicit server domain if set (for testing)
+	if c.serverDomain != "" {
+		return c.serverDomain, nil
+	}
+
 	if c.serverURL == "" {
 		return "", errors.New("server URL not configured")
 	}
@@ -965,6 +977,11 @@ func (c *Client) sendTextMessage(req MessageRequest, rootEventID string) (*SendE
 		content["formatted_body"] = req.HTMLMessage
 	}
 
+	// Add mentions if provided
+	if req.Mentions != nil {
+		content["m.mentions"] = req.Mentions
+	}
+
 	// Add threading if provided (takes priority over post grouping)
 	if req.ThreadEventID != "" {
 		content["m.relates_to"] = map[string]any{
@@ -1275,7 +1292,6 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	// If we get here, all attempts failed
 	return nil, errors.Wrapf(lastErr, "failed to download file from any endpoint for MXC URI: %s", mxcURI)
 }
-
 
 // PublishRoomToDirectory explicitly publishes a room to the public directory
 func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
