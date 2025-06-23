@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
@@ -191,7 +190,6 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 	// Extract content from message structure
 	finalPlainText := messageContent["body"].(string)
 	finalHTMLContent, _ := messageContent["formatted_body"].(string)
-	mentions, _ := messageContent["m.mentions"].(map[string]any)
 
 	// Send message using consolidated method
 	messageRequest := matrix.MessageRequest{
@@ -202,7 +200,6 @@ func (p *Plugin) createPostInMatrix(post *model.Post, matrixRoomID string, user 
 		ThreadEventID: threadEventID,
 		PostID:        post.Id,
 		Files:         fileAttachments,
-		Mentions:      mentions,
 	}
 
 	sendResponse, err := p.matrixClient.SendMessage(messageRequest)
@@ -620,9 +617,8 @@ func (p *Plugin) extractMattermostMentions(post *model.Post) *MattermostMentionR
 	results := &MattermostMentionResults{}
 
 	// Extract @username mentions (similar to Mattermost's regex)
-	// Match @word where word contains letters, numbers, dots, hyphens, underscores, and colons
-	// Include colon to support bridged usernames like "matrix:username"
-	userMentionRegex := regexp.MustCompile(`@([a-zA-Z0-9\.\-_:]+)`)
+	// Match @word where word contains letters, numbers, dots, hyphens, underscores
+	userMentionRegex := regexp.MustCompile(`@([a-zA-Z0-9\.\-_]+)`)
 	matches := userMentionRegex.FindAllStringSubmatch(text, -1)
 
 	for _, match := range matches {
@@ -637,17 +633,14 @@ func (p *Plugin) extractMattermostMentions(post *model.Post) *MattermostMentionR
 		}
 	}
 
-	p.API.LogDebug("Extracted mentions from Mattermost post", "post_id", post.Id, "message", text, "user_mentions", results.UserMentions, "channel_mentions", results.ChannelMentions)
+	p.API.LogDebug("Extracted mentions from Mattermost post", "post_id", post.Id, "user_mentions", results.UserMentions, "channel_mentions", results.ChannelMentions)
 	return results
 }
 
 // addMatrixMentionsWithData converts Mattermost mentions to Matrix format using pre-extracted mention data
 func (p *Plugin) addMatrixMentionsWithData(content map[string]any, post *model.Post, mentions *MattermostMentionResults) {
-	p.API.LogDebug("Processing mentions for Matrix", "post_id", post.Id, "user_mentions_count", len(mentions.UserMentions), "user_mentions", mentions.UserMentions)
-
 	// Only process if we have user mentions (ignore channel mentions for now)
 	if len(mentions.UserMentions) == 0 {
-		p.API.LogDebug("No user mentions found, skipping mention processing", "post_id", post.Id)
 		return
 	}
 
@@ -655,7 +648,6 @@ func (p *Plugin) addMatrixMentionsWithData(content map[string]any, post *model.P
 	var mentionReplacements []struct {
 		username    string
 		ghostUserID string
-		displayName string
 	}
 
 	// First pass: collect all mention data
@@ -667,44 +659,22 @@ func (p *Plugin) addMatrixMentionsWithData(content map[string]any, post *model.P
 			continue
 		}
 
-		var matrixUserID string
-		var displayName string
-
-		// Check if this user has a Matrix ghost user (Mattermost user → Matrix ghost)
+		// Check if this user has a Matrix ghost user
 		if ghostUserID, exists := p.getGhostUser(user.Id); exists {
-			matrixUserID = ghostUserID
-			displayName = user.GetDisplayName(model.ShowFullName)
-			if displayName == "" {
-				displayName = user.Username // Fallback to username
-			}
-			p.API.LogDebug("Found Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
-		} else {
-			// Check if this is a Matrix user represented in Mattermost (Matrix user → Mattermost user)
-			originalMatrixUserID := p.getOriginalMatrixUserID(user.Id)
-			if originalMatrixUserID != "" {
-				matrixUserID = originalMatrixUserID
-				displayName = user.GetDisplayName(model.ShowFullName)
-				if displayName == "" {
-					displayName = user.Username // Fallback to username
-				}
-				p.API.LogDebug("Found original Matrix user for bridged user mention", "username", username, "original_matrix_user_id", originalMatrixUserID, "display_name", displayName)
-			} else {
-				p.API.LogDebug("No Matrix representation found for mention", "username", username, "user_id", user.Id)
-				continue
-			}
-		}
+			matrixUserIDs = append(matrixUserIDs, ghostUserID)
+			mentionReplacements = append(mentionReplacements, struct {
+				username    string
+				ghostUserID string
+			}{username, ghostUserID})
 
-		matrixUserIDs = append(matrixUserIDs, matrixUserID)
-		mentionReplacements = append(mentionReplacements, struct {
-			username    string
-			ghostUserID string
-			displayName string
-		}{username, matrixUserID, displayName})
+			p.API.LogDebug("Converted Mattermost mention to Matrix", "username", username, "ghost_user_id", ghostUserID)
+		} else {
+			p.API.LogDebug("No Matrix ghost user found for mention", "username", username, "user_id", user.Id)
+		}
 	}
 
 	// Only proceed if we have Matrix users to mention
 	if len(matrixUserIDs) == 0 {
-		p.API.LogDebug("No Matrix ghost users found for any mentions, skipping mention processing", "post_id", post.Id, "attempted_usernames", mentions.UserMentions)
 		return
 	}
 
@@ -721,55 +691,22 @@ func (p *Plugin) addMatrixMentionsWithData(content map[string]any, post *model.P
 
 	// Second pass: replace mentions in HTML content
 	for _, replacement := range mentionReplacements {
-		// Replace @username with proper Matrix mention pill format
+		// Replace @username with Matrix mention link in HTML
 		// Use more robust replacement that handles HTML escaping
 		usernamePattern := fmt.Sprintf(`@%s\b`, regexp.QuoteMeta(replacement.username))
 		usernameRegex := regexp.MustCompile(usernamePattern)
-
-		// Create Matrix mention pill format to match native Matrix mentions
-		matrixMentionPill := fmt.Sprintf(`<a href="https://matrix.to/#/%s">%s</a>`,
-			replacement.ghostUserID, replacement.displayName)
-		updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionPill)
+		matrixMentionLink := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`, replacement.ghostUserID, replacement.username)
+		updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionLink)
 	}
 
 	// Add Matrix mentions structure
-	mentionsField := map[string]any{
+	content["m.mentions"] = map[string]any{
 		"user_ids": matrixUserIDs,
 	}
-	content["m.mentions"] = mentionsField
 	content["formatted_body"] = updatedHTML
 	content["format"] = "org.matrix.custom.html"
 
-	p.API.LogDebug("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs, "m_mentions", mentionsField)
-}
-
-// getOriginalMatrixUserID looks up the original Matrix user ID for a Mattermost user created from Matrix
-func (p *Plugin) getOriginalMatrixUserID(mattermostUserID string) string {
-	// Search through all matrix_user_* mappings to find one that points to this Mattermost user
-	keys, err := p.kvstore.ListKeys(0, 1000)
-	if err != nil {
-		p.API.LogWarn("Failed to list kvstore keys for Matrix user lookup", "error", err, "mattermost_user_id", mattermostUserID)
-		return ""
-	}
-
-	matrixUserPrefix := "matrix_user_"
-	for _, key := range keys {
-		if strings.HasPrefix(key, matrixUserPrefix) {
-			userIDBytes, err := p.kvstore.Get(key)
-			if err != nil {
-				continue
-			}
-
-			if string(userIDBytes) == mattermostUserID {
-				// Found the mapping - extract Matrix user ID from the key
-				matrixUserID := strings.TrimPrefix(key, matrixUserPrefix)
-				p.API.LogDebug("Found original Matrix user ID", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID)
-				return matrixUserID
-			}
-		}
-	}
-
-	return ""
+	p.API.LogDebug("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs)
 }
 
 // isMatrixContentIdentical compares current Matrix event content with new content to detect if update is needed
