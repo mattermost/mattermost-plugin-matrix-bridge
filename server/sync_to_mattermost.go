@@ -49,6 +49,9 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 		return nil // Skip processing - this originated from our bridge
 	}
 
+	// Extract message content (prefer formatted_body if available)
+	content := p.extractMatrixMessageContent(event)
+
 	// Check if this is a message edit (has m.relates_to with rel_type: m.replace)
 	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
 		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.replace" {
