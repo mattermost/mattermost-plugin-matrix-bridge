@@ -928,11 +928,15 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 			name:        "valid ghost user ID",
 			ghostUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-wiggin77.ngrok.io",
 			expected:    "yeqo3irkujdstfmbnkx46bbhuw",
+			setup: func(_ *mocks.MockAPI) {
+			},
 		},
 		{
 			name:        "another valid ghost user ID",
 			ghostUserID: "@_mattermost_user123:matrix.example.com",
 			expected:    "user123",
+			setup: func(_ *mocks.MockAPI) {
+			},
 		},
 		{
 			name:        "not a ghost user - regular Matrix user",
@@ -970,6 +974,8 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 			name:        "ghost user with complex server domain",
 			ghostUserID: "@_mattermost_abc123:matrix.subdomain.example.com:8448",
 			expected:    "abc123",
+			setup: func(_ *mocks.MockAPI) {
+			},
 		},
 	}
 
