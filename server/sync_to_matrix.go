@@ -890,7 +890,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 			if displayName == "" {
 				displayName = user.Username // Fallback to username
 			}
-			b.API.LogDebug("Found Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
+			b.API.LogDebug("Found existing Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
 		} else {
 			// Check if this is a Matrix user represented in Mattermost (Matrix user → Mattermost user)
 			originalMatrixUserID := b.getOriginalMatrixUserID(user.Id)
@@ -902,8 +902,19 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 				}
 				b.API.LogDebug("Found original Matrix user for bridged user mention", "username", username, "original_matrix_user_id", originalMatrixUserID, "display_name", displayName)
 			} else {
-				b.API.LogDebug("No Matrix representation found for mention", "username", username, "user_id", user.Id)
-				continue
+				// No existing ghost user or original Matrix user found - create new ghost user for mention
+				b.API.LogDebug("Creating new ghost user for mentioned user", "username", username, "user_id", user.Id)
+				ghostUserID, err := b.CreateOrGetGhostUser(user.Id)
+				if err != nil {
+					b.API.LogWarn("Failed to create ghost user for mentioned user", "username", username, "user_id", user.Id, "error", err)
+					continue
+				}
+				matrixUserID = ghostUserID
+				displayName = user.GetDisplayName(model.ShowFullName)
+				if displayName == "" {
+					displayName = user.Username // Fallback to username
+				}
+				b.API.LogDebug("Created new Matrix ghost user for mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
 			}
 		}
 
@@ -939,8 +950,8 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 		usernamePattern := fmt.Sprintf(`@%s\b`, regexp.QuoteMeta(replacement.username))
 		usernameRegex := regexp.MustCompile(usernamePattern)
 
-		// Create Matrix mention pill format to match native Matrix mentions
-		matrixMentionPill := fmt.Sprintf(`<a href="https://matrix.to/#/%s">%s</a>`,
+		// Create Matrix mention pill format to match native Matrix mentions  
+		matrixMentionPill := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`,
 			replacement.ghostUserID, replacement.displayName)
 		updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionPill)
 	}
