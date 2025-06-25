@@ -35,18 +35,22 @@ func NewAPILogger(api plugin.API) Logger {
 	return &APILogger{api: api}
 }
 
+// LogDebug logs a debug message using the plugin API
 func (l *APILogger) LogDebug(message string, keyValuePairs ...any) {
 	l.api.LogDebug(message, keyValuePairs...)
 }
 
+// LogInfo logs an info message using the plugin API
 func (l *APILogger) LogInfo(message string, keyValuePairs ...any) {
 	l.api.LogInfo(message, keyValuePairs...)
 }
 
+// LogWarn logs a warning message using the plugin API
 func (l *APILogger) LogWarn(message string, keyValuePairs ...any) {
 	l.api.LogWarn(message, keyValuePairs...)
 }
 
+// LogError logs an error message using the plugin API
 func (l *APILogger) LogError(message string, keyValuePairs ...any) {
 	l.api.LogError(message, keyValuePairs...)
 }

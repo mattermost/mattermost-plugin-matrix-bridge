@@ -408,7 +408,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 		name     string
 		event    MatrixEvent
 		expected []string
-		setup    func(*mocks.MockAPI)
 	}{
 		{
 			name: "no mentions field",
@@ -417,9 +416,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 				Content: map[string]any{},
 			},
 			expected: nil,
-			setup: func(_ *mocks.MockAPI) {
-				// No expectations needed
-			},
 		},
 		{
 			name: "empty mentions",
@@ -430,9 +426,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 				},
 			},
 			expected: nil,
-			setup: func(_ *mocks.MockAPI) {
-				// No expectations needed
-			},
 		},
 		{
 			name: "single mention",
@@ -445,8 +438,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 				},
 			},
 			expected: []string{"@alice:example.com"},
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name: "multiple mentions",
@@ -459,8 +450,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 				},
 			},
 			expected: []string{"@alice:example.com", "@bob:example.com"},
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name: "invalid mentions format",
@@ -471,8 +460,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 				},
 			},
 			expected: nil,
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 	}
 
@@ -482,9 +469,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			mockAPI := mocks.NewMockAPI(ctrl)
-
-			// Set up test-specific expectations
-			tt.setup(mockAPI)
 
 			plugin := setupPluginForTestWithLogger(t, mockAPI)
 
@@ -519,8 +503,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			matrixUserID:       "@alice:example.com",
 			mattermostUsername: "alice",
 			expected:           "Hello @alice!",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name:               "mention with display name",
@@ -528,8 +510,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			matrixUserID:       "@bob:server.org",
 			mattermostUsername: "bobsmith",
 			expected:           "Hey @bobsmith, how are you?",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name:               "multiple mentions of same user",
@@ -537,8 +517,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			matrixUserID:       "@alice:example.com",
 			mattermostUsername: "alice",
 			expected:           "@alice and @alice",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name:               "no mention links",
@@ -546,8 +524,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			matrixUserID:       "@alice:example.com",
 			mattermostUsername: "alice",
 			expected:           "Just plain text",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name:               "mention with different formatting",
@@ -555,8 +531,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			matrixUserID:       "@user:example.com",
 			mattermostUsername: "username",
 			expected:           "@username",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 	}
 
@@ -566,9 +540,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			mockAPI := mocks.NewMockAPI(ctrl)
-
-			// Set up test-specific expectations
-			tt.setup(mockAPI)
 
 			plugin := setupPluginForTestWithLogger(t, mockAPI)
 
@@ -592,7 +563,7 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 			name:         "user not found in kvstore",
 			matrixUserID: "@alice:example.com",
 			expected:     "",
-			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
+			setup: func(_ *mocks.MockAPI, mockKV *mocks.MockKVStore) {
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return(nil, &model.AppError{Message: "Not found"})
 			},
 		},
@@ -716,7 +687,6 @@ func TestProcessMatrixMentions(t *testing.T) {
 			},
 			expected: "@alice_mm and @bob_mm",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-
 				// Setup for Alice
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
 				aliceUser := &model.User{
@@ -746,7 +716,7 @@ func TestProcessMatrixMentions(t *testing.T) {
 				},
 			},
 			expected: `Hello <a href="https://matrix.to/#/@unknown:example.com">Unknown</a>!`,
-			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
+			setup: func(_ *mocks.MockAPI, mockKV *mocks.MockKVStore) {
 				mockKV.EXPECT().Get("matrix_user_@unknown:example.com").Return(nil, &model.AppError{Message: "Not found"})
 			},
 		},
@@ -887,7 +857,7 @@ func TestConvertHTMLToMarkdownWithMentions(t *testing.T) {
 				},
 			},
 			expected: "Hello [Unknown User](https://matrix.to/#/@unknown:example.com)",
-			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
+			setup: func(_ *mocks.MockAPI, mockKV *mocks.MockKVStore) {
 				mockKV.EXPECT().Get("matrix_user_@unknown:example.com").Return(nil, &model.AppError{Message: "Not found"})
 			},
 		},
@@ -904,7 +874,6 @@ func TestConvertHTMLToMarkdownWithMentions(t *testing.T) {
 			},
 			expected: "- @alice\\_mm - **Team Lead**\n- @bob\\_mm - *Developer*",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-
 				// Setup for Alice
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
 				aliceUser := &model.User{
@@ -959,15 +928,11 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 			name:        "valid ghost user ID",
 			ghostUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-wiggin77.ngrok.io",
 			expected:    "yeqo3irkujdstfmbnkx46bbhuw",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name:        "another valid ghost user ID",
 			ghostUserID: "@_mattermost_user123:matrix.example.com",
 			expected:    "user123",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 		{
 			name:        "not a ghost user - regular Matrix user",
@@ -1005,8 +970,6 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 			name:        "ghost user with complex server domain",
 			ghostUserID: "@_mattermost_abc123:matrix.subdomain.example.com:8448",
 			expected:    "abc123",
-			setup: func(mockAPI *mocks.MockAPI) {
-			},
 		},
 	}
 

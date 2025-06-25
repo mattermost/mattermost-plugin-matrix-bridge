@@ -97,14 +97,14 @@ func createMatrixClientWithTestLogger(t *testing.T, serverURL, asToken, remoteID
 func TestMatrixClientTestLogger(t *testing.T) {
 	// Create a matrix client with test logger
 	client := createMatrixClientWithTestLogger(t, "https://test.example.com", "test_token", "test_remote")
-	
+
 	// This would trigger logging if the matrix client were to log something
 	// Since we can't easily test actual HTTP calls without a server, this test mainly
 	// verifies that the client is created correctly with a test logger
 	if client == nil {
 		t.Error("Matrix client should not be nil")
 	}
-	
+
 	// Log success - this confirms the test logger interface is working
 	t.Log("Matrix client created successfully with test logger")
 }

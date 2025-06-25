@@ -312,7 +312,6 @@ func (suite *ThreadMappingIntegrationTestSuite) TestFileAttachmentThreadMapping(
 	t.Logf("✓ Fix ensures Matrix replies to file attachments maintain thread context")
 }
 
-
 // Run the test suite
 func TestThreadMappingIntegration(t *testing.T) {
 	suite.Run(t, new(ThreadMappingIntegrationTestSuite))
