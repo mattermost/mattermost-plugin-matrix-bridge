@@ -46,7 +46,7 @@ func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 
 		// Check if sync is enabled
 		if !config.EnableSync {
-			p.API.LogDebug("Matrix webhook received but sync is disabled")
+			p.logger.LogDebug("Matrix webhook received but sync is disabled")
 			http.Error(w, "Sync disabled", http.StatusServiceUnavailable)
 			return
 		}
@@ -56,13 +56,13 @@ func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 		expectedToken := "Bearer " + config.MatrixHSToken
 
 		if config.MatrixHSToken == "" {
-			p.API.LogWarn("Matrix webhook received but hs_token not configured")
+			p.logger.LogWarn("Matrix webhook received but hs_token not configured")
 			http.Error(w, "Matrix not configured", http.StatusServiceUnavailable)
 			return
 		}
 
 		if authHeader != expectedToken {
-			p.API.LogWarn("Matrix webhook authentication failed", "expected_prefix", "Bearer ...", "received", authHeader)
+			p.logger.LogWarn("Matrix webhook authentication failed", "expected_prefix", "Bearer ...", "received", authHeader)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -74,7 +74,7 @@ func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 // HelloWorld handles GET requests to /hello endpoint.
 func (p *Plugin) HelloWorld(w http.ResponseWriter, _ *http.Request) {
 	if _, err := w.Write([]byte("Hello, world!")); err != nil {
-		p.API.LogError("Failed to write response", "error", err)
+		p.logger.LogError("Failed to write response", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

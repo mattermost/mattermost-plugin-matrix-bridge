@@ -16,6 +16,13 @@ import (
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
+const (
+	// DefaultMaxProfileImageSize is the default maximum size for profile images (6MB)
+	DefaultMaxProfileImageSize = 6 * 1024 * 1024
+	// DefaultMaxFileSize is the default maximum size for file attachments (50MB)
+	DefaultMaxFileSize = 50 * 1024 * 1024
+)
+
 // Plugin implements the interface expected by the Mattermost server to communicate between the server and plugin processes.
 type Plugin struct {
 	plugin.MattermostPlugin
@@ -52,6 +59,19 @@ type Plugin struct {
 
 	// Logr instance specifically for logging Matrix transactions.
 	transactionLogger logr.Logger
+
+	// logger is the main logger for the plugin
+	logger Logger
+
+	// maxProfileImageSize is the maximum size for profile images in bytes
+	maxProfileImageSize int64
+
+	// maxFileSize is the maximum size for file attachments in bytes
+	maxFileSize int64
+
+	// Bridge components for dependency injection architecture
+	mattermostToMatrixBridge *MattermostToMatrixBridge
+	matrixToMattermostBridge *MatrixToMattermostBridge
 }
 
 // OnActivate is invoked when the plugin is activated. If an error is returned, the plugin will be deactivated.
@@ -64,17 +84,27 @@ func (p *Plugin) OnActivate() error {
 
 	p.client = pluginapi.NewClient(p.API, p.Driver)
 
+	// Initialize the logger
+	p.logger = NewPluginAPILogger(p.API)
+
 	p.kvstore = kvstore.NewKVStore(p.client)
 
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	p.pendingFiles = NewPendingFileTracker()
 
+	// Initialize file size limits with default values
+	p.maxProfileImageSize = DefaultMaxProfileImageSize
+	p.maxFileSize = DefaultMaxFileSize
+
 	p.initMatrixClient()
+
+	// Initialize bridge components
+	p.initBridges()
 
 	p.commandClient = command.NewCommandHandler(p)
 
 	if err := p.registerForSharedChannels(); err != nil {
-		p.API.LogWarn("Failed to register for shared channels", "error", err)
+		p.logger.LogWarn("Failed to register for shared channels", "error", err)
 	}
 
 	job, err := cluster.Schedule(
@@ -96,7 +126,7 @@ func (p *Plugin) OnActivate() error {
 func (p *Plugin) OnDeactivate() error {
 	if p.backgroundJob != nil {
 		if err := p.backgroundJob.Close(); err != nil {
-			p.API.LogError("Failed to close background job", "err", err)
+			p.logger.LogError("Failed to close background job", "err", err)
 		}
 	}
 	return nil
@@ -114,6 +144,24 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
 	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken, p.remoteID, p.API)
+}
+
+func (p *Plugin) initBridges() {
+	// Create shared utilities
+	sharedUtils := NewBridgeUtils(BridgeUtilsConfig{
+		Logger:              p.logger,
+		API:                 p.API,
+		KVStore:             p.kvstore,
+		MatrixClient:        p.matrixClient,
+		RemoteID:            p.remoteID,
+		MaxProfileImageSize: p.maxProfileImageSize,
+		MaxFileSize:         p.maxFileSize,
+		ConfigGetter:        p,
+	})
+
+	// Create bridge instances
+	p.mattermostToMatrixBridge = NewMattermostToMatrixBridge(sharedUtils, p.pendingFiles, p.postTracker)
+	p.matrixToMattermostBridge = NewMatrixToMattermostBridge(sharedUtils)
 }
 
 func (p *Plugin) registerForSharedChannels() error {
@@ -150,7 +198,7 @@ func (p *Plugin) registerForSharedChannels() error {
 	// Store the remote ID for use in sync operations
 	p.remoteID = remoteID
 
-	p.API.LogInfo("Successfully registered plugin for shared channels", "remote_id", remoteID)
+	p.logger.LogInfo("Successfully registered plugin for shared channels", "remote_id", remoteID)
 	return nil
 }
 
@@ -173,7 +221,7 @@ func (p *Plugin) GetConfiguration() command.Configuration {
 
 // CreateOrGetGhostUser gets an existing ghost user or creates a new one for a Mattermost user
 func (p *Plugin) CreateOrGetGhostUser(mattermostUserID string) (string, error) {
-	return p.createOrGetGhostUser(mattermostUserID)
+	return p.mattermostToMatrixBridge.CreateOrGetGhostUser(mattermostUserID)
 }
 
 // GetPluginAPI returns the Mattermost plugin API

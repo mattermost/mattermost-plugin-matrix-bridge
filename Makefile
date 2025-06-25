@@ -387,6 +387,9 @@ clean:
 ifneq ($(HAS_SERVER),)
 	rm -fr server/coverage.txt
 	rm -fr server/dist
+	rm -f server/server
+	rm -f server/server.test
+	rm -f server/*.test
 endif
 ifneq ($(HAS_WEBAPP),)
 	rm -fr webapp/junit.xml

@@ -4,6 +4,11 @@ webapp/src/manifest.ts
 server/manifest.go
 tools/emoji_generator
 
+# Test binaries
+server/server
+server/server.test
+*.test
+
 # Mac
 .DS_Store
 
