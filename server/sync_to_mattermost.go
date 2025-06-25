@@ -668,8 +668,12 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 	sanitized := strings.ToLower(baseUsername)
 	sanitized = regexp.MustCompile(`[^a-z0-9\-_]`).ReplaceAllString(sanitized, "_")
 
-	// Follow Shared Channels convention: remote_name:username_sanitized
-	username := "matrix:" + sanitized
+	// Get the configured username prefix for this server
+	config := b.getConfiguration()
+	prefix := config.GetMatrixUsernamePrefixForServer(config.MatrixServerURL)
+
+	// Follow Shared Channels convention: prefix:username_sanitized
+	username := prefix + ":" + sanitized
 
 	// Ensure uniqueness by checking if username exists
 	counter := 1
@@ -688,7 +692,7 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 		// Prevent infinite loop
 		if counter > 1000 {
 			// Fallback to using counter
-			username = fmt.Sprintf("matrix:user_%d", counter)
+			username = fmt.Sprintf("%s:user_%d", prefix, counter)
 			break
 		}
 	}

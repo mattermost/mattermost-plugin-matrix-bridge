@@ -66,9 +66,10 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 
 	// Set up configuration
 	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
+		MatrixServerURL:      suite.matrixContainer.ServerURL,
+		MatrixASToken:        suite.matrixContainer.ASToken,
+		MatrixHSToken:        suite.matrixContainer.HSToken,
+		MatrixUsernamePrefix: "testmatrix", // Use different prefix to prove configurability
 	}
 	suite.plugin.configuration = config
 
@@ -149,7 +150,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestGhostUserCreationAndDe
 	// This represents a Matrix user that gets synced to Mattermost
 	matrixOriginatedUser := &model.User{
 		Id:       model.NewId(),
-		Username: "matrix:bob_from_matrix",
+		Username: "testmatrix:bob_from_matrix",
 		Email:    "bob@matrix.example.com",
 		RemoteId: &[]string{suite.plugin.remoteID}[0], // Set by Matrix->Mattermost sync
 	}
@@ -221,7 +222,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 	// In the real bridge, Matrix users that get synced to Mattermost would have RemoteId set
 	simulatedMattermostUser := &model.User{
 		Id:       model.NewId(),
-		Username: "matrix:" + extractUsernameFromMatrixID(ghostUserID),
+		Username: "testmatrix:" + extractUsernameFromMatrixID(ghostUserID),
 		Email:    extractUsernameFromMatrixID(ghostUserID) + "@matrix.bridge.local",
 		RemoteId: &[]string{suite.plugin.remoteID}[0], // This would be set by Matrix->Mattermost sync
 	}
@@ -251,6 +252,45 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 	assert.True(t, shouldProcessNormalUser, "Normal local users should be processed")
 
 	t.Logf("✓ Normal user %s would be PROCESSED normally", normalLocalUser.Username)
+}
+
+// TestConfigurableUsernamePrefix tests that the username prefix configuration is working
+func (suite *UserRemoteDetectionIntegrationTestSuite) TestConfigurableUsernamePrefix() {
+	t := suite.T()
+
+	// Create a local Mattermost user
+	localUserID := model.NewId()
+	localUser := &model.User{
+		Id:       localUserID,
+		Username: "prefix_test_user",
+		Email:    "prefixtest@example.com",
+		RemoteId: nil,
+	}
+
+	// Mock user retrieval
+	api := suite.plugin.API.(*plugintest.API)
+	api.On("GetUser", localUserID).Return(localUser, nil)
+	api.On("GetProfileImage", localUserID).Return([]byte("fake-image-data"), nil)
+
+	// Mock GetUserByUsername to simulate that the username doesn't exist (for uniqueness check)
+	api.On("GetUserByUsername", "testmatrix:alice").Return(nil, &model.AppError{Message: "User not found"})
+
+	// Test username generation uses the configured prefix
+	baseUsername := "alice"
+	generatedUsername := suite.plugin.matrixToMattermostBridge.generateMattermostUsername(baseUsername)
+
+	// Should use "testmatrix:" prefix from test configuration
+	expectedUsername := "testmatrix:alice"
+	assert.Equal(t, expectedUsername, generatedUsername, "Generated username should use configured prefix")
+
+	t.Logf("✓ Username generation uses configured prefix: %s", generatedUsername)
+
+	// Test that the configuration getter returns the correct prefix
+	config := suite.plugin.getConfiguration()
+	actualPrefix := config.GetMatrixUsernamePrefix()
+	assert.Equal(t, "testmatrix", actualPrefix, "Configuration should return the set prefix")
+
+	t.Logf("✓ Configuration returns correct prefix: %s", actualPrefix)
 }
 
 // TestBridgeMetadataConsistency tests that bridge metadata is consistent across operations
@@ -316,6 +356,31 @@ func TestUserRemoteDetectionIntegration(t *testing.T) {
 	suite.Run(t, new(UserRemoteDetectionIntegrationTestSuite))
 }
 
+// TestDefaultUsernamePrefix tests that the default prefix is used when none is configured
+func TestDefaultUsernamePrefix(t *testing.T) {
+	// Test the configuration getter with empty prefix
+	config := &configuration{
+		MatrixUsernamePrefix: "", // Empty should use default
+	}
+
+	prefix := config.GetMatrixUsernamePrefix()
+	assert.Equal(t, DefaultMatrixUsernamePrefix, prefix, "Empty prefix should return default")
+
+	// Test with explicit prefix
+	config.MatrixUsernamePrefix = "customprefix"
+	prefix = config.GetMatrixUsernamePrefix()
+	assert.Equal(t, "customprefix", prefix, "Should return configured prefix")
+
+	t.Logf("✓ Default prefix: %s", DefaultMatrixUsernamePrefix)
+	t.Logf("✓ Custom prefix: %s", prefix)
+
+	// Test server-specific prefix method (for future extensibility)
+	serverPrefix := config.GetMatrixUsernamePrefixForServer("https://matrix.example.com")
+	assert.Equal(t, "customprefix", serverPrefix, "Server-specific prefix should return same as global for now")
+
+	t.Logf("✓ Server-specific prefix: %s", serverPrefix)
+}
+
 // TestBasicRemoteDetectionLogic tests the basic logic without requiring Matrix server
 // This is kept as a lightweight unit test for the core logic
 func TestBasicRemoteDetectionLogic(t *testing.T) {
@@ -339,7 +404,7 @@ func TestBasicRemoteDetectionLogic(t *testing.T) {
 			name: "matrix_bridge_user",
 			user: &model.User{
 				Id:       "remote123",
-				Username: "matrix:bob",
+				Username: "testmatrix:bob",
 				RemoteId: &[]string{"matrix_bridge_id"}[0],
 			},
 			isRemote: true,

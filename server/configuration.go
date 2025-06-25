@@ -6,6 +6,9 @@ import (
 	"github.com/pkg/errors"
 )
 
+// DefaultMatrixUsernamePrefix is the default username prefix for Matrix-originated users
+const DefaultMatrixUsernamePrefix = "matrix"
+
 // configuration captures the plugin's external configuration as exposed in the Mattermost server
 // configuration, as well as values computed from the configuration. Any public fields will be
 // deserialized from the Mattermost server configuration in OnConfigurationChange.
@@ -18,10 +21,11 @@ import (
 // If you add non-reference types to your configuration struct, be sure to rewrite Clone as a deep
 // copy appropriate for your types.
 type configuration struct {
-	MatrixServerURL string `json:"matrix_server_url"`
-	MatrixASToken   string `json:"matrix_as_token"`
-	MatrixHSToken   string `json:"matrix_hs_token"`
-	EnableSync      bool   `json:"enable_sync"`
+	MatrixServerURL      string `json:"matrix_server_url"`
+	MatrixASToken        string `json:"matrix_as_token"`
+	MatrixHSToken        string `json:"matrix_hs_token"`
+	EnableSync           bool   `json:"enable_sync"`
+	MatrixUsernamePrefix string `json:"matrix_username_prefix"`
 }
 
 // Clone shallow copies the configuration. Your implementation may require a deep copy if
@@ -112,4 +116,20 @@ func (p *Plugin) validateConfiguration(config *configuration) error {
 // GetMatrixServerURL implements the Configuration interface for command package
 func (c *configuration) GetMatrixServerURL() string {
 	return c.MatrixServerURL
+}
+
+// GetMatrixUsernamePrefix returns the username prefix to use for Matrix-originated users
+func (c *configuration) GetMatrixUsernamePrefix() string {
+	if c.MatrixUsernamePrefix == "" {
+		return DefaultMatrixUsernamePrefix
+	}
+	return c.MatrixUsernamePrefix
+}
+
+// GetMatrixUsernamePrefixForServer returns the username prefix for a specific Matrix server
+// This allows for future extensibility to support different prefixes per server
+func (c *configuration) GetMatrixUsernamePrefixForServer(_ string) string {
+	// For now, return the global prefix
+	// In the future, this could check a map of server-specific prefixes
+	return c.GetMatrixUsernamePrefix()
 }
