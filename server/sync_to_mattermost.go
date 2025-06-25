@@ -199,18 +199,6 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 		return nil
 	}
 
-	// Extract file info if available
-	var fileSize int64
-	var mimeType string
-	if info, hasInfo := event.Content["info"].(map[string]any); hasInfo {
-		if size, hasSize := info["size"].(float64); hasSize {
-			fileSize = int64(size)
-		}
-		if mime, hasMime := info["mimetype"].(string); hasMime {
-			mimeType = mime
-		}
-	}
-
 	// Get or create Mattermost user for the Matrix sender
 	mattermostUserID, err := b.getOrCreateMattermostUser(event.Sender, channelID)
 	if err != nil {
@@ -221,19 +209,6 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 	fileData, err := b.downloadMatrixFile(url)
 	if err != nil {
 		return errors.Wrap(err, "failed to download Matrix file")
-	}
-
-	// Create file info for Mattermost
-	fileInfo := &model.FileInfo{
-		Name:     body,
-		Size:     fileSize,
-		MimeType: mimeType,
-		Content:  string(fileData),
-	}
-
-	// If no mime type was provided, try to detect it
-	if fileInfo.MimeType == "" {
-		fileInfo.MimeType = b.detectMimeType(body)
 	}
 
 	// Upload file to Mattermost
