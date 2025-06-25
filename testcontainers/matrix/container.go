@@ -36,8 +36,8 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContaine
 
 	// Create container with Synapse using host networking to bypass VPN issues
 	req := testcontainers.ContainerRequest{
-		Image:        "matrixdotorg/synapse:latest",
-		NetworkMode:  "host", // Use host networking to bypass VPN conflicts
+		Image:       "matrixdotorg/synapse:latest",
+		NetworkMode: "host", // Use host networking to bypass VPN conflicts
 		Env: map[string]string{
 			"SYNAPSE_SERVER_NAME":  config.ServerName,
 			"SYNAPSE_REPORT_STATS": "no",
@@ -67,7 +67,7 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContaine
 			"sh", "-c",
 			"python -m synapse.app.homeserver --config-path=/data/homeserver.yaml --generate-keys && python -m synapse.app.homeserver --config-path=/data/homeserver.yaml",
 		},
-		WaitingFor: wait.ForLog("SynapseSite starting on 18008").WithStartupTimeout(60*time.Second),
+		WaitingFor: wait.ForLog("SynapseSite starting on 18008").WithStartupTimeout(60 * time.Second),
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
