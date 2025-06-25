@@ -19,6 +19,11 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 
 	// Process user sync events first (display name changes, etc.)
 	for _, user := range msg.Users {
+		// Skip syncing users that originated from Matrix to prevent loops
+		if user.IsRemote() {
+			continue
+		}
+
 		if err := p.mattermostToMatrixBridge.SyncUserToMatrix(user); err != nil {
 			p.API.LogError("Failed to sync user to Matrix", "error", err, "user_id", user.Id, "username", user.Username)
 			continue

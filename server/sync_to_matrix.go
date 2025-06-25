@@ -332,6 +332,12 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 
 // createPostInMatrix creates a new post in Matrix and stores the event ID
 func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRoomID string, user *model.User, propertyKey string) error {
+	// Skip creating ghost users for Matrix-originated users to prevent loops
+	if user.IsRemote() {
+		b.API.LogDebug("Skipping ghost user creation for remote user", "user_id", user.Id, "username", user.Username)
+		return nil
+	}
+
 	// Create or get ghost user
 	ghostUserID, err := b.CreateOrGetGhostUser(user.Id)
 	if err != nil {
@@ -456,6 +462,12 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 
 // updatePostInMatrix updates an existing post in Matrix
 func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRoomID string, eventID string, user *model.User) error {
+	// Skip updating posts for Matrix-originated users to prevent loops
+	if user.IsRemote() {
+		b.API.LogDebug("Skipping post update for remote user", "user_id", user.Id, "username", user.Username)
+		return nil
+	}
+
 	// Create or get ghost user
 	ghostUserID, err := b.CreateOrGetGhostUser(user.Id)
 	if err != nil {
@@ -682,6 +694,12 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 	user, appErr := b.API.GetUser(reaction.UserId)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to get user for reaction")
+	}
+
+	// Skip creating reactions for Matrix-originated users to prevent loops
+	if user.IsRemote() {
+		b.API.LogDebug("Skipping reaction sync for remote user", "user_id", user.Id, "username", user.Username)
+		return nil
 	}
 
 	// Create or get ghost user
