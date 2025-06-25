@@ -90,11 +90,20 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 		if inReplyTo, hasInReplyTo := relatesTo["m.in_reply_to"].(map[string]any); hasInReplyTo {
 			if parentEventID, hasEventID := inReplyTo["event_id"].(string); hasEventID {
 				// Find the Mattermost post ID for this Matrix event
-				if mattermostPostID := b.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
-					rootID = mattermostPostID
-					b.API.LogDebug("Found Matrix reply, setting root ID", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "mattermost_root_id", rootID)
+				var mattermostPostID string
+				if mattermostPostID = b.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+					// Found direct mapping, now get the actual thread root
+					rootID = b.getThreadRootFromPostID(mattermostPostID)
+					b.API.LogDebug("Found Matrix reply to primary message", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "parent_post_id", mattermostPostID, "thread_root_id", rootID)
 				} else {
-					b.API.LogDebug("Matrix reply parent not found in Mattermost", "matrix_event_id", event.EventID, "parent_event_id", parentEventID)
+					// Try to find if parent is a file attachment related to a primary message
+					if mattermostPostID = b.getPostIDFromRelatedMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+						// Found the primary message through file relation, now get the actual thread root
+						rootID = b.getThreadRootFromPostID(mattermostPostID)
+						b.API.LogDebug("Found Matrix reply to file attachment, mapped to primary message", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "primary_post_id", mattermostPostID, "thread_root_id", rootID)
+					} else {
+						b.API.LogDebug("Matrix reply parent not found in Mattermost", "matrix_event_id", event.EventID, "parent_event_id", parentEventID)
+					}
 				}
 			}
 		}
@@ -103,9 +112,18 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 			if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.thread" {
 				if parentEventID, exists := relatesTo["event_id"].(string); exists {
 					// Find the Mattermost post ID for this Matrix event
-					if mattermostPostID := b.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
-						rootID = mattermostPostID
-						b.API.LogDebug("Found Matrix thread, setting root ID", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "mattermost_root_id", rootID)
+					var mattermostPostID string
+					if mattermostPostID = b.getPostIDFromMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+						// Found direct mapping, now get the actual thread root
+						rootID = b.getThreadRootFromPostID(mattermostPostID)
+						b.API.LogDebug("Found Matrix thread to primary message", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "parent_post_id", mattermostPostID, "thread_root_id", rootID)
+					} else {
+						// Try to find if parent is a file attachment related to a primary message
+						if mattermostPostID = b.getPostIDFromRelatedMatrixEvent(parentEventID, channelID); mattermostPostID != "" {
+							// Found the primary message through file relation, now get the actual thread root
+							rootID = b.getThreadRootFromPostID(mattermostPostID)
+							b.API.LogDebug("Found Matrix thread to file attachment, mapped to primary message", "matrix_event_id", event.EventID, "parent_event_id", parentEventID, "primary_post_id", mattermostPostID, "thread_root_id", rootID)
+						}
 					}
 				}
 			}
@@ -755,6 +773,31 @@ func (b *MatrixToMattermostBridge) getPostIDFromRelatedMatrixEvent(matrixEventID
 
 	// Now look up the Mattermost post ID using the primary event ID
 	return b.getPostIDFromMatrixEvent(primaryEventID, channelID)
+}
+
+// getThreadRootFromPostID finds the actual thread root ID for a given Mattermost post ID.
+// If the post is already a thread root, returns the same ID. If it's a thread reply, returns the RootId.
+func (b *MatrixToMattermostBridge) getThreadRootFromPostID(postID string) string {
+	if postID == "" {
+		return ""
+	}
+
+	// Get the post to check if it's part of a thread
+	post, appErr := b.API.GetPost(postID)
+	if appErr != nil {
+		b.logger.LogWarn("Failed to get post for thread root lookup", "error", appErr, "post_id", postID)
+		return postID // Return original ID as fallback
+	}
+
+	// If this post has a RootId, return that (it's a thread reply)
+	if post.RootId != "" {
+		b.logger.LogDebug("Post is thread reply, returning root ID", "post_id", postID, "root_id", post.RootId)
+		return post.RootId
+	}
+
+	// Otherwise, this post is either standalone or the thread root itself
+	b.logger.LogDebug("Post is thread root or standalone", "post_id", postID)
+	return postID
 }
 
 // convertMatrixToMattermost converts Matrix message format to Mattermost

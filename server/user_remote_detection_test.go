@@ -142,7 +142,7 @@ func TestLoopPreventionLogic(t *testing.T) {
 // issue described in the bug report
 func TestRegressionPrevention(t *testing.T) {
 	t.Run("prevent_matrix_user_ghost_creation_loop", func(t *testing.T) {
-		// This represents the scenario from the bug report:
+		// This represents the scenario from a bug report:
 		// 1. Matrix user Nathan sends a message
 		// 2. Matrix->Mattermost sync creates a Mattermost user for Nathan
 		// 3. SharedChannels sync should NOT try to sync this user back to Matrix
