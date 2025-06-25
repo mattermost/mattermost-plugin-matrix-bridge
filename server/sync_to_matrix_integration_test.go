@@ -78,6 +78,9 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	}
 	suite.plugin.configuration = config
 
+	// Initialize the logger (required before initBridges)
+	suite.plugin.logger = &testLogger{t: suite.T()}
+
 	// Initialize bridges for testing
 	suite.plugin.initBridges()
 
