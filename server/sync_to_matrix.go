@@ -835,7 +835,8 @@ func (b *MattermostToMatrixBridge) extractMattermostMentions(post *model.Post) *
 	// Extract @username mentions (similar to Mattermost's regex)
 	// Match @word where word contains letters, numbers, dots, hyphens, underscores, and colons
 	// Include colon to support bridged usernames like "matrix:username"
-	userMentionRegex := regexp.MustCompile(`@([a-zA-Z0-9\.\-_:]+)`)
+	// Use word boundary \b to avoid matching @username in email@username.com
+	userMentionRegex := regexp.MustCompile(`\B@([a-zA-Z0-9\.\-_:]+)\b`)
 	matches := userMentionRegex.FindAllStringSubmatch(text, -1)
 
 	for _, match := range matches {
@@ -946,13 +947,14 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 	// Second pass: replace mentions in HTML content
 	for _, replacement := range mentionReplacements {
 		// Replace @username with proper Matrix mention pill format
-		// Use string replacement for better performance than regex
-		oldMention := "@" + replacement.username
+		// Use regex with word boundaries to avoid matching substrings (e.g., @alice in email@alice.com)
+		usernamePattern := fmt.Sprintf(`\B@%s\b`, regexp.QuoteMeta(replacement.username))
+		usernameRegex := regexp.MustCompile(usernamePattern)
 
 		// Create Matrix mention pill format to match native Matrix mentions
 		matrixMentionPill := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`,
 			replacement.ghostUserID, replacement.displayName)
-		updatedHTML = strings.ReplaceAll(updatedHTML, oldMention, matrixMentionPill)
+		updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionPill)
 	}
 
 	// Add Matrix mentions structure

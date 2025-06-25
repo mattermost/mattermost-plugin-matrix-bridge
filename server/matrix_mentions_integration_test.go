@@ -228,6 +228,63 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			expectedMentions: 1, // Mentions are processed even in code blocks for now
 			shouldHaveHTML:   true,
 		},
+		{
+			name:    "mention_substring_in_email",
+			message: "Contact alice@example.com about @alice meeting",
+			setupMocks: func(api *plugintest.API) {
+				userID := model.NewId()
+				user := &model.User{Id: userID, Username: "alice"}
+				api.On("GetUserByUsername", "alice").Return(user, nil)
+				api.On("GetProfileImage", userID).Return([]byte("fake-image-data"), nil)
+				// Should NOT match alice in alice@example.com
+				api.On("GetUserByUsername", "example.com").Return(nil, &model.AppError{})
+			},
+			expectedMentions: 1, // Only @alice should be matched, not alice in email
+			shouldHaveHTML:   true,
+		},
+		{
+			name:    "mention_substring_in_username",
+			message: "Tell @bobby that @bob is here",
+			setupMocks: func(api *plugintest.API) {
+				bobbyID := model.NewId()
+				bobbyUser := &model.User{Id: bobbyID, Username: "bobby"}
+				api.On("GetUserByUsername", "bobby").Return(bobbyUser, nil)
+				api.On("GetProfileImage", bobbyID).Return([]byte("fake-image-data"), nil)
+
+				bobID := model.NewId()
+				bobUser := &model.User{Id: bobID, Username: "bob"}
+				api.On("GetUserByUsername", "bob").Return(bobUser, nil)
+				api.On("GetProfileImage", bobID).Return([]byte("fake-image-data"), nil)
+			},
+			expectedMentions: 2, // Both @bobby and @bob should be matched correctly
+			shouldHaveHTML:   true,
+		},
+		{
+			name:    "email_corruption_test",
+			message: "Send to alice@company.com and mention @alice too",
+			setupMocks: func(api *plugintest.API) {
+				userID := model.NewId()
+				user := &model.User{Id: userID, Username: "alice"}
+				api.On("GetUserByUsername", "alice").Return(user, nil)
+				api.On("GetProfileImage", userID).Return([]byte("fake-image-data"), nil)
+				// With proper word boundaries, company.com should not be extracted at all
+			},
+			expectedMentions: 1, // Only @alice should be matched
+			shouldHaveHTML:   true,
+		},
+		{
+			name:    "user_with_existing_name_edge_case",
+			message: "User company@example.com exists but @company should still work",
+			setupMocks: func(api *plugintest.API) {
+				// This tests the case where 'company' is both part of an email AND a real username
+				companyUserID := model.NewId()
+				companyUser := &model.User{Id: companyUserID, Username: "company"}
+				api.On("GetUserByUsername", "company").Return(companyUser, nil)
+				api.On("GetProfileImage", companyUserID).Return([]byte("fake-image-data"), nil)
+			},
+			expectedMentions: 1, // Only @company should be matched, not company from email
+			shouldHaveHTML:   true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -286,6 +343,38 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			if tc.shouldHaveHTML {
 				_, hasHTML := content["formatted_body"]
 				assert.True(t, hasHTML, "Should have HTML formatted body")
+			}
+
+			// Special validation for email corruption test
+			if tc.name == "email_corruption_test" {
+				formattedBody, hasFormatted := content["formatted_body"].(string)
+				require.True(t, hasFormatted, "Should have formatted_body for email corruption test")
+
+				// Debug: Print the actual formatted body
+				t.Logf("Email corruption test - formatted_body: %s", formattedBody)
+
+				// The email should NOT be corrupted by mention replacement
+				assert.Contains(t, formattedBody, "alice@company.com", "Email should remain intact")
+				// But @alice should be properly converted to a mention
+				assert.Contains(t, formattedBody, `<a href="https://matrix.to/#/`, "Should have proper mention link")
+				// Ensure we don't have mangled email like "alice<a href...>@company.com</a>"
+				assert.NotContains(t, formattedBody, "alice<a href", "Email should not be corrupted by mention replacement")
+			}
+
+			// Special validation for edge case with real user matching email domain
+			if tc.name == "user_with_existing_name_edge_case" {
+				formattedBody, hasFormatted := content["formatted_body"].(string)
+				require.True(t, hasFormatted, "Should have formatted_body for edge case test")
+
+				// Debug: Print the actual formatted body
+				t.Logf("Edge case test - formatted_body: %s", formattedBody)
+
+				// The email should remain intact
+				assert.Contains(t, formattedBody, "company@example.com", "Email should remain intact")
+				// @company should be properly converted to a mention
+				assert.Contains(t, formattedBody, `<a href="https://matrix.to/#/`, "Should have proper mention link")
+				// Ensure email is not corrupted (email should not contain mention links)
+				assert.NotContains(t, formattedBody, "company<a href", "Email should not be corrupted by mention replacement")
 			}
 		})
 	}
