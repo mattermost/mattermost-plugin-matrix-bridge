@@ -83,7 +83,7 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	suite.plugin.initBridges()
 
 	// Set up test data in KV store
-	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID, suite.testUserID)
+	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
 	suite.validator = matrixtest.NewMatrixEventValidation(
@@ -98,7 +98,7 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 
 // setupMockAPI configures common mock API expectations
 func (suite *MatrixSyncTestSuite) setupMockAPI(api *plugintest.API) {
-	setupBasicMocks(api, suite.testChannelID, suite.testRoomID, suite.testUserID)
+	setupBasicMocks(api, suite.testUserID)
 }
 
 // TestBasicMessageSync tests syncing a basic text message to Matrix
@@ -303,7 +303,7 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 	originalPost.Props = map[string]any{
 		"matrix_event_id_localhost": originalEventID,
 	}
-	
+
 	// Wait a bit to ensure different timestamp
 	time.Sleep(100 * time.Millisecond)
 
@@ -313,7 +313,7 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 		UserId:    suite.testUserID,
 		ChannelId: suite.testChannelID,
 		Message:   "Edited message content",
-		CreateAt:  originalPost.CreateAt, // Keep original create time
+		CreateAt:  originalPost.CreateAt,  // Keep original create time
 		UpdateAt:  time.Now().UnixMilli(), // New update time (must be different from tracked time)
 		Props:     originalPost.Props,     // Include Matrix event ID
 	}

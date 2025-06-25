@@ -89,15 +89,15 @@ func TestMatrixMentionProcessing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create fresh room for each test case to ensure isolation (like sync tests)
 			freshRoomID := matrixContainer.CreateRoom(t, "Fresh Mention Room "+tc.name)
-			
+
 			// Update KV store mapping for this fresh room
 			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))
-			
+
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
 
 			// Reset common mocks with fresh room
-			setupBasicMocks(setup.API, setup.ChannelID, freshRoomID, setup.UserID)
+			setupBasicMocks(setup.API, setup.UserID)
 
 			// Set up fresh mention mocks for this test case
 			setupMentionMocks(setup.API, user1ID, "alice")
@@ -234,15 +234,15 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create fresh room for each test case to ensure isolation (like sync tests)
 			freshRoomID := matrixContainer.CreateRoom(t, "Fresh Edge Case Room "+tc.name)
-			
+
 			// Update KV store mapping for this fresh room
 			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))
-			
+
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
 
 			// Reset common mocks with fresh room
-			setupBasicMocks(setup.API, setup.ChannelID, freshRoomID, setup.UserID)
+			setupBasicMocks(setup.API, setup.UserID)
 
 			// Set up test-specific mocks
 			tc.setupMocks(setup.API)

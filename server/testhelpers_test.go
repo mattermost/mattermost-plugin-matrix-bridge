@@ -75,10 +75,10 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.MatrixContainer) 
 	plugin.configuration = config
 
 	// Set up basic mocks
-	setupBasicMocks(api, testChannelID, testRoomID, testUserID)
-	
+	setupBasicMocks(api, testUserID)
+
 	// Set up test data in KV store
-	setupTestKVData(plugin.kvstore, testChannelID, testRoomID, testUserID)
+	setupTestKVData(plugin.kvstore, testChannelID, testRoomID)
 
 	// Initialize bridges for testing
 	plugin.initBridges()
@@ -94,7 +94,7 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.MatrixContainer) 
 }
 
 // setupBasicMocks sets up common API mocks for integration tests
-func setupBasicMocks(api *plugintest.API, testChannelID, testRoomID, testUserID string) {
+func setupBasicMocks(api *plugintest.API, testUserID string) {
 	// Basic user mock
 	testUser := &model.User{
 		Id:       testUserID,
@@ -111,9 +111,9 @@ func setupBasicMocks(api *plugintest.API, testChannelID, testRoomID, testUserID 
 	// Post update mock - return the updated post with current timestamp
 	api.On("UpdatePost", mock.AnythingOfType("*model.Post")).Return(func(post *model.Post) *model.Post {
 		// Simulate what Mattermost does - update the UpdateAt timestamp
-		updatedPost := *post // Copy the post
+		updatedPost := post.Clone() // Copy the post
 		updatedPost.UpdateAt = time.Now().UnixMilli()
-		return &updatedPost
+		return updatedPost
 	}, nil)
 
 	// Logging mocks - handle variable argument types
@@ -123,10 +123,10 @@ func setupBasicMocks(api *plugintest.API, testChannelID, testRoomID, testUserID 
 }
 
 // setupTestKVData sets up initial test data in the KV store
-func setupTestKVData(kvstore kvstore.KVStore, testChannelID, testRoomID, testUserID string) {
+func setupTestKVData(kvstore kvstore.KVStore, testChannelID, testRoomID string) {
 	// Set up channel mapping
 	_ = kvstore.Set("channel_mapping_"+testChannelID, []byte(testRoomID))
-	
+
 	// Ghost users and ghost rooms are intentionally not set up here
 	// to trigger creation during tests, which validates the creation logic
 }
