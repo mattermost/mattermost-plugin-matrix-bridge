@@ -946,14 +946,13 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 	// Second pass: replace mentions in HTML content
 	for _, replacement := range mentionReplacements {
 		// Replace @username with proper Matrix mention pill format
-		// Use more robust replacement that handles HTML escaping
-		usernamePattern := fmt.Sprintf(`@%s\b`, regexp.QuoteMeta(replacement.username))
-		usernameRegex := regexp.MustCompile(usernamePattern)
+		// Use string replacement for better performance than regex
+		oldMention := "@" + replacement.username
 
 		// Create Matrix mention pill format to match native Matrix mentions
 		matrixMentionPill := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`,
 			replacement.ghostUserID, replacement.displayName)
-		updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionPill)
+		updatedHTML = strings.ReplaceAll(updatedHTML, oldMention, matrixMentionPill)
 	}
 
 	// Add Matrix mentions structure
