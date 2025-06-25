@@ -10,14 +10,6 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Logger interface for logging operations
-type Logger interface {
-	LogDebug(message string, keyValuePairs ...any)
-	LogInfo(message string, keyValuePairs ...any)
-	LogWarn(message string, keyValuePairs ...any)
-	LogError(message string, keyValuePairs ...any)
-}
-
 // getGhostUser retrieves the Matrix ghost user ID for a Mattermost user if it exists
 func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
 	ghostUserKey := "ghost_user_" + mattermostUserID
@@ -118,7 +110,7 @@ func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, p
 	}
 
 	if fileEventID == "" {
-		p.API.LogWarn("No matching file message found to delete", "filename", filename, "post_event_id", postEventID)
+		p.logger.LogWarn("No matching file message found to delete", "filename", filename, "post_event_id", postEventID)
 		return nil
 	}
 
@@ -128,7 +120,7 @@ func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, p
 		return errors.Wrap(err, "failed to redact file message in Matrix")
 	}
 
-	p.API.LogDebug("Successfully deleted file message from Matrix", "filename", filename, "file_event_id", fileEventID, "post_event_id", postEventID)
+	p.logger.LogDebug("Successfully deleted file message from Matrix", "filename", filename, "file_event_id", fileEventID, "post_event_id", postEventID)
 	return nil
 }
 
@@ -212,7 +204,7 @@ func (p *Plugin) extractMentionedUsers(event MatrixEvent) []string {
 
 	mentions, ok := mentionsField.(map[string]any)
 	if !ok {
-		p.API.LogDebug("m.mentions field is not a map", "event_id", event.EventID)
+		p.logger.LogDebug("m.mentions field is not a map", "event_id", event.EventID)
 		return nil
 	}
 
@@ -224,7 +216,7 @@ func (p *Plugin) extractMentionedUsers(event MatrixEvent) []string {
 
 	userIDsArray, ok := userIDsField.([]any)
 	if !ok {
-		p.API.LogDebug("user_ids field is not an array", "event_id", event.EventID)
+		p.logger.LogDebug("user_ids field is not an array", "event_id", event.EventID)
 		return nil
 	}
 
@@ -236,7 +228,7 @@ func (p *Plugin) extractMentionedUsers(event MatrixEvent) []string {
 		}
 	}
 
-	p.API.LogDebug("Extracted mentioned users from Matrix event", "event_id", event.EventID, "user_ids", userIDs)
+	p.logger.LogDebug("Extracted mentioned users from Matrix event", "event_id", event.EventID, "user_ids", userIDs)
 	return userIDs
 }
 
@@ -246,14 +238,14 @@ func (p *Plugin) getMattermostUsernameFromMatrix(matrixUserID string) string {
 
 	// Check if this is a ghost user (Mattermost user represented in Matrix)
 	if ghostMattermostUserID := p.extractMattermostUserIDFromGhost(matrixUserID); ghostMattermostUserID != "" {
-		p.API.LogDebug("Found ghost user for mention", "matrix_user_id", matrixUserID, "mattermost_user_id", ghostMattermostUserID)
+		p.logger.LogDebug("Found ghost user for mention", "matrix_user_id", matrixUserID, "mattermost_user_id", ghostMattermostUserID)
 		mattermostUserID = ghostMattermostUserID
 	} else {
 		// Check if we have a mapping for this regular Matrix user
 		userMapKey := "matrix_user_" + matrixUserID
 		userIDBytes, err := p.kvstore.Get(userMapKey)
 		if err != nil || len(userIDBytes) == 0 {
-			p.API.LogDebug("No Mattermost user found for Matrix mention", "matrix_user_id", matrixUserID)
+			p.logger.LogDebug("No Mattermost user found for Matrix mention", "matrix_user_id", matrixUserID)
 			return ""
 		}
 		mattermostUserID = string(userIDBytes)
@@ -262,11 +254,11 @@ func (p *Plugin) getMattermostUsernameFromMatrix(matrixUserID string) string {
 	// Get the Mattermost user to retrieve username
 	user, appErr := p.API.GetUser(mattermostUserID)
 	if appErr != nil {
-		p.API.LogWarn("Failed to get Mattermost user for mention", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", matrixUserID)
+		p.logger.LogWarn("Failed to get Mattermost user for mention", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", matrixUserID)
 		return ""
 	}
 
-	p.API.LogDebug("Found Mattermost username for Matrix mention", "matrix_user_id", matrixUserID, "mattermost_username", user.Username)
+	p.logger.LogDebug("Found Mattermost username for Matrix mention", "matrix_user_id", matrixUserID, "mattermost_username", user.Username)
 	return user.Username
 }
 
@@ -296,7 +288,7 @@ func (p *Plugin) extractMattermostUserIDFromGhost(ghostUserID string) string {
 		return ""
 	}
 
-	p.API.LogDebug("Extracted Mattermost user ID from ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
+	p.logger.LogDebug("Extracted Mattermost user ID from ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
 	return mattermostUserID
 }
 
@@ -313,7 +305,7 @@ func (p *Plugin) replaceMatrixMentionHTML(htmlContent, matrixUserID, mattermostU
 
 	regex, err := regexp.Compile(pattern)
 	if err != nil {
-		p.API.LogWarn("Failed to compile mention regex", "error", err, "pattern", pattern)
+		p.logger.LogWarn("Failed to compile mention regex", "error", err, "pattern", pattern)
 		return htmlContent
 	}
 
@@ -321,7 +313,7 @@ func (p *Plugin) replaceMatrixMentionHTML(htmlContent, matrixUserID, mattermostU
 	replacement := "@" + mattermostUsername
 	result := regex.ReplaceAllString(htmlContent, replacement)
 
-	p.API.LogDebug("Replaced Matrix mention HTML", "matrix_user_id", matrixUserID, "mattermost_username", mattermostUsername, "original", htmlContent, "result", result)
+	p.logger.LogDebug("Replaced Matrix mention HTML", "matrix_user_id", matrixUserID, "mattermost_username", mattermostUsername, "original", htmlContent, "result", result)
 	return result
 }
 

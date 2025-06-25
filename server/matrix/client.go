@@ -17,13 +17,86 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Logger interface for matrix client logging
+type Logger interface {
+	LogDebug(message string, keyValuePairs ...any)
+	LogInfo(message string, keyValuePairs ...any)
+	LogWarn(message string, keyValuePairs ...any)
+	LogError(message string, keyValuePairs ...any)
+}
+
+// APILogger implements Logger interface using plugin.API
+type APILogger struct {
+	api plugin.API
+}
+
+// NewAPILogger creates a new APILogger
+func NewAPILogger(api plugin.API) Logger {
+	return &APILogger{api: api}
+}
+
+func (l *APILogger) LogDebug(message string, keyValuePairs ...any) {
+	l.api.LogDebug(message, keyValuePairs...)
+}
+
+func (l *APILogger) LogInfo(message string, keyValuePairs ...any) {
+	l.api.LogInfo(message, keyValuePairs...)
+}
+
+func (l *APILogger) LogWarn(message string, keyValuePairs ...any) {
+	l.api.LogWarn(message, keyValuePairs...)
+}
+
+func (l *APILogger) LogError(message string, keyValuePairs ...any) {
+	l.api.LogError(message, keyValuePairs...)
+}
+
+// TestLogger implements Logger interface for testing
+type TestLogger interface {
+	Logf(format string, args ...any)
+}
+
+// testLogger implements Logger interface using a TestLogger (like testing.T)
+type testLogger struct {
+	t TestLogger
+}
+
+// NewTestLogger creates a new test logger that logs to a TestLogger (like testing.T)
+func NewTestLogger(t TestLogger) Logger {
+	return &testLogger{t: t}
+}
+
+func (l *testLogger) LogDebug(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[DEBUG] %s %v", message, keyValuePairs)
+	}
+}
+
+func (l *testLogger) LogInfo(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[INFO] %s %v", message, keyValuePairs)
+	}
+}
+
+func (l *testLogger) LogWarn(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[WARN] %s %v", message, keyValuePairs)
+	}
+}
+
+func (l *testLogger) LogError(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[ERROR] %s %v", message, keyValuePairs)
+	}
+}
+
 // Client represents a Matrix HTTP client for communicating with Matrix servers.
 type Client struct {
 	serverURL    string
 	asToken      string // Application Service token for all operations
 	remoteID     string // Plugin remote ID for metadata
 	httpClient   *http.Client
-	api          plugin.API
+	logger       Logger
 	serverDomain string // explicit server domain for testing
 }
 
@@ -70,7 +143,20 @@ func NewClient(serverURL, asToken, remoteID string, api plugin.API) *Client {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		api: api,
+		logger: NewAPILogger(api),
+	}
+}
+
+// NewClientWithLogger creates a new Matrix client with a custom logger (useful for testing).
+func NewClientWithLogger(serverURL, asToken, remoteID string, logger Logger) *Client {
+	return &Client{
+		serverURL: serverURL,
+		asToken:   asToken,
+		remoteID:  remoteID,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+		logger: logger,
 	}
 }
 
@@ -348,7 +434,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 		return "", errors.New("matrix client not configured")
 	}
 
-	c.api.LogDebug("Creating Matrix room", "name", name, "topic", topic, "server_domain", serverDomain)
+	c.logger.LogDebug("Creating Matrix room", "name", name, "topic", topic, "server_domain", serverDomain)
 
 	// Create room alias using reserved Application Service namespace
 	alias := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
@@ -426,7 +512,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.api.LogError("Matrix room creation failed", "status_code", resp.StatusCode, "response", string(body), "room_name", name)
+		c.logger.LogError("Matrix room creation failed", "status_code", resp.StatusCode, "response", string(body), "room_name", name)
 		return "", fmt.Errorf("failed to create room: %d %s", resp.StatusCode, string(body))
 	}
 
@@ -439,16 +525,16 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 
 	// Publish to directory based on the publish parameter
 	if publish {
-		c.api.LogDebug("Publishing room to public directory", "room_id", response.RoomID)
+		c.logger.LogDebug("Publishing room to public directory", "room_id", response.RoomID)
 		if err := c.PublishRoomToDirectory(response.RoomID, true); err != nil {
 			// Log warning but don't fail room creation - the room was created successfully
-			c.api.LogWarn("Failed to publish room to public directory", "room_id", response.RoomID, "error", err)
-			c.api.LogDebug("Room created but not published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
+			c.logger.LogWarn("Failed to publish room to public directory", "room_id", response.RoomID, "error", err)
+			c.logger.LogDebug("Room created but not published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
 		} else {
-			c.api.LogDebug("Room created and published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
+			c.logger.LogDebug("Room created and published to directory", "room_id", response.RoomID, "room_alias", roomAlias)
 		}
 	} else {
-		c.api.LogDebug("Room created (not published to directory)", "room_id", response.RoomID, "room_alias", roomAlias)
+		c.logger.LogDebug("Room created (not published to directory)", "room_id", response.RoomID, "room_alias", roomAlias)
 	}
 
 	// Log successful room creation
@@ -456,7 +542,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 	if roomAlias != "" {
 		returnValue = roomAlias
 	}
-	c.api.LogInfo("Matrix room created successfully", "room_id", response.RoomID, "room_alias", roomAlias, "return_value", returnValue)
+	c.logger.LogInfo("Matrix room created successfully", "room_id", response.RoomID, "room_alias", roomAlias, "return_value", returnValue)
 
 	// Add bridge alias for Matrix Application Service filtering
 	if roomAlias != "" {
@@ -464,10 +550,10 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 		bridgeAlias := "#mattermost-bridge-" + alias + ":" + serverDomain
 		err = c.AddRoomAlias(response.RoomID, bridgeAlias)
 		if err != nil {
-			c.api.LogWarn("Failed to add bridge filtering alias", "error", err, "bridge_alias", bridgeAlias, "room_id", response.RoomID)
+			c.logger.LogWarn("Failed to add bridge filtering alias", "error", err, "bridge_alias", bridgeAlias, "room_id", response.RoomID)
 			// Continue - user alias still works, bridge filtering just won't work for this room
 		} else {
-			c.api.LogDebug("Successfully added bridge filtering alias", "room_id", response.RoomID, "bridge_alias", bridgeAlias, "user_alias", roomAlias)
+			c.logger.LogDebug("Successfully added bridge filtering alias", "room_id", response.RoomID, "bridge_alias", bridgeAlias, "user_alias", roomAlias)
 		}
 	}
 
@@ -508,7 +594,7 @@ func (c *Client) AddRoomAlias(roomID, alias string) error {
 		return errors.New("matrix client not configured")
 	}
 
-	c.api.LogDebug("Adding room alias", "room_id", roomID, "alias", alias)
+	c.logger.LogDebug("Adding room alias", "room_id", roomID, "alias", alias)
 
 	requestBody := map[string]string{
 		"room_id": roomID,
@@ -543,11 +629,11 @@ func (c *Client) AddRoomAlias(roomID, alias string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.api.LogError("Failed to add room alias", "status_code", resp.StatusCode, "response", string(body), "alias", alias, "room_id", roomID)
+		c.logger.LogError("Failed to add room alias", "status_code", resp.StatusCode, "response", string(body), "alias", alias, "room_id", roomID)
 		return fmt.Errorf("failed to add room alias: %d %s", resp.StatusCode, string(body))
 	}
 
-	c.api.LogDebug("Successfully added room alias", "room_id", roomID, "alias", alias)
+	c.logger.LogDebug("Successfully added room alias", "room_id", roomID, "alias", alias)
 	return nil
 }
 
@@ -907,7 +993,7 @@ func (c *Client) SendMessage(req MessageRequest) (*SendEventResponse, error) {
 		return nil, errors.New("ghost_user_id is required")
 	}
 
-	c.api.LogDebug("Sending message as ghost user", "room_id", req.RoomID, "ghost_user_id", req.GhostUserID, "file_count", len(req.Files), "has_text", req.Message != "" || req.HTMLMessage != "")
+	c.logger.LogDebug("Sending message as ghost user", "room_id", req.RoomID, "ghost_user_id", req.GhostUserID, "file_count", len(req.Files), "has_text", req.Message != "" || req.HTMLMessage != "")
 
 	// Simplified logic: send text (if any) and files (if any) as separate top-level messages
 	// All messages from one Mattermost post will be linked via m.relates_to
@@ -933,7 +1019,7 @@ func (c *Client) sendMattermostPost(req MessageRequest) (*SendEventResponse, err
 		}
 		primaryResponse = textResponse
 		rootEventID = textResponse.EventID
-		c.api.LogDebug("Sent text message", "event_id", rootEventID)
+		c.logger.LogDebug("Sent text message", "event_id", rootEventID)
 	}
 
 	// Send each file as separate top-level message
@@ -941,7 +1027,7 @@ func (c *Client) sendMattermostPost(req MessageRequest) (*SendEventResponse, err
 		fileResponse, err := c.sendFileMessage(req, file, rootEventID)
 		if err != nil {
 			// Log error but continue with other files
-			c.api.LogWarn("Failed to send file message", "filename", file.Filename, "error", err)
+			c.logger.LogWarn("Failed to send file message", "filename", file.Filename, "error", err)
 			continue
 		}
 
@@ -949,9 +1035,9 @@ func (c *Client) sendMattermostPost(req MessageRequest) (*SendEventResponse, err
 		if primaryResponse == nil {
 			primaryResponse = fileResponse
 			rootEventID = fileResponse.EventID
-			c.api.LogDebug("Sent first file message as root", "event_id", rootEventID, "filename", file.Filename)
+			c.logger.LogDebug("Sent first file message as root", "event_id", rootEventID, "filename", file.Filename)
 		} else {
-			c.api.LogDebug("Sent file message linked to root", "event_id", fileResponse.EventID, "filename", file.Filename, "root_event_id", rootEventID)
+			c.logger.LogDebug("Sent file message linked to root", "event_id", fileResponse.EventID, "filename", file.Filename, "root_event_id", rootEventID)
 		}
 	}
 
@@ -959,7 +1045,7 @@ func (c *Client) sendMattermostPost(req MessageRequest) (*SendEventResponse, err
 		return nil, errors.New("failed to send any content")
 	}
 
-	c.api.LogDebug("Successfully sent Mattermost post", "primary_event_id", primaryResponse.EventID, "text_present", req.Message != "" || req.HTMLMessage != "", "file_count", len(req.Files))
+	c.logger.LogDebug("Successfully sent Mattermost post", "primary_event_id", primaryResponse.EventID, "text_present", req.Message != "" || req.HTMLMessage != "", "file_count", len(req.Files))
 	return primaryResponse, nil
 }
 
@@ -1185,7 +1271,7 @@ func (c *Client) GetUserProfile(userID string) (*UserProfile, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		c.api.LogWarn("Failed to get Matrix user profile", "status_code", resp.StatusCode, "response", string(body), "user_id", userID)
+		c.logger.LogWarn("Failed to get Matrix user profile", "status_code", resp.StatusCode, "response", string(body), "user_id", userID)
 		// Return empty profile rather than error - user might not have set a display name
 		return &UserProfile{}, nil
 	}
@@ -1195,7 +1281,7 @@ func (c *Client) GetUserProfile(userID string) (*UserProfile, error) {
 		return nil, errors.Wrap(err, "failed to unmarshal profile response")
 	}
 
-	c.api.LogDebug("Successfully retrieved Matrix user profile", "user_id", userID, "display_name", profile.DisplayName)
+	c.logger.LogDebug("Successfully retrieved Matrix user profile", "user_id", userID, "display_name", profile.DisplayName)
 	return &profile, nil
 }
 
@@ -1236,11 +1322,11 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 
 	var lastErr error
 	for i, downloadURL := range downloadURLs {
-		c.api.LogDebug("Attempting to download Matrix file", "url", downloadURL, "attempt", i+1, "mxc_uri", mxcURI)
+		c.logger.LogDebug("Attempting to download Matrix file", "url", downloadURL, "attempt", i+1, "mxc_uri", mxcURI)
 
 		req, err := http.NewRequest("GET", downloadURL, nil)
 		if err != nil {
-			c.api.LogWarn("Failed to create file download request", "error", err, "url", downloadURL)
+			c.logger.LogWarn("Failed to create file download request", "error", err, "url", downloadURL)
 			lastErr = err
 			continue
 		}
@@ -1250,14 +1336,14 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			c.api.LogWarn("Failed to download file from URL", "error", err, "url", downloadURL)
+			c.logger.LogWarn("Failed to download file from URL", "error", err, "url", downloadURL)
 			lastErr = err
 			continue
 		}
 		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
-			c.api.LogWarn("Matrix media endpoint returned error", "url", downloadURL, "status", resp.StatusCode)
+			c.logger.LogWarn("Matrix media endpoint returned error", "url", downloadURL, "status", resp.StatusCode)
 			lastErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, downloadURL)
 			continue
 		}
@@ -1265,7 +1351,7 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 		// Check content type if specified
 		contentType := resp.Header.Get("Content-Type")
 		if contentTypePrefix != "" && !strings.HasPrefix(contentType, contentTypePrefix) {
-			c.api.LogWarn("Invalid content type", "content_type", contentType, "expected_prefix", contentTypePrefix, "url", downloadURL)
+			c.logger.LogWarn("Invalid content type", "content_type", contentType, "expected_prefix", contentTypePrefix, "url", downloadURL)
 			lastErr = fmt.Errorf("invalid content type: %s (expected prefix: %s)", contentType, contentTypePrefix)
 			continue
 		}
@@ -1273,19 +1359,19 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 		// Read the file data
 		fileData, err := io.ReadAll(resp.Body)
 		if err != nil {
-			c.api.LogWarn("Failed to read file data", "error", err, "url", downloadURL)
+			c.logger.LogWarn("Failed to read file data", "error", err, "url", downloadURL)
 			lastErr = err
 			continue
 		}
 
 		// Check size limit
 		if maxSize > 0 && int64(len(fileData)) > maxSize {
-			c.api.LogWarn("File too large", "size", len(fileData), "max", maxSize, "url", downloadURL)
+			c.logger.LogWarn("File too large", "size", len(fileData), "max", maxSize, "url", downloadURL)
 			lastErr = fmt.Errorf("file too large: %d bytes (max %d)", len(fileData), maxSize)
 			continue
 		}
 
-		c.api.LogDebug("Successfully downloaded Matrix file", "url", downloadURL, "size", len(fileData), "content_type", contentType, "mxc_uri", mxcURI)
+		c.logger.LogDebug("Successfully downloaded Matrix file", "url", downloadURL, "size", len(fileData), "content_type", contentType, "mxc_uri", mxcURI)
 		return fileData, nil
 	}
 
@@ -1364,7 +1450,7 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 	}
 
 	// Log successful metadata creation
-	c.api.LogDebug("Successfully created file metadata event", "message_event_id", messageEventID, "file_count", len(fileEventIDs), "file_event_ids", fileEventIDs)
+	c.logger.LogDebug("Successfully created file metadata event", "message_event_id", messageEventID, "file_count", len(fileEventIDs), "file_event_ids", fileEventIDs)
 	return nil
 }
 

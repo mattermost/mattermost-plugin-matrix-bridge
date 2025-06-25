@@ -446,7 +446,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 			},
 			expected: []string{"@alice:example.com"},
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -461,7 +460,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 			},
 			expected: []string{"@alice:example.com", "@bob:example.com"},
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -474,7 +472,6 @@ func TestExtractMentionedUsers(t *testing.T) {
 			},
 			expected: nil,
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 	}
@@ -489,8 +486,7 @@ func TestExtractMentionedUsers(t *testing.T) {
 			// Set up test-specific expectations
 			tt.setup(mockAPI)
 
-			plugin := &Plugin{}
-			plugin.API = mockAPI
+			plugin := setupPluginForTestWithLogger(t, mockAPI)
 
 			result := plugin.extractMentionedUsers(tt.event)
 
@@ -524,7 +520,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			mattermostUsername: "alice",
 			expected:           "Hello @alice!",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -534,7 +529,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			mattermostUsername: "bobsmith",
 			expected:           "Hey @bobsmith, how are you?",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -544,7 +538,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			mattermostUsername: "alice",
 			expected:           "@alice and @alice",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -554,7 +547,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			mattermostUsername: "alice",
 			expected:           "Just plain text",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -564,7 +556,6 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			mattermostUsername: "username",
 			expected:           "@username",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 	}
@@ -579,8 +570,7 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			// Set up test-specific expectations
 			tt.setup(mockAPI)
 
-			plugin := &Plugin{}
-			plugin.API = mockAPI
+			plugin := setupPluginForTestWithLogger(t, mockAPI)
 
 			result := plugin.replaceMatrixMentionHTML(tt.htmlContent, tt.matrixUserID, tt.mattermostUsername)
 
@@ -604,7 +594,6 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 			expected:     "",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return(nil, &model.AppError{Message: "Not found"})
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -614,7 +603,6 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
 				mockKV.EXPECT().Get("matrix_user_@bob:example.com").Return([]byte("user123"), nil)
 				mockAPI.EXPECT().GetUser("user123").Return(nil, &model.AppError{Message: "User not found"})
-				mockAPI.EXPECT().LogWarn(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -628,7 +616,6 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 					Username: "charlie_mm",
 				}
 				mockAPI.EXPECT().GetUser("user456").Return(user, nil)
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -641,7 +628,6 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 					Username: "doug_lauder",
 				}
 				mockAPI.EXPECT().GetUser("yeqo3irkujdstfmbnkx46bbhuw").Return(user, nil)
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -650,8 +636,6 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 			expected:     "",
 			setup: func(mockAPI *mocks.MockAPI, _ *mocks.MockKVStore) {
 				mockAPI.EXPECT().GetUser("nonexistentuser").Return(nil, &model.AppError{Message: "User not found"})
-				mockAPI.EXPECT().LogWarn(gomock.Any(), gomock.Any()).AnyTimes()
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 	}
@@ -667,9 +651,7 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 			// Set up test-specific expectations
 			tt.setup(mockAPI, mockKV)
 
-			plugin := &Plugin{}
-			plugin.API = mockAPI
-			plugin.kvstore = mockKV
+			plugin := setupPluginForTestWithKVStore(t, mockAPI, mockKV)
 
 			result := plugin.getMattermostUsernameFromMatrix(tt.matrixUserID)
 
@@ -713,7 +695,6 @@ func TestProcessMatrixMentions(t *testing.T) {
 			},
 			expected: "Hello @alice_mm!",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
 				user := &model.User{
 					Id:       "user123",
@@ -735,7 +716,6 @@ func TestProcessMatrixMentions(t *testing.T) {
 			},
 			expected: "@alice_mm and @bob_mm",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 
 				// Setup for Alice
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
@@ -767,7 +747,6 @@ func TestProcessMatrixMentions(t *testing.T) {
 			},
 			expected: `Hello <a href="https://matrix.to/#/@unknown:example.com">Unknown</a>!`,
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 				mockKV.EXPECT().Get("matrix_user_@unknown:example.com").Return(nil, &model.AppError{Message: "Not found"})
 			},
 		},
@@ -784,7 +763,6 @@ func TestProcessMatrixMentions(t *testing.T) {
 			},
 			expected: `Check out <a href="https://example.com">this link</a> and @alice_mm`,
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
 				user := &model.User{
 					Id:       "user123",
@@ -806,7 +784,6 @@ func TestProcessMatrixMentions(t *testing.T) {
 			},
 			expected: `This is a test mention for @doug_lauder hope it works`,
 			setup: func(mockAPI *mocks.MockAPI, _ *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 				user := &model.User{
 					Id:       "yeqo3irkujdstfmbnkx46bbhuw",
 					Username: "doug_lauder",
@@ -825,9 +802,7 @@ func TestProcessMatrixMentions(t *testing.T) {
 
 			tt.setup(mockAPI, mockKV)
 
-			plugin := &Plugin{}
-			plugin.API = mockAPI
-			plugin.kvstore = mockKV
+			plugin := setupPluginForTestWithKVStore(t, mockAPI, mockKV)
 
 			result := plugin.processMatrixMentions(tt.htmlContent, tt.event)
 
@@ -871,7 +846,6 @@ func TestConvertHTMLToMarkdownWithMentions(t *testing.T) {
 			},
 			expected: "Hello @alice\\_mm, how are you?",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
 				user := &model.User{
 					Id:       "user123",
@@ -893,7 +867,6 @@ func TestConvertHTMLToMarkdownWithMentions(t *testing.T) {
 			},
 			expected: "**Important:** @alice\\_mm needs to see this *urgent* message!",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
 				user := &model.User{
 					Id:       "user123",
@@ -915,7 +888,6 @@ func TestConvertHTMLToMarkdownWithMentions(t *testing.T) {
 			},
 			expected: "Hello [Unknown User](https://matrix.to/#/@unknown:example.com)",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 				mockKV.EXPECT().Get("matrix_user_@unknown:example.com").Return(nil, &model.AppError{Message: "Not found"})
 			},
 		},
@@ -932,7 +904,6 @@ func TestConvertHTMLToMarkdownWithMentions(t *testing.T) {
 			},
 			expected: "- @alice\\_mm - **Team Lead**\n- @bob\\_mm - *Developer*",
 			setup: func(mockAPI *mocks.MockAPI, mockKV *mocks.MockKVStore) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 
 				// Setup for Alice
 				mockKV.EXPECT().Get("matrix_user_@alice:example.com").Return([]byte("user123"), nil)
@@ -962,9 +933,7 @@ func TestConvertHTMLToMarkdownWithMentions(t *testing.T) {
 
 			tt.setup(mockAPI, mockKV)
 
-			plugin := &Plugin{}
-			plugin.API = mockAPI
-			plugin.kvstore = mockKV
+			plugin := setupPluginForTestWithKVStore(t, mockAPI, mockKV)
 
 			result := plugin.convertHTMLToMarkdownWithMentions(tt.htmlContent, tt.event)
 
@@ -991,7 +960,6 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 			ghostUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-wiggin77.ngrok.io",
 			expected:    "yeqo3irkujdstfmbnkx46bbhuw",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -999,7 +967,6 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 			ghostUserID: "@_mattermost_user123:matrix.example.com",
 			expected:    "user123",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 		{
@@ -1039,7 +1006,6 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 			ghostUserID: "@_mattermost_abc123:matrix.subdomain.example.com:8448",
 			expected:    "abc123",
 			setup: func(mockAPI *mocks.MockAPI) {
-				mockAPI.EXPECT().LogDebug(gomock.Any(), gomock.Any()).AnyTimes()
 			},
 		},
 	}
@@ -1052,8 +1018,7 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 
 			tt.setup(mockAPI)
 
-			plugin := &Plugin{}
-			plugin.API = mockAPI
+			plugin := setupPluginForTestWithLogger(t, mockAPI)
 
 			result := plugin.extractMattermostUserIDFromGhost(tt.ghostUserID)
 

@@ -49,7 +49,7 @@ func (p *Plugin) cleanupOldTransactions() {
 func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request) {
 	// Verify HTTP method
 	if r.Method != http.MethodPut {
-		p.API.LogWarn("Matrix webhook received non-PUT request", "method", r.Method)
+		p.logger.LogWarn("Matrix webhook received non-PUT request", "method", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -58,7 +58,7 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	vars := mux.Vars(r)
 	txnID := vars["txnId"]
 	if txnID == "" {
-		p.API.LogWarn("Matrix webhook received request without transaction ID")
+		p.logger.LogWarn("Matrix webhook received request without transaction ID")
 		http.Error(w, "Missing transaction ID", http.StatusBadRequest)
 		return
 	}
@@ -67,10 +67,10 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 
 	// Check for duplicate transaction (idempotency)
 	if timestamp, exists := processedTransactions[txnID]; exists {
-		p.API.LogDebug("Duplicate Matrix transaction ignored", "txn_id", txnID, "previous_timestamp", timestamp)
+		p.logger.LogDebug("Duplicate Matrix transaction ignored", "txn_id", txnID, "previous_timestamp", timestamp)
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("{}")); err != nil {
-			p.API.LogWarn("Failed to write webhook response", "error", err)
+			p.logger.LogWarn("Failed to write webhook response", "error", err)
 		}
 		return
 	}
@@ -78,7 +78,7 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	// Read transaction body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		p.API.LogError("Failed to read Matrix webhook body", "error", err, "txn_id", txnID)
+		p.logger.LogError("Failed to read Matrix webhook body", "error", err, "txn_id", txnID)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -89,7 +89,7 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	// Parse transaction JSON
 	var transaction MatrixTransaction
 	if err := json.Unmarshal(body, &transaction); err != nil {
-		p.API.LogError("Failed to parse Matrix transaction JSON", "error", err, "txn_id", txnID, "body", string(body))
+		p.logger.LogError("Failed to parse Matrix transaction JSON", "error", err, "txn_id", txnID, "body", string(body))
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -102,23 +102,23 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 		go p.cleanupOldTransactions()
 	}
 
-	p.API.LogDebug("Processing Matrix transaction", "txn_id", txnID, "event_count", len(transaction.Events))
+	p.logger.LogDebug("Processing Matrix transaction", "txn_id", txnID, "event_count", len(transaction.Events))
 
 	// Process each event in the transaction
 	for _, event := range transaction.Events {
 		if err := p.processMatrixEvent(event); err != nil {
-			p.API.LogError("Failed to process Matrix event", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "txn_id", txnID)
+			p.logger.LogError("Failed to process Matrix event", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "txn_id", txnID)
 			// Continue processing other events even if one fails
 			continue
 		}
 	}
 
-	p.API.LogDebug("Successfully processed Matrix transaction", "txn_id", txnID, "event_count", len(transaction.Events))
+	p.logger.LogDebug("Successfully processed Matrix transaction", "txn_id", txnID, "event_count", len(transaction.Events))
 
 	// Return success response
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("{}")); err != nil {
-		p.API.LogWarn("Failed to write webhook response", "error", err)
+		p.logger.LogWarn("Failed to write webhook response", "error", err)
 	}
 }
 
@@ -130,17 +130,17 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 		return errors.Wrap(err, "failed to get channel ID from Matrix room")
 	}
 	if channelID == "" {
-		p.API.LogDebug("Ignoring event from unmapped Matrix room", "room_id", event.RoomID, "event_type", event.Type)
+		p.logger.LogDebug("Ignoring event from unmapped Matrix room", "room_id", event.RoomID, "event_type", event.Type)
 		return nil // Not an error - just not mapped
 	}
 
 	// Skip events from our own ghost users to prevent loops
 	if p.isGhostUser(event.Sender) {
-		p.API.LogDebug("Ignoring event from ghost user", "sender", event.Sender, "event_type", event.Type, "room_id", event.RoomID)
+		p.logger.LogDebug("Ignoring event from ghost user", "sender", event.Sender, "event_type", event.Type, "room_id", event.RoomID)
 		return nil
 	}
 
-	p.API.LogDebug("Processing Matrix event", "event_id", event.EventID, "event_type", event.Type, "sender", event.Sender, "room_id", event.RoomID, "channel_id", channelID)
+	p.logger.LogDebug("Processing Matrix event", "event_id", event.EventID, "event_type", event.Type, "sender", event.Sender, "room_id", event.RoomID, "channel_id", channelID)
 
 	// Route event based on type
 	switch event.Type {
@@ -153,7 +153,7 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 	case "m.room.redaction":
 		return p.matrixToMattermostBridge.syncMatrixRedactionToMattermost(event, channelID)
 	default:
-		p.API.LogDebug("Ignoring unsupported event type", "event_type", event.Type, "event_id", event.EventID, "room_id", event.RoomID)
+		p.logger.LogDebug("Ignoring unsupported event type", "event_type", event.Type, "event_id", event.EventID, "room_id", event.RoomID)
 		return nil
 	}
 }
@@ -202,14 +202,14 @@ func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
 func (p *Plugin) isGhostUser(userID string) bool {
 	config := p.getConfiguration()
 	if config.MatrixServerURL == "" {
-		p.API.LogDebug("isGhostUser: no MatrixServerURL configured", "user_id", userID)
+		p.logger.LogDebug("isGhostUser: no MatrixServerURL configured", "user_id", userID)
 		return false
 	}
 
 	// Extract server domain (get the real domain, not sanitized for property keys)
 	parsedURL, err := url.Parse(config.MatrixServerURL)
 	if err != nil || parsedURL.Hostname() == "" {
-		p.API.LogDebug("isGhostUser: failed to parse MatrixServerURL", "url", config.MatrixServerURL, "error", err)
+		p.logger.LogDebug("isGhostUser: failed to parse MatrixServerURL", "url", config.MatrixServerURL, "error", err)
 		return false
 	}
 	serverDomain := parsedURL.Hostname()

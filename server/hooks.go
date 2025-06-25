@@ -13,7 +13,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 	}
 
 	if p.matrixClient == nil {
-		p.API.LogError("Matrix client not initialized")
+		p.logger.LogError("Matrix client not initialized")
 		return model.SyncResponse{}, errors.New("matrix client not initialized")
 	}
 
@@ -25,7 +25,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 		}
 
 		if err := p.mattermostToMatrixBridge.SyncUserToMatrix(user); err != nil {
-			p.API.LogError("Failed to sync user to Matrix", "error", err, "user_id", user.Id, "username", user.Username)
+			p.logger.LogError("Failed to sync user to Matrix", "error", err, "user_id", user.Id, "username", user.Username)
 			continue
 		}
 	}
@@ -38,7 +38,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 		}
 
 		if err := p.mattermostToMatrixBridge.SyncPostToMatrix(post, msg.ChannelId); err != nil {
-			p.API.LogError("Failed to sync post to Matrix", "error", err, "post_id", post.Id)
+			p.logger.LogError("Failed to sync post to Matrix", "error", err, "post_id", post.Id)
 			continue
 		}
 	}
@@ -51,7 +51,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 		}
 
 		if err := p.mattermostToMatrixBridge.SyncReactionToMatrix(reaction, msg.ChannelId); err != nil {
-			p.API.LogError("Failed to sync reaction to Matrix", "error", err, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName)
+			p.logger.LogError("Failed to sync reaction to Matrix", "error", err, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName)
 			continue
 		}
 	}
@@ -65,28 +65,28 @@ func (p *Plugin) OnSharedChannelsPing(_ *model.RemoteCluster) bool {
 
 	// If sync is disabled, we're still "healthy" but not actively processing
 	if !config.EnableSync {
-		p.API.LogDebug("Ping received but sync is disabled")
+		p.logger.LogDebug("Ping received but sync is disabled")
 		return true
 	}
 
 	// If Matrix client is not configured, we're not healthy
 	if p.matrixClient == nil {
-		p.API.LogWarn("Ping failed - Matrix client not initialized")
+		p.logger.LogWarn("Ping failed - Matrix client not initialized")
 		return false
 	}
 
 	// Test Matrix connection health
 	if config.MatrixServerURL != "" && config.MatrixASToken != "" {
 		if err := p.matrixClient.TestConnection(); err != nil {
-			p.API.LogWarn("Ping failed - Matrix connection test failed", "error", err)
+			p.logger.LogWarn("Ping failed - Matrix connection test failed", "error", err)
 			return false
 		}
 	} else {
-		p.API.LogWarn("Ping failed - Matrix configuration incomplete")
+		p.logger.LogWarn("Ping failed - Matrix configuration incomplete")
 		return false
 	}
 
-	p.API.LogDebug("Ping successful - Matrix bridge is healthy")
+	p.logger.LogDebug("Ping successful - Matrix bridge is healthy")
 	return true
 }
 
@@ -106,7 +106,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 		return nil
 	}
 
-	p.API.LogDebug("Received attachment sync", "file_id", fi.Id, "post_id", post.Id, "filename", fi.Name)
+	p.logger.LogDebug("Received attachment sync", "file_id", fi.Id, "post_id", post.Id, "filename", fi.Name)
 
 	// Check if this is a file deletion
 	if fi.DeleteAt != 0 {
@@ -120,7 +120,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 
 	if matrixRoomIdentifier == "" {
-		p.API.LogWarn("No Matrix room mapped for channel", "channel_id", post.ChannelId)
+		p.logger.LogWarn("No Matrix room mapped for channel", "channel_id", post.ChannelId)
 		return nil
 	}
 
@@ -146,17 +146,17 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 	p.pendingFiles.AddFile(post.Id, pendingFile)
 
-	p.API.LogDebug("Successfully uploaded attachment to Matrix (pending post)", "filename", fi.Name, "size", fi.Size, "post_id", post.Id, "mxc_uri", mxcURI)
+	p.logger.LogDebug("Successfully uploaded attachment to Matrix (pending post)", "filename", fi.Name, "size", fi.Size, "post_id", post.Id, "mxc_uri", mxcURI)
 	return nil
 }
 
 // deleteFileFromMatrix handles deleting a file attachment from Matrix
 func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) error {
-	p.API.LogDebug("Deleting file attachment from Matrix", "file_id", fi.Id, "post_id", post.Id, "filename", fi.Name)
+	p.logger.LogDebug("Deleting file attachment from Matrix", "file_id", fi.Id, "post_id", post.Id, "filename", fi.Name)
 
 	// First, try to remove from pending files (if the post hasn't been synced yet)
 	if p.pendingFiles.RemoveFile(post.Id, fi.Id) {
-		p.API.LogDebug("Removed file from pending uploads", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
+		p.logger.LogDebug("Removed file from pending uploads", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
 		return nil
 	}
 
@@ -168,7 +168,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 	}
 
 	if matrixRoomIdentifier == "" {
-		p.API.LogWarn("No Matrix room mapped for channel", "channel_id", post.ChannelId)
+		p.logger.LogWarn("No Matrix room mapped for channel", "channel_id", post.ChannelId)
 		return nil
 	}
 
@@ -191,7 +191,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 	}
 
 	if postEventID == "" {
-		p.API.LogWarn("No Matrix event ID found for post with file attachment", "post_id", post.Id, "file_id", fi.Id)
+		p.logger.LogWarn("No Matrix event ID found for post with file attachment", "post_id", post.Id, "file_id", fi.Id)
 		return nil // Can't find related file attachments without the post's Matrix event ID
 	}
 
@@ -204,7 +204,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 	// Check if ghost user exists
 	ghostUserID, exists := p.getGhostUser(user.Id)
 	if !exists {
-		p.API.LogWarn("No ghost user found for file deletion", "user_id", post.UserId, "file_id", fi.Id)
+		p.logger.LogWarn("No ghost user found for file deletion", "user_id", post.UserId, "file_id", fi.Id)
 		return nil // Can't delete a file from a user that doesn't have a ghost user
 	}
 
@@ -214,7 +214,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 		return errors.Wrap(err, "failed to find and delete file message in Matrix")
 	}
 
-	p.API.LogDebug("Successfully deleted file attachment from Matrix", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
+	p.logger.LogDebug("Successfully deleted file attachment from Matrix", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
 	return nil
 }
 
@@ -234,36 +234,36 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, _ *model.
 		return nil
 	}
 
-	p.API.LogDebug("Received profile image sync", "user_id", user.Id, "username", user.Username)
+	p.logger.LogDebug("Received profile image sync", "user_id", user.Id, "username", user.Username)
 
 	// Check if we have a ghost user for this Mattermost user
 	ghostUserID, exists := p.getGhostUser(user.Id)
 	if !exists {
-		p.API.LogDebug("No ghost user found for profile image sync", "user_id", user.Id, "username", user.Username)
+		p.logger.LogDebug("No ghost user found for profile image sync", "user_id", user.Id, "username", user.Username)
 		return nil // No ghost user exists yet, nothing to update
 	}
 
-	p.API.LogDebug("Found ghost user for profile image sync", "user_id", user.Id, "ghost_user_id", ghostUserID)
+	p.logger.LogDebug("Found ghost user for profile image sync", "user_id", user.Id, "ghost_user_id", ghostUserID)
 
 	// Get user's new avatar image data
 	avatarData, appErr := p.API.GetProfileImage(user.Id)
 	if appErr != nil {
-		p.API.LogError("Failed to get user profile image", "error", appErr, "user_id", user.Id)
+		p.logger.LogError("Failed to get user profile image", "error", appErr, "user_id", user.Id)
 		return errors.Wrap(appErr, "failed to get user profile image")
 	}
 
 	if len(avatarData) == 0 {
-		p.API.LogWarn("User profile image data is empty", "user_id", user.Id)
+		p.logger.LogWarn("User profile image data is empty", "user_id", user.Id)
 		return nil
 	}
 
 	// Update the avatar for the ghost user (upload and set)
 	err := p.matrixClient.UpdateGhostUserAvatar(ghostUserID, avatarData, "image/png")
 	if err != nil {
-		p.API.LogError("Failed to update ghost user avatar", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID)
+		p.logger.LogError("Failed to update ghost user avatar", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID)
 		return errors.Wrap(err, "failed to update ghost user avatar on Matrix")
 	}
 
-	p.API.LogDebug("Successfully updated ghost user avatar", "user_id", user.Id, "username", user.Username, "ghost_user_id", ghostUserID)
+	p.logger.LogDebug("Successfully updated ghost user avatar", "user_id", user.Id, "username", user.Username, "ghost_user_id", ghostUserID)
 	return nil
 }

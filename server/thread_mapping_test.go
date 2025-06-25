@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/mocks"
 	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
@@ -152,11 +151,11 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Create Matrix client
-	suite.plugin.matrixClient = matrix.NewClient(
+	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		suite.plugin.remoteID,
-		api,
 	)
 	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
 
@@ -313,26 +312,6 @@ func (suite *ThreadMappingIntegrationTestSuite) TestFileAttachmentThreadMapping(
 	t.Logf("✓ Fix ensures Matrix replies to file attachments maintain thread context")
 }
 
-// testLogger is a simple logger for testing
-type testLogger struct {
-	t *testing.T
-}
-
-func (l *testLogger) LogDebug(message string, keyValuePairs ...any) {
-	l.t.Logf("[DEBUG] %s %v", message, keyValuePairs)
-}
-
-func (l *testLogger) LogInfo(message string, keyValuePairs ...any) {
-	l.t.Logf("[INFO] %s %v", message, keyValuePairs)
-}
-
-func (l *testLogger) LogWarn(message string, keyValuePairs ...any) {
-	l.t.Logf("[WARN] %s %v", message, keyValuePairs)
-}
-
-func (l *testLogger) LogError(message string, keyValuePairs ...any) {
-	l.t.Logf("[ERROR] %s %v", message, keyValuePairs)
-}
 
 // Run the test suite
 func TestThreadMappingIntegration(t *testing.T) {

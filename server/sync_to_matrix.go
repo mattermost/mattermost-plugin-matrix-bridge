@@ -269,7 +269,7 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 	}
 
 	if matrixRoomIdentifier == "" {
-		b.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+		b.logger.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
 		return nil
 	}
 
@@ -303,13 +303,13 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 				// This post's UpdateAt matches the timestamp we stored when adding Matrix event ID
 				// This is the redundant edit from adding the Matrix event ID property
 				b.postTracker.Delete(post.Id)
-				b.API.LogDebug("Skipping redundant edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
+				b.logger.LogDebug("Skipping redundant edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 				return nil
 			}
 			// This is a genuine edit that happened after we added the Matrix event ID
 			// Remove the tracking entry since we're processing a real edit now
 			b.postTracker.Delete(post.Id)
-			b.API.LogDebug("Processing genuine edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
+			b.logger.LogDebug("Processing genuine edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 		}
 
 		// This is a genuine post edit - update the existing Matrix message
@@ -317,14 +317,14 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 		if err != nil {
 			return errors.Wrap(err, "failed to update post in Matrix")
 		}
-		b.API.LogDebug("Successfully updated post in Matrix", "post_id", post.Id, "matrix_event_id", existingEventID)
+		b.logger.LogDebug("Successfully updated post in Matrix", "post_id", post.Id, "matrix_event_id", existingEventID)
 	} else {
 		// This is a new post - create new Matrix message
 		err = b.createPostInMatrix(post, matrixRoomID, user, propertyKey)
 		if err != nil {
 			return errors.Wrap(err, "failed to create post in Matrix")
 		}
-		b.API.LogDebug("Successfully created new post in Matrix", "post_id", post.Id)
+		b.logger.LogDebug("Successfully created new post in Matrix", "post_id", post.Id)
 	}
 
 	return nil
@@ -334,7 +334,7 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRoomID string, user *model.User, propertyKey string) error {
 	// Skip creating ghost users for Matrix-originated users to prevent loops
 	if user.IsRemote() {
-		b.API.LogDebug("Skipping ghost user creation for remote user", "user_id", user.Id, "username", user.Username)
+		b.logger.LogDebug("Skipping ghost user creation for remote user", "user_id", user.Id, "username", user.Username)
 		return nil
 	}
 
@@ -377,7 +377,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 		// This is a reply - find the Matrix event ID of the root post
 		rootPost, appErr := b.API.GetPost(post.RootId)
 		if appErr != nil {
-			b.API.LogWarn("Failed to get root post for thread", "error", appErr, "post_id", post.Id, "root_id", post.RootId)
+			b.logger.LogWarn("Failed to get root post for thread", "error", appErr, "post_id", post.Id, "root_id", post.RootId)
 			// Continue without threading - send as regular message
 		} else {
 			// Get Matrix event ID from root post properties
@@ -387,7 +387,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 				}
 			}
 			if threadEventID == "" {
-				b.API.LogWarn("Root post has no Matrix event ID for threading", "post_id", post.Id, "root_id", post.RootId)
+				b.logger.LogWarn("Root post has no Matrix event ID for threading", "post_id", post.Id, "root_id", post.RootId)
 				// Continue without threading - send as regular message
 			}
 		}
@@ -430,7 +430,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 	}
 
 	if len(pendingFiles) > 0 {
-		b.API.LogDebug("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
+		b.logger.LogDebug("Posted message with file attachments to Matrix", "post_id", post.Id, "file_count", len(pendingFiles))
 	}
 
 	// Store the Matrix event ID as a post property for reaction mapping
@@ -442,21 +442,21 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 
 		updatedPost, appErr := b.API.UpdatePost(post)
 		if appErr != nil {
-			b.API.LogWarn("Failed to update post with Matrix event ID", "error", appErr, "post_id", post.Id, "event_id", sendResponse.EventID)
+			b.logger.LogWarn("Failed to update post with Matrix event ID", "error", appErr, "post_id", post.Id, "event_id", sendResponse.EventID)
 			// Continue anyway, the message was sent successfully
 		} else {
 			// Store the UpdateAt timestamp in memory to detect redundant edits
 			err = b.postTracker.Put(post.Id, updatedPost.UpdateAt)
 			if err != nil {
-				b.API.LogWarn("Failed to store post tracking for redundant edit detection", "error", err, "post_id", post.Id, "update_at", updatedPost.UpdateAt)
+				b.logger.LogWarn("Failed to store post tracking for redundant edit detection", "error", err, "post_id", post.Id, "update_at", updatedPost.UpdateAt)
 				// Continue anyway - this is just an optimization to avoid redundant edits
 			} else {
-				b.API.LogDebug("Stored post tracking for redundant edit detection", "post_id", post.Id, "update_at", updatedPost.UpdateAt)
+				b.logger.LogDebug("Stored post tracking for redundant edit detection", "post_id", post.Id, "update_at", updatedPost.UpdateAt)
 			}
 		}
 	}
 
-	b.API.LogDebug("Successfully created post in Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "event_id", sendResponse.EventID)
+	b.logger.LogDebug("Successfully created post in Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "event_id", sendResponse.EventID)
 	return nil
 }
 
@@ -464,7 +464,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRoomID string, eventID string, user *model.User) error {
 	// Skip updating posts for Matrix-originated users to prevent loops
 	if user.IsRemote() {
-		b.API.LogDebug("Skipping post update for remote user", "user_id", user.Id, "username", user.Username)
+		b.logger.LogDebug("Skipping post update for remote user", "user_id", user.Id, "username", user.Username)
 		return nil
 	}
 
@@ -520,7 +520,7 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 		for _, fileID := range post.FileIds {
 			fileInfo, appErr := b.API.GetFileInfo(fileID)
 			if appErr != nil {
-				b.API.LogWarn("Failed to get file info for comparison", "error", appErr, "file_id", fileID, "post_id", post.Id)
+				b.logger.LogWarn("Failed to get file info for comparison", "error", appErr, "file_id", fileID, "post_id", post.Id)
 				continue
 			}
 			// We don't have the MXC URI for existing files, but we have the filename which is what we need for comparison
@@ -537,9 +537,9 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 	finalPlainText := messageContent["body"].(string)
 	finalHTMLContent, _ := messageContent["formatted_body"].(string)
 
-	b.API.LogDebug("Preparing to compare Matrix content", "post_id", post.Id, "new_plain_text", finalPlainText, "new_html_content", finalHTMLContent, "file_count", len(currentFiles))
+	b.logger.LogDebug("Preparing to compare Matrix content", "post_id", post.Id, "new_plain_text", finalPlainText, "new_html_content", finalHTMLContent, "file_count", len(currentFiles))
 	if len(currentFiles) > 0 {
-		b.API.LogDebug("Files for comparison", "post_id", post.Id, "filenames", func() []string {
+		b.logger.LogDebug("Files for comparison", "post_id", post.Id, "filenames", func() []string {
 			var names []string
 			for _, f := range currentFiles {
 				names = append(names, f.Filename)
@@ -551,12 +551,12 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 	// Fetch the current Matrix event content to compare
 	currentEvent, err := b.matrixClient.GetEvent(matrixRoomID, eventID)
 	if err != nil {
-		b.API.LogWarn("Failed to fetch current Matrix event for comparison", "error", err, "event_id", eventID)
+		b.logger.LogWarn("Failed to fetch current Matrix event for comparison", "error", err, "event_id", eventID)
 		// Continue with update if we can't fetch current content
 	} else {
 		// Compare content and file attachments to see if anything actually changed
 		if b.isMatrixContentIdentical(currentEvent, finalPlainText, finalHTMLContent, matrixRoomID, eventID, currentFiles) {
-			b.API.LogDebug("Matrix message content and attachments unchanged, skipping edit", "post_id", post.Id, "matrix_event_id", eventID)
+			b.logger.LogDebug("Matrix message content and attachments unchanged, skipping edit", "post_id", post.Id, "matrix_event_id", eventID)
 			return nil
 		}
 	}
@@ -567,7 +567,7 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 		return errors.Wrap(err, "failed to edit message as ghost user")
 	}
 
-	b.API.LogDebug("Successfully updated post in Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "matrix_event_id", eventID)
+	b.logger.LogDebug("Successfully updated post in Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "matrix_event_id", eventID)
 	return nil
 }
 
@@ -580,7 +580,7 @@ func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channe
 	}
 
 	if matrixRoomIdentifier == "" {
-		b.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+		b.logger.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
 		return nil
 	}
 
@@ -603,7 +603,7 @@ func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channe
 	}
 
 	if matrixEventID == "" {
-		b.API.LogWarn("No Matrix event ID found for post deletion", "post_id", post.Id, "property_key", propertyKey)
+		b.logger.LogWarn("No Matrix event ID found for post deletion", "post_id", post.Id, "property_key", propertyKey)
 		return nil // Can't delete a message that wasn't synced to Matrix
 	}
 
@@ -616,14 +616,14 @@ func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channe
 	// Check if ghost user exists (needed for redaction)
 	ghostUserID, exists := b.getGhostUser(user.Id)
 	if !exists {
-		b.API.LogWarn("No ghost user found for post deletion", "user_id", post.UserId, "post_id", post.Id)
+		b.logger.LogWarn("No ghost user found for post deletion", "user_id", post.UserId, "post_id", post.Id)
 		return nil // Can't delete a message from a user that doesn't have a ghost user
 	}
 
 	// First, find and delete any file attachment replies to this message
 	err = b.deleteAllFileReplies(matrixRoomID, matrixEventID, ghostUserID)
 	if err != nil {
-		b.API.LogWarn("Failed to delete file attachment replies", "error", err, "post_id", post.Id, "matrix_event_id", matrixEventID)
+		b.logger.LogWarn("Failed to delete file attachment replies", "error", err, "post_id", post.Id, "matrix_event_id", matrixEventID)
 		// Continue anyway - we'll still delete the main message
 	}
 
@@ -633,7 +633,7 @@ func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channe
 		return errors.Wrap(err, "failed to redact post in Matrix")
 	}
 
-	b.API.LogDebug("Successfully deleted post and file attachments from Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "matrix_event_id", matrixEventID)
+	b.logger.LogDebug("Successfully deleted post and file attachments from Matrix", "post_id", post.Id, "ghost_user_id", ghostUserID, "matrix_event_id", matrixEventID)
 	return nil
 }
 
@@ -657,7 +657,7 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 	}
 
 	if matrixRoomIdentifier == "" {
-		b.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+		b.logger.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
 		return nil
 	}
 
@@ -686,7 +686,7 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 	}
 
 	if matrixEventID == "" {
-		b.API.LogWarn("No Matrix event ID found for post", "post_id", reaction.PostId, "property_key", propertyKey)
+		b.logger.LogWarn("No Matrix event ID found for post", "post_id", reaction.PostId, "property_key", propertyKey)
 		return nil // Can't react to a message that wasn't synced to Matrix
 	}
 
@@ -698,7 +698,7 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 
 	// Skip creating reactions for Matrix-originated users to prevent loops
 	if user.IsRemote() {
-		b.API.LogDebug("Skipping reaction sync for remote user", "user_id", user.Id, "username", user.Username)
+		b.logger.LogDebug("Skipping reaction sync for remote user", "user_id", user.Id, "username", user.Username)
 		return nil
 	}
 
@@ -723,7 +723,7 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 		return errors.Wrap(err, "failed to send reaction as ghost user")
 	}
 
-	b.API.LogDebug("Successfully synced reaction as ghost user", "post_id", reaction.PostId, "emoji", reaction.EmojiName, "ghost_user_id", ghostUserID, "matrix_event_id", matrixEventID)
+	b.logger.LogDebug("Successfully synced reaction as ghost user", "post_id", reaction.PostId, "emoji", reaction.EmojiName, "ghost_user_id", ghostUserID, "matrix_event_id", matrixEventID)
 	return nil
 }
 
@@ -736,7 +736,7 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 	}
 
 	if matrixRoomIdentifier == "" {
-		b.API.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+		b.logger.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
 		return nil
 	}
 
@@ -765,7 +765,7 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 	}
 
 	if matrixEventID == "" {
-		b.API.LogWarn("No Matrix event ID found for post", "post_id", reaction.PostId, "property_key", propertyKey)
+		b.logger.LogWarn("No Matrix event ID found for post", "post_id", reaction.PostId, "property_key", propertyKey)
 		return nil // Can't remove reaction from a message that wasn't synced to Matrix
 	}
 
@@ -778,7 +778,7 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 	// Check if ghost user exists (needed for determining which reaction to remove)
 	ghostUserID, exists := b.getGhostUser(user.Id)
 	if !exists {
-		b.API.LogWarn("No ghost user found for reaction removal", "user_id", reaction.UserId, "post_id", reaction.PostId)
+		b.logger.LogWarn("No ghost user found for reaction removal", "user_id", reaction.UserId, "post_id", reaction.PostId)
 		return nil // Can't remove a reaction from a user that doesn't have a ghost user
 	}
 
@@ -831,7 +831,7 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 	}
 
 	if reactionEventID == "" {
-		b.API.LogWarn("No matching reaction found in Matrix to remove", "post_id", reaction.PostId, "emoji", reaction.EmojiName, "ghost_user_id", ghostUserID)
+		b.logger.LogWarn("No matching reaction found in Matrix to remove", "post_id", reaction.PostId, "emoji", reaction.EmojiName, "ghost_user_id", ghostUserID)
 		return nil // No matching reaction found to remove
 	}
 
@@ -841,7 +841,7 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 		return errors.Wrap(err, "failed to redact reaction in Matrix")
 	}
 
-	b.API.LogDebug("Successfully removed reaction from Matrix", "post_id", reaction.PostId, "emoji", reaction.EmojiName, "ghost_user_id", ghostUserID, "reaction_event_id", reactionEventID)
+	b.logger.LogDebug("Successfully removed reaction from Matrix", "post_id", reaction.PostId, "emoji", reaction.EmojiName, "ghost_user_id", ghostUserID, "reaction_event_id", reactionEventID)
 	return nil
 }
 
@@ -869,17 +869,17 @@ func (b *MattermostToMatrixBridge) extractMattermostMentions(post *model.Post) *
 		}
 	}
 
-	b.API.LogDebug("Extracted mentions from Mattermost post", "post_id", post.Id, "message", text, "user_mentions", results.UserMentions, "channel_mentions", results.ChannelMentions)
+	b.logger.LogDebug("Extracted mentions from Mattermost post", "post_id", post.Id, "message", text, "user_mentions", results.UserMentions, "channel_mentions", results.ChannelMentions)
 	return results
 }
 
 // addMatrixMentionsWithData converts Mattermost mentions to Matrix format using pre-extracted mention data
 func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]any, post *model.Post, mentions *MattermostMentionResults) {
-	b.API.LogDebug("Processing mentions for Matrix", "post_id", post.Id, "user_mentions_count", len(mentions.UserMentions), "user_mentions", mentions.UserMentions)
+	b.logger.LogDebug("Processing mentions for Matrix", "post_id", post.Id, "user_mentions_count", len(mentions.UserMentions), "user_mentions", mentions.UserMentions)
 
 	// Only process if we have user mentions (ignore channel mentions for now)
 	if len(mentions.UserMentions) == 0 {
-		b.API.LogDebug("No user mentions found, skipping mention processing", "post_id", post.Id)
+		b.logger.LogDebug("No user mentions found, skipping mention processing", "post_id", post.Id)
 		return
 	}
 
@@ -895,7 +895,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 		// Look up Mattermost user by username
 		user, appErr := b.API.GetUserByUsername(username)
 		if appErr != nil {
-			b.API.LogDebug("Failed to find Mattermost user for mention", "username", username, "error", appErr)
+			b.logger.LogDebug("Failed to find Mattermost user for mention", "username", username, "error", appErr)
 			continue
 		}
 
@@ -909,7 +909,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 			if displayName == "" {
 				displayName = user.Username // Fallback to username
 			}
-			b.API.LogDebug("Found existing Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
+			b.logger.LogDebug("Found existing Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
 		} else {
 			// Check if this is a Matrix user represented in Mattermost (Matrix user → Mattermost user)
 			originalMatrixUserID := b.getOriginalMatrixUserID(user.Id)
@@ -919,13 +919,13 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 				if displayName == "" {
 					displayName = user.Username // Fallback to username
 				}
-				b.API.LogDebug("Found original Matrix user for bridged user mention", "username", username, "original_matrix_user_id", originalMatrixUserID, "display_name", displayName)
+				b.logger.LogDebug("Found original Matrix user for bridged user mention", "username", username, "original_matrix_user_id", originalMatrixUserID, "display_name", displayName)
 			} else {
 				// No existing ghost user or original Matrix user found - create new ghost user for mention
-				b.API.LogDebug("Creating new ghost user for mentioned user", "username", username, "user_id", user.Id)
+				b.logger.LogDebug("Creating new ghost user for mentioned user", "username", username, "user_id", user.Id)
 				ghostUserID, err := b.CreateOrGetGhostUser(user.Id)
 				if err != nil {
-					b.API.LogWarn("Failed to create ghost user for mentioned user", "username", username, "user_id", user.Id, "error", err)
+					b.logger.LogWarn("Failed to create ghost user for mentioned user", "username", username, "user_id", user.Id, "error", err)
 					continue
 				}
 				matrixUserID = ghostUserID
@@ -933,7 +933,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 				if displayName == "" {
 					displayName = user.Username // Fallback to username
 				}
-				b.API.LogDebug("Created new Matrix ghost user for mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
+				b.logger.LogDebug("Created new Matrix ghost user for mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
 			}
 		}
 
@@ -947,7 +947,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 
 	// Only proceed if we have Matrix users to mention
 	if len(matrixUserIDs) == 0 {
-		b.API.LogDebug("No Matrix ghost users found for any mentions, skipping mention processing", "post_id", post.Id, "attempted_usernames", mentions.UserMentions)
+		b.logger.LogDebug("No Matrix ghost users found for any mentions, skipping mention processing", "post_id", post.Id, "attempted_usernames", mentions.UserMentions)
 		return
 	}
 
@@ -983,7 +983,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 	content["formatted_body"] = updatedHTML
 	content["format"] = "org.matrix.custom.html"
 
-	b.API.LogDebug("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs, "m_mentions", mentionsField)
+	b.logger.LogDebug("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs, "m_mentions", mentionsField)
 }
 
 // getOriginalMatrixUserID looks up the original Matrix user ID for a Mattermost user created from Matrix
@@ -991,7 +991,7 @@ func (b *MattermostToMatrixBridge) getOriginalMatrixUserID(mattermostUserID stri
 	// Search through all matrix_user_* mappings to find one that points to this Mattermost user
 	keys, err := b.kvstore.ListKeys(0, 1000)
 	if err != nil {
-		b.API.LogWarn("Failed to list kvstore keys for Matrix user lookup", "error", err, "mattermost_user_id", mattermostUserID)
+		b.logger.LogWarn("Failed to list kvstore keys for Matrix user lookup", "error", err, "mattermost_user_id", mattermostUserID)
 		return ""
 	}
 
@@ -1006,7 +1006,7 @@ func (b *MattermostToMatrixBridge) getOriginalMatrixUserID(mattermostUserID stri
 			if string(userIDBytes) == mattermostUserID {
 				// Found the mapping - extract Matrix user ID from the key
 				matrixUserID := strings.TrimPrefix(key, matrixUserPrefix)
-				b.API.LogDebug("Found original Matrix user ID", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID)
+				b.logger.LogDebug("Found original Matrix user ID", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID)
 				return matrixUserID
 			}
 		}
@@ -1031,9 +1031,9 @@ func (b *MattermostToMatrixBridge) isMatrixContentIdentical(currentEvent map[str
 				// Check if current body matches any filename (file-only post scenario)
 				for _, file := range newFiles {
 					if currentBody == file.Filename {
-						b.API.LogDebug("File-only post detected with matching text content, skipping file attachment comparison", "current_body", currentBody, "filename", file.Filename)
+						b.logger.LogDebug("File-only post detected with matching text content, skipping file attachment comparison", "current_body", currentBody, "filename", file.Filename)
 						// Text comparison already verified equivalence, so content is identical
-						b.API.LogDebug("Matrix message content and attachments are identical, no update needed")
+						b.logger.LogDebug("Matrix message content and attachments are identical, no update needed")
 						return true
 					}
 				}
@@ -1043,12 +1043,12 @@ func (b *MattermostToMatrixBridge) isMatrixContentIdentical(currentEvent map[str
 
 	// For non-file-only posts, compare file attachments by checking related events
 	if !b.areFileAttachmentsIdentical(matrixRoomID, eventID, newFiles) {
-		b.API.LogDebug("Matrix message file attachments differ")
+		b.logger.LogDebug("Matrix message file attachments differ")
 		return false
 	}
 
 	// Content and attachments are identical
-	b.API.LogDebug("Matrix message content and attachments are identical, no update needed")
+	b.logger.LogDebug("Matrix message content and attachments are identical, no update needed")
 	return true
 }
 
@@ -1057,7 +1057,7 @@ func (b *MattermostToMatrixBridge) compareTextContent(currentEvent map[string]an
 	// Extract current content from Matrix event
 	content, ok := currentEvent["content"].(map[string]any)
 	if !ok {
-		b.API.LogDebug("Current Matrix event has no content field")
+		b.logger.LogDebug("Current Matrix event has no content field")
 		return false
 	}
 
@@ -1071,19 +1071,19 @@ func (b *MattermostToMatrixBridge) compareTextContent(currentEvent map[string]an
 			filenameMatch := false
 			for _, file := range newFiles {
 				if currentBody == file.Filename {
-					b.API.LogDebug("File-only post: current Matrix body matches filename, treating as identical", "current", currentBody, "filename", file.Filename)
+					b.logger.LogDebug("File-only post: current Matrix body matches filename, treating as identical", "current", currentBody, "filename", file.Filename)
 					filenameMatch = true
 					break
 				}
 			}
 			// If current body doesn't match any filename, content differs
 			if !filenameMatch {
-				b.API.LogDebug("Matrix message body differs (not a filename match)", "current", currentBody, "new", newPlainText)
+				b.logger.LogDebug("Matrix message body differs (not a filename match)", "current", currentBody, "new", newPlainText)
 				return false
 			}
 			// If we found a filename match, continue to check HTML content below
 		} else {
-			b.API.LogDebug("Matrix message body differs", "current", currentBody, "new", newPlainText)
+			b.logger.LogDebug("Matrix message body differs", "current", currentBody, "new", newPlainText)
 			return false
 		}
 	}
@@ -1093,13 +1093,13 @@ func (b *MattermostToMatrixBridge) compareTextContent(currentEvent map[string]an
 	if newHTMLContent != "" {
 		// New content has HTML, check if current content matches
 		if !hasFormatted || currentFormattedBody != newHTMLContent {
-			b.API.LogDebug("Matrix message formatted_body differs", "current", currentFormattedBody, "new", newHTMLContent)
+			b.logger.LogDebug("Matrix message formatted_body differs", "current", currentFormattedBody, "new", newHTMLContent)
 			return false
 		}
 	} else {
 		// New content has no HTML, current should also have no formatted content
 		if hasFormatted && currentFormattedBody != "" {
-			b.API.LogDebug("Matrix message formatted_body differs (new has none, current has some)", "current", currentFormattedBody)
+			b.logger.LogDebug("Matrix message formatted_body differs (new has none, current has some)", "current", currentFormattedBody)
 			return false
 		}
 	}
@@ -1112,21 +1112,21 @@ func (b *MattermostToMatrixBridge) areFileAttachmentsIdentical(matrixRoomID, eve
 	// Get current file attachments by looking at related events
 	currentFiles, err := b.getCurrentMatrixFileAttachments(matrixRoomID, eventID)
 	if err != nil {
-		b.API.LogWarn("Failed to get current Matrix file attachments for comparison", "error", err, "event_id", eventID)
+		b.logger.LogWarn("Failed to get current Matrix file attachments for comparison", "error", err, "event_id", eventID)
 		// If we can't get current files, assume they're different to be safe
 		return false
 	}
 
 	// Compare counts first
 	if len(currentFiles) != len(newFiles) {
-		b.API.LogDebug("File attachment count differs", "current_count", len(currentFiles), "new_count", len(newFiles))
+		b.logger.LogDebug("File attachment count differs", "current_count", len(currentFiles), "new_count", len(newFiles))
 		return false
 	}
 
 	// Compare each file attachment
 	for i, newFile := range newFiles {
 		if i >= len(currentFiles) {
-			b.API.LogDebug("New file attachment not found in current attachments", "filename", newFile.Filename)
+			b.logger.LogDebug("New file attachment not found in current attachments", "filename", newFile.Filename)
 			return false
 		}
 
@@ -1135,7 +1135,7 @@ func (b *MattermostToMatrixBridge) areFileAttachmentsIdentical(matrixRoomID, eve
 			currentFile.MxcURI != newFile.MxcURI ||
 			currentFile.MimeType != newFile.MimeType ||
 			currentFile.Size != newFile.Size {
-			b.API.LogDebug("File attachment differs", "current", currentFile, "new", newFile)
+			b.logger.LogDebug("File attachment differs", "current", currentFile, "new", newFile)
 			return false
 		}
 	}

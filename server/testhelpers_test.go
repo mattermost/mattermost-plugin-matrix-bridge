@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
+	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
@@ -14,6 +15,35 @@ import (
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
+
+// testLogger implements Logger interface for testing
+type testLogger struct {
+	t *testing.T
+}
+
+func (l *testLogger) LogDebug(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[DEBUG] %s %v", message, keyValuePairs)
+	}
+}
+
+func (l *testLogger) LogInfo(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[INFO] %s %v", message, keyValuePairs)
+	}
+}
+
+func (l *testLogger) LogWarn(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[WARN] %s %v", message, keyValuePairs)
+	}
+}
+
+func (l *testLogger) LogError(message string, keyValuePairs ...any) {
+	if l.t != nil {
+		l.t.Logf("[ERROR] %s %v", message, keyValuePairs)
+	}
+}
 
 // TestSetup contains common test setup data for integration tests
 type TestSetup struct {
@@ -36,7 +66,47 @@ func setupPluginForTest() *Plugin {
 
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
+	plugin.logger = &testLogger{}
 	return plugin
+}
+
+// setupPluginForTestWithLogger creates a plugin instance with test logger that logs to testing.T
+func setupPluginForTestWithLogger(t *testing.T, api plugin.API) *Plugin {
+	plugin := &Plugin{}
+	plugin.API = api
+	plugin.logger = &testLogger{t: t}
+	return plugin
+}
+
+// setupPluginForTestWithKVStore creates a plugin instance with test logger, API, and KV store
+func setupPluginForTestWithKVStore(t *testing.T, api plugin.API, kvstore kvstore.KVStore) *Plugin {
+	plugin := &Plugin{}
+	plugin.API = api
+	plugin.kvstore = kvstore
+	plugin.logger = &testLogger{t: t}
+	return plugin
+}
+
+// createMatrixClientWithTestLogger creates a matrix client with test logger for testing
+func createMatrixClientWithTestLogger(t *testing.T, serverURL, asToken, remoteID string) *matrix.Client {
+	testLogger := matrix.NewTestLogger(t)
+	return matrix.NewClientWithLogger(serverURL, asToken, remoteID, testLogger)
+}
+
+// TestMatrixClientTestLogger verifies that matrix client uses test logger correctly
+func TestMatrixClientTestLogger(t *testing.T) {
+	// Create a matrix client with test logger
+	client := createMatrixClientWithTestLogger(t, "https://test.example.com", "test_token", "test_remote")
+	
+	// This would trigger logging if the matrix client were to log something
+	// Since we can't easily test actual HTTP calls without a server, this test mainly
+	// verifies that the client is created correctly with a test logger
+	if client == nil {
+		t.Error("Matrix client should not be nil")
+	}
+	
+	// Log success - this confirms the test logger interface is working
+	t.Log("Matrix client created successfully with test logger")
 }
 
 // setupTestPlugin creates a test plugin instance with Matrix container for integration tests
@@ -58,11 +128,11 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.MatrixContainer) 
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
-	plugin.matrixClient = matrix.NewClient(
+	plugin.matrixClient = createMatrixClientWithTestLogger(
+		t,
 		matrixContainer.ServerURL,
 		matrixContainer.ASToken,
 		plugin.remoteID,
-		api,
 	)
 	// Set explicit server domain for testing
 	plugin.matrixClient.SetServerDomain(matrixContainer.ServerDomain)
@@ -79,6 +149,9 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.MatrixContainer) 
 
 	// Set up test data in KV store
 	setupTestKVData(plugin.kvstore, testChannelID, testRoomID)
+
+	// Initialize the logger with test implementation
+	plugin.logger = &testLogger{t: t}
 
 	// Initialize bridges for testing
 	plugin.initBridges()

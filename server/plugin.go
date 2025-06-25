@@ -60,6 +60,9 @@ type Plugin struct {
 	// Logr instance specifically for logging Matrix transactions.
 	transactionLogger logr.Logger
 
+	// logger is the main logger for the plugin
+	logger Logger
+
 	// maxProfileImageSize is the maximum size for profile images in bytes
 	maxProfileImageSize int64
 
@@ -81,6 +84,9 @@ func (p *Plugin) OnActivate() error {
 
 	p.client = pluginapi.NewClient(p.API, p.Driver)
 
+	// Initialize the logger
+	p.logger = NewPluginAPILogger(p.API)
+
 	p.kvstore = kvstore.NewKVStore(p.client)
 
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
@@ -98,7 +104,7 @@ func (p *Plugin) OnActivate() error {
 	p.commandClient = command.NewCommandHandler(p)
 
 	if err := p.registerForSharedChannels(); err != nil {
-		p.API.LogWarn("Failed to register for shared channels", "error", err)
+		p.logger.LogWarn("Failed to register for shared channels", "error", err)
 	}
 
 	job, err := cluster.Schedule(
@@ -120,7 +126,7 @@ func (p *Plugin) OnActivate() error {
 func (p *Plugin) OnDeactivate() error {
 	if p.backgroundJob != nil {
 		if err := p.backgroundJob.Close(); err != nil {
-			p.API.LogError("Failed to close background job", "err", err)
+			p.logger.LogError("Failed to close background job", "err", err)
 		}
 	}
 	return nil
@@ -143,7 +149,7 @@ func (p *Plugin) initMatrixClient() {
 func (p *Plugin) initBridges() {
 	// Create shared utilities
 	sharedUtils := NewBridgeUtils(BridgeUtilsConfig{
-		Logger:              p.API,
+		Logger:              p.logger,
 		API:                 p.API,
 		KVStore:             p.kvstore,
 		MatrixClient:        p.matrixClient,
@@ -192,7 +198,7 @@ func (p *Plugin) registerForSharedChannels() error {
 	// Store the remote ID for use in sync operations
 	p.remoteID = remoteID
 
-	p.API.LogInfo("Successfully registered plugin for shared channels", "remote_id", remoteID)
+	p.logger.LogInfo("Successfully registered plugin for shared channels", "remote_id", remoteID)
 	return nil
 }
 

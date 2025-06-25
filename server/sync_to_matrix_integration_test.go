@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
@@ -62,11 +61,11 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Create Matrix client pointing to test container
-	suite.plugin.matrixClient = matrix.NewClient(
+	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		suite.plugin.remoteID,
-		api,
 	)
 	// Set explicit server domain for testing
 	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
