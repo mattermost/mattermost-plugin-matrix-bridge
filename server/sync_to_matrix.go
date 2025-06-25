@@ -950,7 +950,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 		usernamePattern := fmt.Sprintf(`@%s\b`, regexp.QuoteMeta(replacement.username))
 		usernameRegex := regexp.MustCompile(usernamePattern)
 
-		// Create Matrix mention pill format to match native Matrix mentions  
+		// Create Matrix mention pill format to match native Matrix mentions
 		matrixMentionPill := fmt.Sprintf(`<a href="https://matrix.to/#/%s">@%s</a>`,
 			replacement.ghostUserID, replacement.displayName)
 		updatedHTML = usernameRegex.ReplaceAllString(updatedHTML, matrixMentionPill)
