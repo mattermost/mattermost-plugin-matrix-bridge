@@ -278,7 +278,7 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 
 		if isDM {
 			// Handle DM channel - get or create Matrix DM room
-			matrixRoomIdentifier, err = b.getOrCreateDMRoom(channelID, userIDs)
+			matrixRoomIdentifier, err = b.getOrCreateDMRoom(channelID, userIDs, post.UserId)
 			if err != nil {
 				return errors.Wrap(err, "failed to get or create DM room")
 			}
@@ -1210,7 +1210,7 @@ func (b *MattermostToMatrixBridge) getCurrentMatrixFileAttachments(matrixRoomID,
 }
 
 // getOrCreateDMRoom gets an existing DM room mapping or creates a new Matrix DM room
-func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs []string) (string, error) {
+func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs []string, initiatingUserID string) (string, error) {
 	// First check if we already have a DM room mapping
 	existingRoomID, err := b.getDMRoomID(channelID)
 	if err == nil && existingRoomID != "" {
@@ -1255,8 +1255,14 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 		return "", errors.New("insufficient users for DM room creation")
 	}
 
+	// Get the initiating user's display name for the room name
+	roomName := "Direct Message"
+	if initiatingUser, appErr := b.API.GetUser(initiatingUserID); appErr == nil {
+		roomName = "DM with " + initiatingUser.GetDisplayName(model.ShowFullName)
+	}
+
 	// Create the Matrix DM room
-	matrixRoomID, err := b.matrixClient.CreateDirectRoom(matrixUserIDs)
+	matrixRoomID, err := b.matrixClient.CreateDirectRoom(matrixUserIDs, roomName)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to create Matrix DM room")
 	}

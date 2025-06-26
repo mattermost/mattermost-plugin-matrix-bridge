@@ -184,6 +184,37 @@ func (mc *MatrixContainer) GetEvent(t *testing.T, roomID, eventID string) map[st
 	return result.(map[string]any)
 }
 
+// GetRoomState retrieves the current state of a room
+func (mc *MatrixContainer) GetRoomState(t *testing.T, roomID string) []map[string]any {
+	result, err := mc.makeMatrixRequest("GET", fmt.Sprintf("/_matrix/client/v3/rooms/%s/state", roomID), nil)
+	require.NoError(t, err)
+
+	stateEvents := result.([]any)
+	state := make([]map[string]any, len(stateEvents))
+	for i, event := range stateEvents {
+		state[i] = event.(map[string]any)
+	}
+	return state
+}
+
+// GetRoomName retrieves the name of a room from its state
+func (mc *MatrixContainer) GetRoomName(t *testing.T, roomID string) string {
+	state := mc.GetRoomState(t, roomID)
+
+	// Look for m.room.name event
+	for _, event := range state {
+		if event["type"] == "m.room.name" {
+			if content, ok := event["content"].(map[string]any); ok {
+				if name, exists := content["name"].(string); exists {
+					return name
+				}
+			}
+		}
+	}
+
+	return "" // No name found
+}
+
 // SendMessage sends a message to a room (for testing purposes)
 func (mc *MatrixContainer) SendMessage(t *testing.T, roomID, message string) string {
 	content := map[string]any{

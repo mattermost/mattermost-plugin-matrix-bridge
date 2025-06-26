@@ -569,7 +569,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 }
 
 // CreateDirectRoom creates a Matrix DM room and invites the specified ghost users
-func (c *Client) CreateDirectRoom(ghostUserIDs []string) (string, error) {
+func (c *Client) CreateDirectRoom(ghostUserIDs []string, roomName string) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
 	}
@@ -598,9 +598,16 @@ func (c *Client) CreateDirectRoom(ghostUserIDs []string) (string, error) {
 		},
 	}
 
-	// For group DMs (more than 2 users), add a name
+	// Set room name for better identification
+	if roomName != "" {
+		roomData["name"] = roomName
+	}
+
+	// For group DMs (more than 2 users), adjust settings
 	if len(ghostUserIDs) > 2 {
-		roomData["name"] = "Group Chat"
+		if roomName == "" {
+			roomData["name"] = "Group Chat"
+		}
 		roomData["preset"] = "private_chat"
 		// Group DMs are not considered "direct" in Matrix spec
 		roomData["is_direct"] = false
