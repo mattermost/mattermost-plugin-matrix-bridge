@@ -160,39 +160,18 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 
 // getChannelIDFromMatrixRoom finds the Mattermost channel ID for a Matrix room ID
 func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
-	// Iterate through all channel mappings to find the one that maps to this room
-	keys, err := p.kvstore.ListKeys(0, 1000)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to list kvstore keys")
+	// First check if this is a DM room mapping (reverse lookup)
+	dmMappingKey := "matrix_dm_mapping_" + roomID
+	channelIDBytes, err := p.kvstore.Get(dmMappingKey)
+	if err == nil && len(channelIDBytes) > 0 {
+		return string(channelIDBytes), nil
 	}
 
-	channelMappingPrefix := "channel_mapping_"
-	for _, key := range keys {
-		if strings.HasPrefix(key, channelMappingPrefix) {
-			roomIdentifierBytes, err := p.kvstore.Get(key)
-			if err != nil {
-				continue
-			}
-
-			roomIdentifier := string(roomIdentifierBytes)
-
-			// Check if this mapping points to our room
-			// Handle both room aliases and room IDs
-			if roomIdentifier == roomID {
-				// Direct match with room ID
-				channelID := strings.TrimPrefix(key, channelMappingPrefix)
-				return channelID, nil
-			}
-
-			// If it's a room alias, resolve it to room ID and compare
-			if strings.HasPrefix(roomIdentifier, "#") && p.matrixClient != nil {
-				resolvedRoomID, err := p.matrixClient.ResolveRoomAlias(roomIdentifier)
-				if err == nil && resolvedRoomID == roomID {
-					channelID := strings.TrimPrefix(key, channelMappingPrefix)
-					return channelID, nil
-				}
-			}
-		}
+	// Check for direct room mapping: room_mapping_<roomID> -> channelID
+	roomMappingKey := "room_mapping_" + roomID
+	channelIDBytes, err = p.kvstore.Get(roomMappingKey)
+	if err == nil && len(channelIDBytes) > 0 {
+		return string(channelIDBytes), nil
 	}
 
 	return "", nil // No mapping found

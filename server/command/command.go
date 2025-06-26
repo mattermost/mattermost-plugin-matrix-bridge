@@ -224,7 +224,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		joinStatus = "\n\n⚠️ **Note:** Matrix client not configured. Please configure Matrix settings and manually invite the bridge user."
 	}
 
-	// Save the mapping
+	// Save both directions of the mapping
 	mappingKey := "channel_mapping_" + args.ChannelId
 	err := c.kvstore.Set(mappingKey, []byte(roomIdentifier))
 	if err != nil {
@@ -232,6 +232,24 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         fmt.Sprintf("❌ Failed to save channel mapping. Check plugin logs for details.%s", joinStatus),
+		}
+	}
+
+	// Store reverse mapping: room_mapping_<roomIdentifier> -> channelID
+	roomMappingKey := "room_mapping_" + roomIdentifier
+	err = c.kvstore.Set(roomMappingKey, []byte(args.ChannelId))
+	if err != nil {
+		c.client.Log.Error("Failed to save room mapping", "error", err, "room_identifier", roomIdentifier, "channel_id", args.ChannelId)
+		// Continue anyway - the forward mapping was saved successfully
+	}
+
+	// If roomIdentifier is an alias, also resolve to room ID and store that mapping
+	if strings.HasPrefix(roomIdentifier, "#") && c.matrixClient != nil {
+		if resolvedRoomID, err := c.matrixClient.ResolveRoomAlias(roomIdentifier); err == nil {
+			roomIDMappingKey := "room_mapping_" + resolvedRoomID
+			if err := c.kvstore.Set(roomIDMappingKey, []byte(args.ChannelId)); err != nil {
+				c.client.Log.Error("Failed to save room ID mapping", "error", err, "room_id", resolvedRoomID, "channel_id", args.ChannelId)
+			}
 		}
 	}
 
@@ -377,7 +395,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		}
 	}
 
-	// Automatically map the created room to this channel
+	// Automatically map the created room to this channel (both directions)
 	mappingKey := "channel_mapping_" + args.ChannelId
 	if err := c.kvstore.Set(mappingKey, []byte(roomID)); err != nil {
 		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId, "room_id", roomID)
@@ -385,6 +403,13 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         fmt.Sprintf("✅ **Matrix Room Created:** `%s`\n\n❌ Failed to save channel mapping. Use `/matrix map %s` to map manually.", roomID, roomID),
 		}
+	}
+
+	// Store reverse mapping: room_mapping_<roomID> -> channelID
+	roomMappingKey := "room_mapping_" + roomID
+	if err := c.kvstore.Set(roomMappingKey, []byte(args.ChannelId)); err != nil {
+		c.client.Log.Error("Failed to save room mapping", "error", err, "room_id", roomID, "channel_id", args.ChannelId)
+		// Continue anyway - the forward mapping was saved successfully
 	}
 
 	// Automatically share the channel to enable sync

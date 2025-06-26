@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/pkg/errors"
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
@@ -112,4 +113,66 @@ func (s *BridgeUtils) downloadMatrixFile(mxcURL string) ([]byte, error) {
 func (s *BridgeUtils) isGhostUser(matrixUserID string) bool {
 	// Ghost users follow the pattern: @_mattermost_<user_id>:<server_domain>
 	return strings.HasPrefix(matrixUserID, "@_mattermost_")
+}
+
+// DM channel detection and handling utilities
+
+func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) {
+	channel, appErr := s.API.GetChannel(channelID)
+	if appErr != nil {
+		return false, nil, errors.Wrap(appErr, "failed to get channel")
+	}
+
+	if channel.Type == model.ChannelTypeDirect {
+		// Get the two users in the DM
+		members, appErr := s.API.GetChannelMembers(channelID, 0, 10)
+		if appErr != nil {
+			return false, nil, errors.Wrap(appErr, "failed to get channel members")
+		}
+
+		userIDs := make([]string, len(members))
+		for i, member := range members {
+			userIDs[i] = member.UserId
+		}
+		return true, userIDs, nil
+	}
+
+	if channel.Type == model.ChannelTypeGroup {
+		// Handle group DMs - get all members
+		members, appErr := s.API.GetChannelMembers(channelID, 0, 100) // Larger limit for group DMs
+		if appErr != nil {
+			return false, nil, errors.Wrap(appErr, "failed to get group channel members")
+		}
+
+		userIDs := make([]string, len(members))
+		for i, member := range members {
+			userIDs[i] = member.UserId
+		}
+		return true, userIDs, nil
+	}
+
+	return false, nil, nil
+}
+
+func (s *BridgeUtils) getDMRoomID(channelID string) (string, error) {
+	roomID, err := s.kvstore.Get("dm_mapping_" + channelID)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to get DM room mapping from store")
+	}
+	return string(roomID), nil
+}
+
+func (s *BridgeUtils) setDMRoomMapping(channelID, matrixRoomID string) error {
+	err := s.kvstore.Set("dm_mapping_"+channelID, []byte(matrixRoomID))
+	if err != nil {
+		return errors.Wrap(err, "failed to store DM room mapping")
+	}
+
+	// Also store reverse mapping for Matrix -> Mattermost sync
+	err = s.kvstore.Set("matrix_dm_mapping_"+matrixRoomID, []byte(channelID))
+	if err != nil {
+		return errors.Wrap(err, "failed to store reverse DM room mapping")
+	}
+
+	return nil
 }

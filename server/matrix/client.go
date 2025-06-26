@@ -568,6 +568,86 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 	return response.RoomID, nil
 }
 
+// CreateDirectRoom creates a Matrix DM room and invites the specified ghost users
+func (c *Client) CreateDirectRoom(ghostUserIDs []string) (string, error) {
+	if c.serverURL == "" || c.asToken == "" {
+		return "", errors.New("matrix client not configured")
+	}
+
+	if len(ghostUserIDs) < 2 {
+		return "", errors.New("direct room requires at least 2 users")
+	}
+
+	c.logger.LogDebug("Creating Matrix DM room", "users", ghostUserIDs)
+
+	roomData := map[string]any{
+		"preset":    "private_chat",
+		"is_direct": true,
+		"invite":    ghostUserIDs,
+		"creation_content": map[string]any{
+			"m.federate": true,
+		},
+		"initial_state": []map[string]any{
+			{
+				"type":      "m.room.history_visibility",
+				"state_key": "",
+				"content": map[string]any{
+					"history_visibility": "shared",
+				},
+			},
+		},
+	}
+
+	// For group DMs (more than 2 users), add a name
+	if len(ghostUserIDs) > 2 {
+		roomData["name"] = "Group Chat"
+		roomData["preset"] = "private_chat"
+		// Group DMs are not considered "direct" in Matrix spec
+		roomData["is_direct"] = false
+	}
+
+	jsonData, err := json.Marshal(roomData)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to marshal DM room creation data")
+	}
+
+	url := c.serverURL + "/_matrix/client/v3/createRoom"
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create DM room creation request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send DM room creation request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read DM room creation response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		c.logger.LogError("Matrix DM room creation failed", "status_code", resp.StatusCode, "response", string(body), "users", ghostUserIDs)
+		return "", fmt.Errorf("failed to create DM room: %d %s", resp.StatusCode, string(body))
+	}
+
+	var response struct {
+		RoomID string `json:"room_id"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", errors.Wrap(err, "failed to unmarshal DM room creation response")
+	}
+
+	c.logger.LogInfo("Matrix DM room created successfully", "room_id", response.RoomID, "users", ghostUserIDs)
+	return response.RoomID, nil
+}
+
 // extractServerDomain extracts the hostname from the Matrix server URL
 func (c *Client) extractServerDomain() (string, error) {
 	// Use explicit server domain if set (for testing)

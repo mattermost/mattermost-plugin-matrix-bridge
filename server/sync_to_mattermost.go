@@ -611,10 +611,17 @@ func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string
 		}
 	}
 
-	// Store the mapping
+	// Store both directions of the mapping
 	err = b.kvstore.Set(userMapKey, []byte(createdUser.Id))
 	if err != nil {
 		b.logger.LogWarn("Failed to store Matrix user mapping", "error", err, "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id)
+	}
+
+	// Store reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID
+	mattermostUserKey := "mattermost_user_" + createdUser.Id
+	err = b.kvstore.Set(mattermostUserKey, []byte(matrixUserID))
+	if err != nil {
+		b.logger.LogWarn("Failed to store Mattermost user mapping", "error", err, "mattermost_user_id", createdUser.Id, "matrix_user_id", matrixUserID)
 	}
 
 	b.logger.LogDebug("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
