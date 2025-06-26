@@ -353,15 +353,22 @@ func TestMigrationIntegration(t *testing.T) {
 			"channel_mapping_channel789": "!room012:matrix.org",
 			"channel_mapping_channel345": "#public:matrix.org",
 
-			// DM mappings (should be ignored by this migration)
-			"dm_mapping_dm123": "!dmroom456:matrix.org",
-
 			// Other keys (should be ignored)
 			"ghost_user_user123": "@_mattermost_user123:matrix.org",
 			"some_other_key":     "some_value",
 		}
 
+		// DM mappings (will be migrated by version 2 migration)
+		dmTestData := map[string]string{
+			"dm_mapping_dm123": "!dmroom456:matrix.org",
+		}
+
 		for key, value := range testData {
+			err := plugin.kvstore.Set(key, []byte(value))
+			assert.NoError(t, err)
+		}
+
+		for key, value := range dmTestData {
 			err := plugin.kvstore.Set(key, []byte(value))
 			assert.NoError(t, err)
 		}
@@ -406,10 +413,19 @@ func TestMigrationIntegration(t *testing.T) {
 			assert.Equal(t, expectedValue, string(valueBytes))
 		}
 
-		// Verify unrelated keys were not affected
-		dmBytes, err := plugin.kvstore.Get("dm_mapping_dm123")
+		// Verify DM mappings were migrated to unified prefix
+		dmUnifiedBytes, err := plugin.kvstore.Get("channel_mapping_dm123")
 		assert.NoError(t, err)
-		assert.Equal(t, "!dmroom456:matrix.org", string(dmBytes))
+		assert.Equal(t, "!dmroom456:matrix.org", string(dmUnifiedBytes))
+
+		// Verify old DM mapping was deleted
+		_, err = plugin.kvstore.Get("dm_mapping_dm123")
+		assert.Error(t, err) // Should be deleted
+
+		// Verify reverse DM mapping was created
+		dmReverseBytes, err := plugin.kvstore.Get("room_mapping_!dmroom456:matrix.org")
+		assert.NoError(t, err)
+		assert.Equal(t, "dm123", string(dmReverseBytes))
 
 		otherBytes, err := plugin.kvstore.Get("some_other_key")
 		assert.NoError(t, err)

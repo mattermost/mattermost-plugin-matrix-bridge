@@ -11,7 +11,7 @@ const (
 	// KVStoreVersionKey tracks the current KV store schema version
 	KVStoreVersionKey = "kv_store_version"
 	// CurrentKVStoreVersion is the current version requiring migrations
-	CurrentKVStoreVersion = 1
+	CurrentKVStoreVersion = 2
 	// MigrationBatchSize is the number of keys to process in each batch
 	MigrationBatchSize = 1000
 )
@@ -33,8 +33,16 @@ func (p *Plugin) runKVStoreMigrations() error {
 	if currentVersion < CurrentKVStoreVersion {
 		p.logger.LogInfo("Running KV store migrations", "from_version", currentVersion, "to_version", CurrentKVStoreVersion)
 
-		if err := p.runMigrationToVersion1(); err != nil {
-			return errors.Wrap(err, "failed to migrate to version 1")
+		if currentVersion < 1 {
+			if err := p.runMigrationToVersion1(); err != nil {
+				return errors.Wrap(err, "failed to migrate to version 1")
+			}
+		}
+
+		if currentVersion < 2 {
+			if err := p.runMigrationToVersion2(); err != nil {
+				return errors.Wrap(err, "failed to migrate to version 2")
+			}
 		}
 
 		// Update version marker
@@ -227,5 +235,146 @@ func (p *Plugin) migrateChannelMappings() error {
 	}
 
 	p.logger.LogInfo("Channel mapping migration completed", "total_migrated", totalMigratedCount, "pages_processed", page+1)
+	return nil
+}
+
+// runMigrationToVersion2 migrates to version 2: unify DM and regular channel mappings
+func (p *Plugin) runMigrationToVersion2() error {
+	p.logger.LogInfo("Running migration to version 2: unifying DM and channel mappings")
+
+	// Migrate DM mappings to use unified channel_mapping_ prefix
+	if err := p.migrateDMMappings(); err != nil {
+		return errors.Wrap(err, "failed to migrate DM mappings")
+	}
+
+	return nil
+}
+
+// migrateDMMappings moves DM mappings from dm_mapping_ prefix to channel_mapping_ prefix
+func (p *Plugin) migrateDMMappings() error {
+	p.logger.LogInfo("Migrating DM mappings to unified channel mapping prefix")
+
+	dmMappingPrefix := "dm_mapping_"
+	matrixDMMappingPrefix := "matrix_dm_mapping_"
+	totalMigratedCount := 0
+	totalReverseMigratedCount := 0
+	page := 0
+
+	for {
+		// Get keys in batches
+		keys, err := p.kvstore.ListKeys(page, MigrationBatchSize)
+		if err != nil {
+			return errors.Wrap(err, "failed to list KV store keys")
+		}
+
+		if len(keys) == 0 {
+			break // No more keys
+		}
+
+		batchMigratedCount := 0
+		batchReverseMigratedCount := 0
+		batchProcessedCount := 0
+		for _, key := range keys {
+			if strings.HasPrefix(key, dmMappingPrefix) {
+				batchProcessedCount++
+
+				// Get the Matrix room ID
+				matrixRoomIDBytes, err := p.kvstore.Get(key)
+				if err != nil {
+					p.logger.LogWarn("Failed to get DM mapping during migration", "key", key, "error", err)
+					continue
+				}
+
+				matrixRoomID := string(matrixRoomIDBytes)
+				channelID := strings.TrimPrefix(key, dmMappingPrefix)
+
+				// Create unified mapping: channel_mapping_<channelID> -> matrixRoomID
+				unifiedKey := "channel_mapping_" + channelID
+
+				// Check if unified mapping already exists
+				existingData, err := p.kvstore.Get(unifiedKey)
+				if err == nil && len(existingData) > 0 {
+					p.logger.LogDebug("Unified mapping already exists, skipping", "channel_id", channelID, "matrix_room_id", matrixRoomID)
+				} else {
+					// Create the unified mapping
+					if err := p.kvstore.Set(unifiedKey, []byte(matrixRoomID)); err != nil {
+						p.logger.LogWarn("Failed to create unified DM mapping during migration", "channel_id", channelID, "matrix_room_id", matrixRoomID, "error", err)
+						continue
+					}
+					batchMigratedCount++
+					p.logger.LogDebug("Created unified DM mapping", "channel_id", channelID, "matrix_room_id", matrixRoomID)
+				}
+
+				// Also create reverse mapping for room_mapping_ if it doesn't exist
+				reverseKey := "room_mapping_" + matrixRoomID
+				existingReverse, err := p.kvstore.Get(reverseKey)
+				if err != nil || len(existingReverse) == 0 {
+					if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
+						p.logger.LogWarn("Failed to create reverse DM mapping during migration", "matrix_room_id", matrixRoomID, "channel_id", channelID, "error", err)
+					} else {
+						batchReverseMigratedCount++
+						p.logger.LogDebug("Created reverse DM mapping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
+					}
+				}
+
+				// Remove old DM mapping
+				if err := p.kvstore.Delete(key); err != nil {
+					p.logger.LogWarn("Failed to delete old DM mapping during migration", "key", key, "error", err)
+				} else {
+					p.logger.LogDebug("Deleted old DM mapping", "key", key)
+				}
+			} else if strings.HasPrefix(key, matrixDMMappingPrefix) {
+				// Also migrate reverse DM mappings from matrix_dm_mapping_ to room_mapping_
+				batchProcessedCount++
+
+				// Get the channel ID
+				channelIDBytes, err := p.kvstore.Get(key)
+				if err != nil {
+					p.logger.LogWarn("Failed to get reverse DM mapping during migration", "key", key, "error", err)
+					continue
+				}
+
+				channelID := string(channelIDBytes)
+				matrixRoomID := strings.TrimPrefix(key, matrixDMMappingPrefix)
+
+				// Create unified reverse mapping: room_mapping_<matrixRoomID> -> channelID
+				unifiedReverseKey := "room_mapping_" + matrixRoomID
+
+				// Check if unified reverse mapping already exists
+				existingReverseData, err := p.kvstore.Get(unifiedReverseKey)
+				if err == nil && len(existingReverseData) > 0 {
+					p.logger.LogDebug("Unified reverse mapping already exists, skipping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
+				} else {
+					// Create the unified reverse mapping
+					if err := p.kvstore.Set(unifiedReverseKey, []byte(channelID)); err != nil {
+						p.logger.LogWarn("Failed to create unified reverse DM mapping during migration", "matrix_room_id", matrixRoomID, "channel_id", channelID, "error", err)
+						continue
+					}
+					batchReverseMigratedCount++
+					p.logger.LogDebug("Created unified reverse DM mapping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
+				}
+
+				// Remove old reverse DM mapping
+				if err := p.kvstore.Delete(key); err != nil {
+					p.logger.LogWarn("Failed to delete old reverse DM mapping during migration", "key", key, "error", err)
+				} else {
+					p.logger.LogDebug("Deleted old reverse DM mapping", "key", key)
+				}
+			}
+		}
+
+		totalMigratedCount += batchMigratedCount
+		totalReverseMigratedCount += batchReverseMigratedCount
+		p.logger.LogDebug("Processed DM mapping batch", "page", page, "batch_size", len(keys), "processed_in_batch", batchProcessedCount, "migrated_in_batch", batchMigratedCount, "reverse_migrated_in_batch", batchReverseMigratedCount)
+
+		// If we got fewer keys than the batch size, we've reached the end
+		if len(keys) < MigrationBatchSize {
+			break
+		}
+
+		page++
+	}
+
+	p.logger.LogInfo("DM mapping migration completed", "total_migrated", totalMigratedCount, "total_reverse_migrated", totalReverseMigratedCount, "pages_processed", page+1)
 	return nil
 }

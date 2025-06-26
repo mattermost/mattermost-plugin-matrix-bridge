@@ -1211,8 +1211,8 @@ func (b *MattermostToMatrixBridge) getCurrentMatrixFileAttachments(matrixRoomID,
 
 // getOrCreateDMRoom gets an existing DM room mapping or creates a new Matrix DM room
 func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs []string, initiatingUserID string) (string, error) {
-	// First check if we already have a DM room mapping
-	existingRoomID, err := b.getDMRoomID(channelID)
+	// First check if we already have a room mapping (unified for all channels)
+	existingRoomID, err := b.getMatrixRoomID(channelID)
 	if err == nil && existingRoomID != "" {
 		b.logger.LogDebug("Found existing DM room mapping", "channel_id", channelID, "matrix_room_id", existingRoomID)
 		return existingRoomID, nil
@@ -1267,8 +1267,8 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 		return "", errors.Wrap(err, "failed to create Matrix DM room")
 	}
 
-	// Store the mapping
-	err = b.setDMRoomMapping(channelID, matrixRoomID)
+	// Store the mapping using unified channel mapping
+	err = b.setChannelRoomMapping(channelID, matrixRoomID)
 	if err != nil {
 		b.logger.LogError("Failed to store DM room mapping", "error", err, "channel_id", channelID, "matrix_room_id", matrixRoomID)
 		// Continue anyway - the room was created successfully

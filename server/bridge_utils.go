@@ -58,10 +58,54 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 func (s *BridgeUtils) getMatrixRoomID(channelID string) (string, error) {
 	roomID, err := s.kvstore.Get("channel_mapping_" + channelID)
 	if err != nil {
-		// Key not found is expected for DM channels - return empty string
+		// Key not found is expected for unmapped channels - return empty string
 		return "", nil
 	}
 	return string(roomID), nil
+}
+
+func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier string) error {
+	// Always resolve to room ID for consistent forward mapping storage
+	var roomID string
+	var err error
+
+	if strings.HasPrefix(matrixRoomIdentifier, "#") {
+		// Resolve alias to room ID
+		roomID, err = s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+		if err != nil {
+			s.logger.LogWarn("Failed to resolve room alias during mapping creation", "room_alias", matrixRoomIdentifier, "error", err)
+			// Fallback: store the alias (better than failing completely)
+			roomID = matrixRoomIdentifier
+		}
+	} else {
+		// Already a room ID
+		roomID = matrixRoomIdentifier
+	}
+
+	// Store forward mapping: channel_mapping_<channelID> -> room_id (always room ID)
+	err = s.kvstore.Set("channel_mapping_"+channelID, []byte(roomID))
+	if err != nil {
+		return errors.Wrap(err, "failed to store channel room mapping")
+	}
+
+	// Store reverse mapping for the room ID
+	err = s.kvstore.Set("room_mapping_"+roomID, []byte(channelID))
+	if err != nil {
+		return errors.Wrap(err, "failed to store reverse room mapping")
+	}
+
+	// If we started with an alias, also create reverse mapping for the alias
+	// This allows lookups by both alias and room ID
+	if strings.HasPrefix(matrixRoomIdentifier, "#") && roomID != matrixRoomIdentifier {
+		err = s.kvstore.Set("room_mapping_"+matrixRoomIdentifier, []byte(channelID))
+		if err != nil {
+			s.logger.LogWarn("Failed to create alias reverse mapping", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "error", err)
+		} else {
+			s.logger.LogDebug("Created reverse mappings for alias", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "room_id", roomID)
+		}
+	}
+
+	return nil
 }
 
 func (s *BridgeUtils) getConfiguration() *configuration {
@@ -153,27 +197,4 @@ func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) 
 	}
 
 	return false, nil, nil
-}
-
-func (s *BridgeUtils) getDMRoomID(channelID string) (string, error) {
-	roomID, err := s.kvstore.Get("dm_mapping_" + channelID)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to get DM room mapping from store")
-	}
-	return string(roomID), nil
-}
-
-func (s *BridgeUtils) setDMRoomMapping(channelID, matrixRoomID string) error {
-	err := s.kvstore.Set("dm_mapping_"+channelID, []byte(matrixRoomID))
-	if err != nil {
-		return errors.Wrap(err, "failed to store DM room mapping")
-	}
-
-	// Also store reverse mapping for Matrix -> Mattermost sync
-	err = s.kvstore.Set("matrix_dm_mapping_"+matrixRoomID, []byte(channelID))
-	if err != nil {
-		return errors.Wrap(err, "failed to store reverse DM room mapping")
-	}
-
-	return nil
 }

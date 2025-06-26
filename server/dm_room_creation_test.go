@@ -140,8 +140,8 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 	err = plugin.mattermostToMatrixBridge.SyncPostToMatrix(testPost, dmChannelID)
 	require.NoError(suite.T(), err)
 
-	// Verify that a DM room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.getDMRoomID(dmChannelID)
+	// Verify that a room mapping was created
+	dmRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(dmChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 
@@ -279,8 +279,8 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 	err = plugin.mattermostToMatrixBridge.SyncPostToMatrix(testPost, groupDMChannelID)
 	require.NoError(suite.T(), err)
 
-	// Verify that a DM room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.getDMRoomID(groupDMChannelID)
+	// Verify that a room mapping was created
+	dmRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(groupDMChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 
@@ -404,8 +404,8 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 	err = plugin.mattermostToMatrixBridge.SyncPostToMatrix(testPost, dmChannelID)
 	require.NoError(suite.T(), err)
 
-	// Verify that a DM room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.getDMRoomID(dmChannelID)
+	// Verify that a room mapping was created
+	dmRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(dmChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 

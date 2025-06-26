@@ -119,28 +119,28 @@ func TestDMRoomMapping(t *testing.T) {
 		channelID := model.NewId()
 		matrixRoomID := "!dmroom:matrix.example.com"
 
-		// Test setting DM room mapping
-		err := plugin.mattermostToMatrixBridge.setDMRoomMapping(channelID, matrixRoomID)
+		// Test setting room mapping (unified for all channels)
+		err := plugin.mattermostToMatrixBridge.setChannelRoomMapping(channelID, matrixRoomID)
 		assert.NoError(t, err)
 
-		// Test getting DM room mapping
-		retrievedRoomID, err := plugin.mattermostToMatrixBridge.getDMRoomID(channelID)
+		// Test getting room mapping
+		retrievedRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(channelID)
 		assert.NoError(t, err)
 		assert.Equal(t, matrixRoomID, retrievedRoomID)
 
 		// Test reverse mapping (Matrix -> Mattermost)
-		dmMappingKey := "matrix_dm_mapping_" + matrixRoomID
-		channelIDBytes, err := plugin.kvstore.Get(dmMappingKey)
+		roomMappingKey := "room_mapping_" + matrixRoomID
+		channelIDBytes, err := plugin.kvstore.Get(roomMappingKey)
 		assert.NoError(t, err)
 		assert.Equal(t, channelID, string(channelIDBytes))
 	})
 
-	t.Run("GetNonexistentDMRoomMapping", func(t *testing.T) {
+	t.Run("GetNonexistentRoomMapping", func(t *testing.T) {
 		nonexistentChannelID := model.NewId()
 
-		// Test getting nonexistent DM room mapping
-		roomID, err := plugin.mattermostToMatrixBridge.getDMRoomID(nonexistentChannelID)
-		assert.Error(t, err)
+		// Test getting nonexistent room mapping
+		roomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(nonexistentChannelID)
+		assert.NoError(t, err) // getMatrixRoomID returns empty string, not error for missing keys
 		assert.Empty(t, roomID)
 	})
 }
