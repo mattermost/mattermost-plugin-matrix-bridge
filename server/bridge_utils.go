@@ -58,7 +58,7 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 func (s *BridgeUtils) getMatrixRoomID(channelID string) (string, error) {
 	roomID, err := s.kvstore.Get("channel_mapping_" + channelID)
 	if err != nil {
-		// Key not found is expected for unmapped channels - return empty string
+		// KV store error (typically key not found) - unmapped channels are expected
 		return "", nil
 	}
 	return string(roomID), nil

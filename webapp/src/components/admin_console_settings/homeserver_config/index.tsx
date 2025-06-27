@@ -6,22 +6,15 @@ import React, {useEffect, useState} from 'react';
 interface Props {
     label: string;
     helpText?: React.ReactNode;
-    config?: AdminConsoleConfig;
-}
-
-interface AdminConsoleConfig {
-    matrix_server_url?: string;
 }
 
 const HomeserverConfig: React.FC<Props> = ({label, helpText}) => {
     const [matrixDomain, setMatrixDomain] = useState<string>('MYSERVER_DOMAIN');
 
     useEffect(() => {
-        const checkMatrixServerUrl = () => {
-            // Get current Matrix Server URL value
-            const serverUrlInput = document.querySelector('input[id$="matrix_server_url"]') as HTMLInputElement;
-            const serverUrl = serverUrlInput?.value?.trim();
+        const serverUrlInput = document.querySelector('input[id$="matrix_server_url"]') as HTMLInputElement;
 
+        const updateMatrixDomain = (serverUrl: string) => {
             if (serverUrl) {
                 try {
                     const url = new URL(serverUrl);
@@ -35,11 +28,26 @@ const HomeserverConfig: React.FC<Props> = ({label, helpText}) => {
             }
         };
 
-        // Check initially and then periodically
-        checkMatrixServerUrl();
-        const interval = setInterval(checkMatrixServerUrl, 1000);
+        if (serverUrlInput) {
+            // Set initial value
+            updateMatrixDomain(serverUrlInput.value?.trim() || '');
 
-        return () => clearInterval(interval);
+            const handleInputChange = (event: Event) => {
+                const target = event.target as HTMLInputElement;
+                updateMatrixDomain(target.value?.trim() || '');
+            };
+
+            // Listen for both input and change events to catch all updates
+            serverUrlInput.addEventListener('input', handleInputChange);
+            serverUrlInput.addEventListener('change', handleInputChange);
+
+            return () => {
+                serverUrlInput.removeEventListener('input', handleInputChange);
+                serverUrlInput.removeEventListener('change', handleInputChange);
+            };
+        }
+
+        return undefined;
     }, []);
 
     const yamlConfig = `room_list_publication_rules:
