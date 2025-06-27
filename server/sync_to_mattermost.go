@@ -636,6 +636,18 @@ func (b *MatrixToMattermostBridge) addUserToChannelTeam(userID, channelID string
 		return errors.Wrap(appErr, "failed to get channel")
 	}
 
+	// DM and group DM channels don't belong to teams
+	if channel.Type == model.ChannelTypeDirect || channel.Type == model.ChannelTypeGroup {
+		b.logger.LogDebug("Skipping team membership for DM channel", "user_id", userID, "channel_id", channelID, "channel_type", channel.Type)
+		return nil
+	}
+
+	// Skip if team ID is empty
+	if channel.TeamId == "" {
+		b.logger.LogDebug("Skipping team membership for channel with no team", "user_id", userID, "channel_id", channelID)
+		return nil
+	}
+
 	// Check if user is already a member of the team
 	_, appErr = b.API.GetTeamMember(channel.TeamId, userID)
 	if appErr == nil {

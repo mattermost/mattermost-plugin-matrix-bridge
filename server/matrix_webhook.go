@@ -124,14 +124,33 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 
 // processMatrixEvent routes a single Matrix event to the appropriate handler
 func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
-	// Only process events from rooms we have mapped to Mattermost channels
+	// Check if we have an existing mapping for this room
 	channelID, err := p.getChannelIDFromMatrixRoom(event.RoomID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get channel ID from Matrix room")
 	}
+
+	// If no existing mapping, check if this is a DM that we should create
 	if channelID == "" {
-		p.logger.LogDebug("Ignoring event from unmapped Matrix room", "room_id", event.RoomID, "event_type", event.Type)
-		return nil // Not an error - just not mapped
+		// Only attempt DM creation for room membership events or messages
+		if event.Type == "m.room.member" || event.Type == "m.room.message" {
+			// Check if this is a Matrix-initiated DM that we should bridge
+			newChannelID, err := p.handleMatrixInitiatedDM(event)
+			if err != nil {
+				p.logger.LogWarn("Failed to handle Matrix-initiated DM", "room_id", event.RoomID, "error", err)
+				return nil // Don't error - just skip processing
+			}
+			if newChannelID != "" {
+				channelID = newChannelID
+				p.logger.LogInfo("Created new DM channel for Matrix room", "room_id", event.RoomID, "channel_id", channelID)
+			}
+		}
+
+		// If still no mapping, ignore the event
+		if channelID == "" {
+			p.logger.LogDebug("Ignoring event from unmapped Matrix room", "room_id", event.RoomID, "event_type", event.Type)
+			return nil // Not an error - just not mapped
+		}
 	}
 
 	// Skip events from our own ghost users to prevent loops
@@ -160,16 +179,9 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 
 // getChannelIDFromMatrixRoom finds the Mattermost channel ID for a Matrix room ID
 func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
-	// First check if this is a DM room mapping (reverse lookup)
-	dmMappingKey := "matrix_dm_mapping_" + roomID
-	channelIDBytes, err := p.kvstore.Get(dmMappingKey)
-	if err == nil && len(channelIDBytes) > 0 {
-		return string(channelIDBytes), nil
-	}
-
-	// Check for direct room mapping: room_mapping_<roomID> -> channelID
+	// Check for room mapping: room_mapping_<roomID> -> channelID
 	roomMappingKey := "room_mapping_" + roomID
-	channelIDBytes, err = p.kvstore.Get(roomMappingKey)
+	channelIDBytes, err := p.kvstore.Get(roomMappingKey)
 	if err == nil && len(channelIDBytes) > 0 {
 		return string(channelIDBytes), nil
 	}
@@ -198,4 +210,143 @@ func (p *Plugin) isGhostUser(userID string) bool {
 	ghostUserSuffix := fmt.Sprintf(":%s", serverDomain)
 
 	return strings.HasPrefix(userID, ghostUserPrefix) && strings.HasSuffix(userID, ghostUserSuffix)
+}
+
+// handleMatrixInitiatedDM checks if an unmapped Matrix room is a potential DM that should be bridged
+// This uses a heuristic approach based on the event information available
+func (p *Plugin) handleMatrixInitiatedDM(event MatrixEvent) (string, error) {
+	// Handle different event types that might indicate DM creation
+	switch event.Type {
+	case "m.room.member":
+		return p.handleMatrixMemberDM(event)
+	case "m.room.message":
+		return p.handleMatrixMessageDM(event)
+	default:
+		return "", nil // Only handle member and message events
+	}
+}
+
+// handleMatrixMemberDM processes member events to detect DM room creation with ghost users
+func (p *Plugin) handleMatrixMemberDM(event MatrixEvent) (string, error) {
+	// Only handle join events to avoid creating channels for leave/invite events
+	if event.Content == nil {
+		p.logger.LogDebug("Member event has no content", "room_id", event.RoomID, "event_id", event.EventID)
+		return "", nil
+	}
+
+	membership, ok := event.Content["membership"].(string)
+	if !ok || (membership != "join" && membership != "invite") {
+		p.logger.LogDebug("Member event is not a join or invite", "room_id", event.RoomID, "membership", membership)
+		return "", nil
+	}
+
+	// The state_key in member events is the user being affected
+	if event.StateKey == nil {
+		p.logger.LogDebug("Member event has no state_key", "room_id", event.RoomID, "event_id", event.EventID)
+		return "", nil
+	}
+
+	targetUserID := *event.StateKey  // User being invited/joined
+	actingUserID := event.Sender     // User doing the invite/join
+
+	p.logger.LogDebug("Processing member event", "room_id", event.RoomID, "membership", membership, "target_user", targetUserID, "acting_user", actingUserID)
+
+	// Check if either user is one of our ghost users
+	var ghostUserID, matrixUserID string
+	if p.isGhostUser(targetUserID) {
+		ghostUserID = targetUserID
+		matrixUserID = actingUserID
+		p.logger.LogDebug("Detected ghost user as target", "room_id", event.RoomID, "ghost_user", ghostUserID, "matrix_user", matrixUserID, "membership", membership)
+	} else if p.isGhostUser(actingUserID) {
+		ghostUserID = actingUserID
+		matrixUserID = targetUserID
+		p.logger.LogDebug("Detected ghost user as actor", "room_id", event.RoomID, "ghost_user", ghostUserID, "matrix_user", matrixUserID, "membership", membership)
+	} else {
+		// Neither user is a ghost user - not a DM we care about
+		p.logger.LogDebug("Neither user is a ghost user", "room_id", event.RoomID, "target_user", targetUserID, "acting_user", actingUserID, "membership", membership)
+		return "", nil
+	}
+
+	return p.createDMChannelForGhostUser(event.RoomID, ghostUserID, matrixUserID)
+}
+
+// handleMatrixMessageDM processes message events that might be in a DM with a ghost user
+func (p *Plugin) handleMatrixMessageDM(event MatrixEvent) (string, error) {
+	// For message events, we can only work with the sender
+	// If the sender is not a ghost user, we can't determine if this should be a DM
+	matrixUserID := event.Sender
+
+	// We can't reliably determine DM participants from a message event alone
+	// without querying Matrix for room members. Skip for now.
+	p.logger.LogDebug("Cannot determine DM participants from message event alone", "room_id", event.RoomID, "sender", matrixUserID)
+	return "", nil
+}
+
+// createDMChannelForGhostUser creates a Mattermost DM channel for a Matrix DM involving a verified ghost user
+func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID string) (string, error) {
+	// Extract Mattermost user ID from ghost user
+	mattermostUserID := p.extractMattermostUserIDFromGhost(ghostUserID)
+	if mattermostUserID == "" {
+		return "", errors.New("failed to extract Mattermost user ID from ghost user")
+	}
+
+	// Verify that this ghost user exists in our KV store (meaning we created it)
+	ghostUserKey := "ghost_user_" + mattermostUserID
+	ghostUserData, err := p.kvstore.Get(ghostUserKey)
+	if err != nil || len(ghostUserData) == 0 {
+		p.logger.LogDebug("Rejecting DM creation for unrecognized ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
+		return "", nil // Not our ghost user - reject silently
+	}
+
+	// Verify the stored ghost user ID matches what we expect
+	storedGhostUserID := string(ghostUserData)
+	if storedGhostUserID != ghostUserID {
+		p.logger.LogWarn("Ghost user ID mismatch in KV store", "expected", ghostUserID, "stored", storedGhostUserID, "mattermost_user_id", mattermostUserID)
+		return "", nil // ID mismatch - reject silently
+	}
+
+	// Get the Mattermost user to verify they exist
+	mattermostUser, appErr := p.API.GetUser(mattermostUserID)
+	if appErr != nil {
+		return "", errors.Wrap(appErr, "failed to get Mattermost user")
+	}
+
+	// Get or create the Matrix user in Mattermost
+	bridgeUtils := NewBridgeUtils(BridgeUtilsConfig{
+		Logger:       p.logger,
+		API:          p.API,
+		KVStore:      p.kvstore,
+		MatrixClient: p.matrixClient,
+		RemoteID:     p.remoteID,
+		ConfigGetter: p,
+	})
+
+	matrixToMattermostBridge := NewMatrixToMattermostBridge(bridgeUtils)
+
+	// Create or get the Matrix user in Mattermost (using a dummy team - will be fixed by addUserToChannelTeam)
+	mattermostMatrixUserID, err := matrixToMattermostBridge.getOrCreateMattermostUser(matrixUserID, "")
+	if err != nil {
+		return "", errors.Wrap(err, "failed to get or create Mattermost user for Matrix user")
+	}
+
+	// Create DM channel in Mattermost between the original Mattermost user and the Matrix user
+	dmChannel, appErr := p.API.GetDirectChannel(mattermostUserID, mattermostMatrixUserID)
+	if appErr != nil {
+		return "", errors.Wrap(appErr, "failed to create DM channel in Mattermost")
+	}
+
+	// Store the mapping between Matrix room and Mattermost channel
+	err = bridgeUtils.setChannelRoomMapping(dmChannel.Id, roomID)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to store channel room mapping")
+	}
+
+	p.logger.LogInfo("Created Matrix-initiated DM",
+		"matrix_room_id", roomID,
+		"mattermost_channel_id", dmChannel.Id,
+		"matrix_user", matrixUserID,
+		"mattermost_user", mattermostUser.Username,
+		"ghost_user", ghostUserID)
+
+	return dmChannel.Id, nil
 }
