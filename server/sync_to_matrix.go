@@ -263,14 +263,30 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 		return b.deletePostFromMatrix(post, channelID)
 	}
 
+	// First check if this is a regular channel with existing mapping
 	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier")
 	}
 
+	// If no regular room mapping, check if this is a DM channel
 	if matrixRoomIdentifier == "" {
-		b.logger.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
-		return nil
+		isDM, userIDs, err := b.isDirectChannel(channelID)
+		if err != nil {
+			return errors.Wrap(err, "failed to check if channel is DM")
+		}
+
+		if isDM {
+			// Handle DM channel - get or create Matrix DM room
+			matrixRoomIdentifier, err = b.getOrCreateDMRoom(channelID, userIDs, post.UserId)
+			if err != nil {
+				return errors.Wrap(err, "failed to get or create DM room")
+			}
+		} else {
+			// Not a DM and no regular mapping - skip
+			b.logger.LogWarn("No Matrix room mapped for channel", "channel_id", channelID)
+			return nil
+		}
 	}
 
 	// Resolve room alias to room ID if needed
@@ -912,8 +928,8 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 			b.logger.LogDebug("Found existing Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
 		} else {
 			// Check if this is a Matrix user represented in Mattermost (Matrix user → Mattermost user)
-			originalMatrixUserID := b.getOriginalMatrixUserID(user.Id)
-			if originalMatrixUserID != "" {
+			originalMatrixUserID, err := b.getMatrixUserIDFromMattermostUser(user.Id)
+			if err == nil && originalMatrixUserID != "" {
 				matrixUserID = originalMatrixUserID
 				displayName = user.GetDisplayName(model.ShowFullName)
 				if displayName == "" {
@@ -984,35 +1000,6 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 	content["format"] = "org.matrix.custom.html"
 
 	b.logger.LogDebug("Added Matrix mentions to message", "post_id", post.Id, "mentioned_users", len(matrixUserIDs), "matrix_user_ids", matrixUserIDs, "m_mentions", mentionsField)
-}
-
-// getOriginalMatrixUserID looks up the original Matrix user ID for a Mattermost user created from Matrix
-func (b *MattermostToMatrixBridge) getOriginalMatrixUserID(mattermostUserID string) string {
-	// Search through all matrix_user_* mappings to find one that points to this Mattermost user
-	keys, err := b.kvstore.ListKeys(0, 1000)
-	if err != nil {
-		b.logger.LogWarn("Failed to list kvstore keys for Matrix user lookup", "error", err, "mattermost_user_id", mattermostUserID)
-		return ""
-	}
-
-	matrixUserPrefix := "matrix_user_"
-	for _, key := range keys {
-		if strings.HasPrefix(key, matrixUserPrefix) {
-			userIDBytes, err := b.kvstore.Get(key)
-			if err != nil {
-				continue
-			}
-
-			if string(userIDBytes) == mattermostUserID {
-				// Found the mapping - extract Matrix user ID from the key
-				matrixUserID := strings.TrimPrefix(key, matrixUserPrefix)
-				b.logger.LogDebug("Found original Matrix user ID", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID)
-				return matrixUserID
-			}
-		}
-	}
-
-	return ""
 }
 
 // isMatrixContentIdentical compares current Matrix event content with new content to detect if update is needed
@@ -1220,4 +1207,89 @@ func (b *MattermostToMatrixBridge) getCurrentMatrixFileAttachments(matrixRoomID,
 	}
 
 	return files, nil
+}
+
+// getOrCreateDMRoom gets an existing DM room mapping or creates a new Matrix DM room
+func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs []string, initiatingUserID string) (string, error) {
+	// First check if we already have a room mapping (unified for all channels)
+	existingRoomID, err := b.getMatrixRoomID(channelID)
+	if err == nil && existingRoomID != "" {
+		b.logger.LogDebug("Found existing DM room mapping", "channel_id", channelID, "matrix_room_id", existingRoomID)
+		return existingRoomID, nil
+	}
+
+	b.logger.LogInfo("Creating new Matrix DM room", "channel_id", channelID, "user_count", len(userIDs))
+
+	// For DMs, handle both local and remote users appropriately
+	var matrixUserIDs []string
+	for _, userID := range userIDs {
+		user, appErr := b.API.GetUser(userID)
+		if appErr != nil {
+			b.logger.LogWarn("Failed to get user for DM room creation", "user_id", userID, "error", appErr)
+			continue
+		}
+
+		if user.IsRemote() {
+			// This is a Matrix user that appears as remote in Mattermost
+			// Look up their original Matrix user ID via reverse mapping
+			matrixUserID, err := b.getMatrixUserIDFromMattermostUser(userID)
+			if err == nil && matrixUserID != "" {
+				b.logger.LogDebug("Using existing Matrix user ID for DM", "mattermost_user_id", userID, "matrix_user_id", matrixUserID)
+				matrixUserIDs = append(matrixUserIDs, matrixUserID)
+			} else {
+				b.logger.LogWarn("Could not find Matrix user ID for remote user", "user_id", userID, "username", user.Username, "error", err)
+			}
+		} else {
+			// This is a local Mattermost user - create or get ghost user
+			ghostUserID, err := b.CreateOrGetGhostUser(userID)
+			if err != nil {
+				b.logger.LogWarn("Failed to create ghost user for DM", "user_id", userID, "error", err)
+				continue
+			}
+			b.logger.LogDebug("Created ghost user for DM", "mattermost_user_id", userID, "ghost_user_id", ghostUserID)
+			matrixUserIDs = append(matrixUserIDs, ghostUserID)
+		}
+	}
+
+	if len(matrixUserIDs) < 2 {
+		return "", errors.New("insufficient users for DM room creation")
+	}
+
+	// Get the initiating user's display name for the room name
+	roomName := "Direct Message"
+	if initiatingUser, appErr := b.API.GetUser(initiatingUserID); appErr == nil {
+		roomName = "DM with " + initiatingUser.GetDisplayName(model.ShowFullName)
+	}
+
+	// Create the Matrix DM room
+	matrixRoomID, err := b.matrixClient.CreateDirectRoom(matrixUserIDs, roomName)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create Matrix DM room")
+	}
+
+	// Store the mapping using unified channel mapping
+	err = b.setChannelRoomMapping(channelID, matrixRoomID)
+	if err != nil {
+		b.logger.LogError("Failed to store DM room mapping", "error", err, "channel_id", channelID, "matrix_room_id", matrixRoomID)
+		// Continue anyway - the room was created successfully
+	}
+
+	b.logger.LogInfo("Successfully created Matrix DM room", "channel_id", channelID, "matrix_room_id", matrixRoomID, "matrix_users", matrixUserIDs)
+	return matrixRoomID, nil
+}
+
+// getMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
+func (b *MattermostToMatrixBridge) getMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
+	// Use Mattermost user ID as key: mattermost_user_<mattermostUserID> -> matrixUserID
+	mattermostUserKey := "mattermost_user_" + mattermostUserID
+	matrixUserIDBytes, err := b.kvstore.Get(mattermostUserKey)
+	if err != nil {
+		return "", errors.Wrap(err, "no Matrix user ID mapping found for Mattermost user")
+	}
+
+	if len(matrixUserIDBytes) == 0 {
+		return "", errors.New("empty Matrix user ID mapping found")
+	}
+
+	return string(matrixUserIDBytes), nil
 }

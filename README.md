@@ -102,7 +102,6 @@ make deploy
 
 - Support multiple Matrix instances
 - Expose more Share Channels APIs in plugin API
-- Fix Matrix mention pill display
 - Improve support for private, encrypted channels
 
 ## License

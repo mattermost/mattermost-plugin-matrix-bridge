@@ -98,6 +98,11 @@ func (p *Plugin) OnActivate() error {
 
 	p.initMatrixClient()
 
+	// Run KV store migrations before initializing bridges
+	if err := p.runKVStoreMigrations(); err != nil {
+		return errors.Wrap(err, "failed to run KV store migrations")
+	}
+
 	// Initialize bridge components
 	p.initBridges()
 

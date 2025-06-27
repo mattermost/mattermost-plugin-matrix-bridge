@@ -611,10 +611,19 @@ func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string
 		}
 	}
 
-	// Store the mapping
+	// Store both directions of the mapping
 	err = b.kvstore.Set(userMapKey, []byte(createdUser.Id))
 	if err != nil {
 		b.logger.LogWarn("Failed to store Matrix user mapping", "error", err, "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id)
+	}
+
+	// Store reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID
+	// This mapping is critical for user lookups - treat failure as a serious issue
+	mattermostUserKey := "mattermost_user_" + createdUser.Id
+	err = b.kvstore.Set(mattermostUserKey, []byte(matrixUserID))
+	if err != nil {
+		b.logger.LogError("Failed to store critical reverse user mapping", "error", err, "mattermost_user_id", createdUser.Id, "matrix_user_id", matrixUserID)
+		// Continue execution but this could cause lookup issues later
 	}
 
 	b.logger.LogDebug("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
@@ -627,6 +636,18 @@ func (b *MatrixToMattermostBridge) addUserToChannelTeam(userID, channelID string
 	channel, appErr := b.API.GetChannel(channelID)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to get channel")
+	}
+
+	// DM and group DM channels don't belong to teams
+	if channel.Type == model.ChannelTypeDirect || channel.Type == model.ChannelTypeGroup {
+		b.logger.LogDebug("Skipping team membership for DM channel", "user_id", userID, "channel_id", channelID, "channel_type", channel.Type)
+		return nil
+	}
+
+	// Skip if team ID is empty
+	if channel.TeamId == "" {
+		b.logger.LogDebug("Skipping team membership for channel with no team", "user_id", userID, "channel_id", channelID)
+		return nil
 	}
 
 	// Check if user is already a member of the team
@@ -668,8 +689,12 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 	sanitized := strings.ToLower(baseUsername)
 	sanitized = regexp.MustCompile(`[^a-z0-9\-_]`).ReplaceAllString(sanitized, "_")
 
-	// Follow Shared Channels convention: remote_name:username_sanitized
-	username := "matrix:" + sanitized
+	// Get the configured username prefix for this server
+	config := b.getConfiguration()
+	prefix := config.GetMatrixUsernamePrefixForServer(config.MatrixServerURL)
+
+	// Follow Shared Channels convention: prefix:username_sanitized
+	username := prefix + ":" + sanitized
 
 	// Ensure uniqueness by checking if username exists
 	counter := 1
@@ -688,7 +713,7 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 		// Prevent infinite loop
 		if counter > 1000 {
 			// Fallback to using counter
-			username = fmt.Sprintf("matrix:user_%d", counter)
+			username = fmt.Sprintf("%s:user_%d", prefix, counter)
 			break
 		}
 	}

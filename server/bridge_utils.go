@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/pkg/errors"
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
@@ -57,9 +58,54 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 func (s *BridgeUtils) getMatrixRoomID(channelID string) (string, error) {
 	roomID, err := s.kvstore.Get("channel_mapping_" + channelID)
 	if err != nil {
-		return "", errors.Wrap(err, "failed to get room mapping from store")
+		// KV store error (typically key not found) - unmapped channels are expected
+		return "", nil
 	}
 	return string(roomID), nil
+}
+
+func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier string) error {
+	// Always resolve to room ID for consistent forward mapping storage
+	var roomID string
+	var err error
+
+	if strings.HasPrefix(matrixRoomIdentifier, "#") {
+		// Resolve alias to room ID
+		roomID, err = s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+		if err != nil {
+			s.logger.LogWarn("Failed to resolve room alias during mapping creation", "room_alias", matrixRoomIdentifier, "error", err)
+			// Fallback: store the alias (better than failing completely)
+			roomID = matrixRoomIdentifier
+		}
+	} else {
+		// Already a room ID
+		roomID = matrixRoomIdentifier
+	}
+
+	// Store forward mapping: channel_mapping_<channelID> -> room_id (always room ID)
+	err = s.kvstore.Set("channel_mapping_"+channelID, []byte(roomID))
+	if err != nil {
+		return errors.Wrap(err, "failed to store channel room mapping")
+	}
+
+	// Store reverse mapping for the room ID
+	err = s.kvstore.Set("room_mapping_"+roomID, []byte(channelID))
+	if err != nil {
+		return errors.Wrap(err, "failed to store reverse room mapping")
+	}
+
+	// If we started with an alias, also create reverse mapping for the alias
+	// This allows lookups by both alias and room ID
+	if strings.HasPrefix(matrixRoomIdentifier, "#") && roomID != matrixRoomIdentifier {
+		err = s.kvstore.Set("room_mapping_"+matrixRoomIdentifier, []byte(channelID))
+		if err != nil {
+			s.logger.LogWarn("Failed to create alias reverse mapping", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "error", err)
+		} else {
+			s.logger.LogDebug("Created reverse mappings for alias", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "room_id", roomID)
+		}
+	}
+
+	return nil
 }
 
 func (s *BridgeUtils) getConfiguration() *configuration {
@@ -112,4 +158,54 @@ func (s *BridgeUtils) downloadMatrixFile(mxcURL string) ([]byte, error) {
 func (s *BridgeUtils) isGhostUser(matrixUserID string) bool {
 	// Ghost users follow the pattern: @_mattermost_<user_id>:<server_domain>
 	return strings.HasPrefix(matrixUserID, "@_mattermost_")
+}
+
+// DM channel detection and handling utilities
+
+func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) {
+	channel, appErr := s.API.GetChannel(channelID)
+	if appErr != nil {
+		return false, nil, errors.Wrap(appErr, "failed to get channel")
+	}
+
+	if channel.Type == model.ChannelTypeDirect {
+		// Get the two users in the DM
+		members, appErr := s.API.GetChannelMembers(channelID, 0, 10)
+		if appErr != nil {
+			return false, nil, errors.Wrap(appErr, "failed to get channel members")
+		}
+
+		userIDs := make([]string, len(members))
+		for i, member := range members {
+			userIDs[i] = member.UserId
+		}
+		return true, userIDs, nil
+	}
+
+	if channel.Type == model.ChannelTypeGroup {
+		// Handle group DMs - get all members with pagination to handle large groups
+		var allMembers []model.ChannelMember
+		offset := 0
+		limit := 100
+
+		for {
+			pageMembers, appErr := s.API.GetChannelMembers(channelID, offset, limit)
+			if appErr != nil {
+				return false, nil, errors.Wrap(appErr, "failed to get group channel members")
+			}
+			if len(pageMembers) == 0 {
+				break
+			}
+			allMembers = append(allMembers, pageMembers...)
+			offset += limit
+		}
+
+		userIDs := make([]string, len(allMembers))
+		for i, member := range allMembers {
+			userIDs[i] = member.UserId
+		}
+		return true, userIDs, nil
+	}
+
+	return false, nil, nil
 }
