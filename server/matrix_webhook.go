@@ -246,8 +246,8 @@ func (p *Plugin) handleMatrixMemberDM(event MatrixEvent) (string, error) {
 		return "", nil
 	}
 
-	targetUserID := *event.StateKey  // User being invited/joined
-	actingUserID := event.Sender     // User doing the invite/join
+	targetUserID := *event.StateKey // User being invited/joined
+	actingUserID := event.Sender    // User doing the invite/join
 
 	p.logger.LogDebug("Processing member event", "room_id", event.RoomID, "membership", membership, "target_user", targetUserID, "acting_user", actingUserID)
 
