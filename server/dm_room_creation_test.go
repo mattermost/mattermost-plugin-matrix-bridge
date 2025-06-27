@@ -211,6 +211,8 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 		model.ChannelMember{UserId: mattermostUser2ID, ChannelId: groupDMChannelID},
 		model.ChannelMember{UserId: matrixUserID, ChannelId: groupDMChannelID},
 	}, nil)
+	// Mock the second pagination call which should return empty to stop pagination
+	api.On("GetChannelMembers", groupDMChannelID, 100, 100).Return(model.ChannelMembers{}, nil)
 
 	// Mock profile images
 	api.On("GetProfileImage", mattermostUser1ID).Return([]byte("fake-image-data"), nil)

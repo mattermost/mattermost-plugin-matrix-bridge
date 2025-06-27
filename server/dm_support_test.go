@@ -65,13 +65,15 @@ func TestDMChannelDetection(t *testing.T) {
 		}
 		api.On("GetChannel", channelID).Return(groupChannel, nil)
 
-		// Mock channel members
+		// Mock channel members for pagination
 		members := model.ChannelMembers{
 			{UserId: userID1},
 			{UserId: userID2},
 			{UserId: userID3},
 		}
 		api.On("GetChannelMembers", channelID, 0, 100).Return(members, nil)
+		// Mock the second pagination call which should return empty to stop pagination
+		api.On("GetChannelMembers", channelID, 100, 100).Return(model.ChannelMembers{}, nil)
 
 		// Test detection
 		isDM, userIDs, err := plugin.mattermostToMatrixBridge.isDirectChannel(channelID)

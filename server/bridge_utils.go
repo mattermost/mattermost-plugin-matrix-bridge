@@ -183,14 +183,25 @@ func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) 
 	}
 
 	if channel.Type == model.ChannelTypeGroup {
-		// Handle group DMs - get all members
-		members, appErr := s.API.GetChannelMembers(channelID, 0, 100) // Larger limit for group DMs
-		if appErr != nil {
-			return false, nil, errors.Wrap(appErr, "failed to get group channel members")
+		// Handle group DMs - get all members with pagination to handle large groups
+		var allMembers []model.ChannelMember
+		offset := 0
+		limit := 100
+
+		for {
+			pageMembers, appErr := s.API.GetChannelMembers(channelID, offset, limit)
+			if appErr != nil {
+				return false, nil, errors.Wrap(appErr, "failed to get group channel members")
+			}
+			if len(pageMembers) == 0 {
+				break
+			}
+			allMembers = append(allMembers, pageMembers...)
+			offset += limit
 		}
 
-		userIDs := make([]string, len(members))
-		for i, member := range members {
+		userIDs := make([]string, len(allMembers))
+		for i, member := range allMembers {
 			userIDs[i] = member.UserId
 		}
 		return true, userIDs, nil

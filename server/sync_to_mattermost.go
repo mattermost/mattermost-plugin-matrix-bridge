@@ -618,10 +618,12 @@ func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string
 	}
 
 	// Store reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID
+	// This mapping is critical for user lookups - treat failure as a serious issue
 	mattermostUserKey := "mattermost_user_" + createdUser.Id
 	err = b.kvstore.Set(mattermostUserKey, []byte(matrixUserID))
 	if err != nil {
-		b.logger.LogWarn("Failed to store Mattermost user mapping", "error", err, "mattermost_user_id", createdUser.Id, "matrix_user_id", matrixUserID)
+		b.logger.LogError("Failed to store critical reverse user mapping", "error", err, "mattermost_user_id", createdUser.Id, "matrix_user_id", matrixUserID)
+		// Continue execution but this could cause lookup issues later
 	}
 
 	b.logger.LogDebug("Created Mattermost user for Matrix user", "matrix_user_id", matrixUserID, "mattermost_user_id", createdUser.Id, "username", mattermostUsername)
