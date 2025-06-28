@@ -115,21 +115,25 @@ func (p *Plugin) migrateUserMappings() error {
 				// Create reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID
 				reverseKey := "mattermost_user_" + mattermostUserID
 
-				// Check if reverse mapping already exists
+				// Check if reverse mapping already exists with correct value
 				existingData, err := p.kvstore.Get(reverseKey)
 				if err == nil && bytes.Equal(existingData, []byte(matrixUserID)) {
 					batchSkippedCount++
-					continue // Already exists, skip
+					continue // Already correct, skip
 				}
 
-				// Create the reverse mapping
+				// Create/update the reverse mapping (overwrites incorrect values)
 				if err := p.kvstore.Set(reverseKey, []byte(matrixUserID)); err != nil {
-					p.logger.LogWarn("Failed to create reverse user mapping during migration", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID, "error", err)
+					p.logger.LogWarn("Failed to create/update reverse user mapping during migration", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID, "error", err)
 					continue
 				}
 
 				batchMigratedCount++
-				p.logger.LogDebug("Created reverse user mapping", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID)
+				if err == nil && len(existingData) > 0 {
+					p.logger.LogDebug("Updated incorrect reverse user mapping", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID, "old_value", string(existingData))
+				} else {
+					p.logger.LogDebug("Created reverse user mapping", "mattermost_user_id", mattermostUserID, "matrix_user_id", matrixUserID)
+				}
 			}
 		}
 
@@ -187,17 +191,21 @@ func (p *Plugin) migrateChannelMappings() error {
 				// Create reverse mapping: room_mapping_<roomIdentifier> -> channelID
 				reverseKey := "room_mapping_" + roomIdentifier
 
-				// Create reverse mapping if it doesn't exist
+				// Check if reverse mapping already exists with correct value
 				existingData, err := p.kvstore.Get(reverseKey)
 				if err == nil && bytes.Equal(existingData, []byte(channelID)) {
 					batchSkippedCount++
 				} else {
-					// Create the reverse mapping
+					// Create/update the reverse mapping (overwrites incorrect values)
 					if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
-						p.logger.LogWarn("Failed to create reverse channel mapping during migration", "channel_id", channelID, "room_identifier", roomIdentifier, "error", err)
+						p.logger.LogWarn("Failed to create/update reverse channel mapping during migration", "channel_id", channelID, "room_identifier", roomIdentifier, "error", err)
 					} else {
 						batchMigratedCount++
-						p.logger.LogDebug("Created reverse channel mapping", "channel_id", channelID, "room_identifier", roomIdentifier)
+						if err == nil && len(existingData) > 0 {
+							p.logger.LogDebug("Updated incorrect reverse channel mapping", "channel_id", channelID, "room_identifier", roomIdentifier, "old_value", string(existingData))
+						} else {
+							p.logger.LogDebug("Created reverse channel mapping", "channel_id", channelID, "room_identifier", roomIdentifier)
+						}
 					}
 				}
 

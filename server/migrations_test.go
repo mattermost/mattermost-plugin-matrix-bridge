@@ -137,27 +137,27 @@ func TestMigrateUserMappings(t *testing.T) {
 		}
 	})
 
-	t.Run("SkipExistingReverseMappings", func(t *testing.T) {
+	t.Run("OverwriteIncorrectReverseMappings", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
 
-		// Add user mapping
+		// Add user mapping (source of truth)
 		err := plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123"))
 		assert.NoError(t, err)
 
-		// Add existing reverse mapping
-		err = plugin.kvstore.Set("mattermost_user_user123", []byte("@existing:matrix.org"))
+		// Add incorrect existing reverse mapping
+		err = plugin.kvstore.Set("mattermost_user_user123", []byte("@incorrect:matrix.org"))
 		assert.NoError(t, err)
 
 		// Run migration
 		err = plugin.migrateUserMappings()
 		assert.NoError(t, err)
 
-		// Existing reverse mapping should not be overwritten
+		// Incorrect reverse mapping should be corrected based on forward mapping
 		valueBytes, err := plugin.kvstore.Get("mattermost_user_user123")
 		assert.NoError(t, err)
-		assert.Equal(t, "@existing:matrix.org", string(valueBytes))
+		assert.Equal(t, "@alice:matrix.org", string(valueBytes))
 	})
 
 	t.Run("HandlesPaginationWithManyKeys", func(t *testing.T) {
@@ -282,27 +282,27 @@ func TestMigrateChannelMappings(t *testing.T) {
 		// but migration should complete either way
 	})
 
-	t.Run("SkipExistingReverseMappings", func(t *testing.T) {
+	t.Run("OverwriteIncorrectReverseMappings", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
 
-		// Add channel mapping
+		// Add channel mapping (source of truth)
 		err := plugin.kvstore.Set("channel_mapping_channel123", []byte("!room456:matrix.org"))
 		assert.NoError(t, err)
 
-		// Add existing reverse mapping
-		err = plugin.kvstore.Set("room_mapping_!room456:matrix.org", []byte("existing_channel"))
+		// Add incorrect existing reverse mapping
+		err = plugin.kvstore.Set("room_mapping_!room456:matrix.org", []byte("incorrect_channel"))
 		assert.NoError(t, err)
 
 		// Run migration
 		err = plugin.migrateChannelMappings()
 		assert.NoError(t, err)
 
-		// Existing reverse mapping should not be overwritten
+		// Incorrect reverse mapping should be corrected based on forward mapping
 		valueBytes, err := plugin.kvstore.Get("room_mapping_!room456:matrix.org")
 		assert.NoError(t, err)
-		assert.Equal(t, "existing_channel", string(valueBytes))
+		assert.Equal(t, "channel123", string(valueBytes))
 	})
 
 	t.Run("HandlesPaginationWithManyChannels", func(t *testing.T) {
