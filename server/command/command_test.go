@@ -60,6 +60,10 @@ func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client {
 	return m.client
 }
 
+func (m *mockPlugin) RunKVStoreMigrations() error {
+	return nil // Mock implementation always succeeds
+}
+
 func setupTest() *env {
 	api := &plugintest.API{}
 	driver := &plugintest.Driver{}
@@ -90,6 +94,7 @@ func TestHelloCommand(t *testing.T) {
 	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", "Show bridge status"))
+	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", "Reset and re-run KV store migrations to fix missing room mappings"))
 
 	env.api.On("RegisterCommand", &model.Command{
 		Trigger:          matrixCommandTrigger,
@@ -379,6 +384,7 @@ func setupCommandRegistration(env *env) {
 	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", "Show bridge status"))
+	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", "Reset and re-run KV store migrations to fix missing room mappings"))
 
 	env.api.On("RegisterCommand", &model.Command{
 		Trigger:          matrixCommandTrigger,

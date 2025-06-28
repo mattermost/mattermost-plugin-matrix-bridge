@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 
@@ -116,7 +117,7 @@ func (p *Plugin) migrateUserMappings() error {
 
 				// Check if reverse mapping already exists
 				existingData, err := p.kvstore.Get(reverseKey)
-				if err == nil && len(existingData) > 0 {
+				if err == nil && bytes.Equal(existingData, []byte(matrixUserID)) {
 					batchSkippedCount++
 					continue // Already exists, skip
 				}
@@ -186,35 +187,30 @@ func (p *Plugin) migrateChannelMappings() error {
 				// Create reverse mapping: room_mapping_<roomIdentifier> -> channelID
 				reverseKey := "room_mapping_" + roomIdentifier
 
-				// Check if reverse mapping already exists
+				// Create reverse mapping if it doesn't exist
 				existingData, err := p.kvstore.Get(reverseKey)
-				if err == nil && len(existingData) > 0 {
+				if err == nil && bytes.Equal(existingData, []byte(channelID)) {
 					batchSkippedCount++
-					continue // Already exists, skip
+				} else {
+					// Create the reverse mapping
+					if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
+						p.logger.LogWarn("Failed to create reverse channel mapping during migration", "channel_id", channelID, "room_identifier", roomIdentifier, "error", err)
+					} else {
+						batchMigratedCount++
+						p.logger.LogDebug("Created reverse channel mapping", "channel_id", channelID, "room_identifier", roomIdentifier)
+					}
 				}
 
-				// Create the reverse mapping
-				if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
-					p.logger.LogWarn("Failed to create reverse channel mapping during migration", "channel_id", channelID, "room_identifier", roomIdentifier, "error", err)
-					continue
-				}
-
-				batchMigratedCount++
-				p.logger.LogDebug("Created reverse channel mapping", "channel_id", channelID, "room_identifier", roomIdentifier)
-
-				// If roomIdentifier is an alias, also resolve to room ID and create that mapping
+				// Always try room ID mapping for aliases, regardless of reverse mapping result
 				if strings.HasPrefix(roomIdentifier, "#") && p.matrixClient != nil {
 					if resolvedRoomID, resolveErr := p.matrixClient.ResolveRoomAlias(roomIdentifier); resolveErr == nil {
 						roomIDKey := "room_mapping_" + resolvedRoomID
 
-						// Check if room ID mapping already exists
-						if _, err := p.kvstore.Get(roomIDKey); err != nil {
-							// Create room ID mapping
-							if err := p.kvstore.Set(roomIDKey, []byte(channelID)); err != nil {
-								p.logger.LogWarn("Failed to create room ID mapping during migration", "channel_id", channelID, "room_id", resolvedRoomID, "error", err)
-							} else {
-								p.logger.LogDebug("Created room ID mapping", "channel_id", channelID, "room_id", resolvedRoomID)
-							}
+						// Always update room ID mapping to match alias mapping
+						if err := p.kvstore.Set(roomIDKey, []byte(channelID)); err != nil {
+							p.logger.LogWarn("Failed to create/update room ID mapping during migration", "channel_id", channelID, "room_id", resolvedRoomID, "error", err)
+						} else {
+							p.logger.LogDebug("Created/updated room ID mapping", "channel_id", channelID, "room_id", resolvedRoomID)
 						}
 					} else {
 						p.logger.LogWarn("Failed to resolve room alias during migration", "room_alias", roomIdentifier, "error", resolveErr)
