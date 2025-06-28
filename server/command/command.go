@@ -18,6 +18,15 @@ type Configuration interface {
 	GetMatrixServerURL() string
 }
 
+// MigrationResult holds the results of a migration operation
+type MigrationResult struct {
+	UserMappingsCreated      int
+	ChannelMappingsCreated   int
+	RoomMappingsCreated      int
+	DMMappingsCreated        int
+	ReverseDMMappingsCreated int
+}
+
 // PluginAccessor defines the interface for plugin functionality needed by command handlers
 type PluginAccessor interface {
 	// Matrix client access
@@ -38,6 +47,7 @@ type PluginAccessor interface {
 
 	// Migration access
 	RunKVStoreMigrations() error
+	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 }
 
 // sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
@@ -460,29 +470,44 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	var responseText strings.Builder
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
 
-	// Use ListKeys to get all channel mapping keys
-	keys, err := c.kvstore.ListKeys(0, 1000) // Get up to 1000 mappings
-	if err != nil {
-		c.client.Log.Error("Failed to list KV store keys", "error", err)
-		responseText.WriteString("❌ Failed to retrieve mappings. Check plugin logs for details.\n")
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         responseText.String(),
-		}
-	}
-
-	// Filter for channel mapping keys and build mappings
+	// Get all channel mapping keys using pagination
 	mappings := make(map[string]string)
 	channelMappingPrefix := "channel_mapping_"
+	page := 0
+	batchSize := 1000
 
-	for _, key := range keys {
-		if strings.HasPrefix(key, channelMappingPrefix) {
-			channelID := strings.TrimPrefix(key, channelMappingPrefix)
-			roomIDBytes, err := c.kvstore.Get(key)
-			if err == nil && len(roomIDBytes) > 0 {
-				mappings[channelID] = string(roomIDBytes)
+	for {
+		keys, err := c.kvstore.ListKeys(page, batchSize)
+		if err != nil {
+			c.client.Log.Error("Failed to list KV store keys", "error", err, "page", page)
+			responseText.WriteString("❌ Failed to retrieve mappings. Check plugin logs for details.\n")
+			return &model.CommandResponse{
+				ResponseType: model.CommandResponseTypeEphemeral,
+				Text:         responseText.String(),
 			}
 		}
+
+		if len(keys) == 0 {
+			break // No more keys
+		}
+
+		// Filter for channel mapping keys and build mappings
+		for _, key := range keys {
+			if strings.HasPrefix(key, channelMappingPrefix) {
+				channelID := strings.TrimPrefix(key, channelMappingPrefix)
+				roomIDBytes, err := c.kvstore.Get(key)
+				if err == nil && len(roomIDBytes) > 0 {
+					mappings[channelID] = string(roomIDBytes)
+				}
+			}
+		}
+
+		// If we got fewer keys than the batch size, we've reached the end
+		if len(keys) < batchSize {
+			break
+		}
+
+		page++
 	}
 
 	if len(mappings) == 0 {
@@ -770,63 +795,36 @@ func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResp
 		}
 	}
 
-	// Count existing mappings before migration
-	allKeys, _ := kvstore.ListKeys(0, 10000) // Get a large batch to count
-	beforeCounts := countMappings(allKeys)
-
-	// Run migrations
-	if err := c.plugin.RunKVStoreMigrations(); err != nil {
+	// Run migrations and get detailed results
+	migrationResult, err := c.plugin.RunKVStoreMigrationsWithResults()
+	if err != nil {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         fmt.Sprintf("❌ Migration failed: %v", err),
 		}
 	}
 
-	// Count mappings after migration
-	allKeysAfter, _ := kvstore.ListKeys(0, 10000)
-	afterCounts := countMappings(allKeysAfter)
-
-	// Calculate differences
-	userMappingsAdded := afterCounts.userMappings - beforeCounts.userMappings
-	channelMappingsAdded := afterCounts.channelMappings - beforeCounts.channelMappings
-	roomMappingsAdded := afterCounts.roomMappings - beforeCounts.roomMappings
+	// Get the results from migration
+	userMappingsAdded := migrationResult.UserMappingsCreated
+	channelMappingsAdded := migrationResult.ChannelMappingsCreated
+	roomMappingsAdded := migrationResult.RoomMappingsCreated
+	dmMappingsAdded := migrationResult.DMMappingsCreated
+	reverseDMMappingsAdded := migrationResult.ReverseDMMappingsCreated
 
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
 		Text: fmt.Sprintf("✅ **Migration completed successfully!**\n\n"+
-			"**Migration Details:**\n"+
+			"**Migration Results:**\n"+
 			"   • Reset version: %s → 2\n"+
-			"   • User mappings created: %d\n"+
-			"   • Channel mappings created: %d\n"+
-			"   • Room ID mappings created: %d\n\n"+
-			"**Total Mappings:**\n"+
-			"   • User mappings: %d\n"+
-			"   • Channel mappings: %d\n"+
-			"   • Room mappings: %d\n\n"+
-			"This should have resolved any missing room ID mappings.\n"+
+			"   • User reverse mappings created/updated: %d\n"+
+			"   • Channel reverse mappings created/updated: %d\n"+
+			"   • Room ID mappings created/updated: %d\n"+
+			"   • DM mappings migrated: %d\n"+
+			"   • DM reverse mappings created: %d\n\n"+
+			"This should have resolved any missing or incorrect mappings.\n"+
 			"Check the plugin logs for detailed migration information.",
 			currentVersion,
 			userMappingsAdded, channelMappingsAdded, roomMappingsAdded,
-			afterCounts.userMappings, afterCounts.channelMappings, afterCounts.roomMappings),
+			dmMappingsAdded, reverseDMMappingsAdded),
 	}
-}
-
-type mappingCounts struct {
-	userMappings    int
-	channelMappings int
-	roomMappings    int
-}
-
-func countMappings(keys []string) mappingCounts {
-	counts := mappingCounts{}
-	for _, key := range keys {
-		if strings.HasPrefix(key, "matrix_user_") || strings.HasPrefix(key, "mattermost_user_") {
-			counts.userMappings++
-		} else if strings.HasPrefix(key, "channel_mapping_") {
-			counts.channelMappings++
-		} else if strings.HasPrefix(key, "room_mapping_") {
-			counts.roomMappings++
-		}
-	}
-	return counts
 }

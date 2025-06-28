@@ -8,6 +8,15 @@ import (
 	"github.com/pkg/errors"
 )
 
+// MigrationResult holds the results of a migration operation
+type MigrationResult struct {
+	UserMappingsCreated      int
+	ChannelMappingsCreated   int
+	RoomMappingsCreated      int
+	DMMappingsCreated        int
+	ReverseDMMappingsCreated int
+}
+
 const (
 	// KVStoreVersionKey tracks the current KV store schema version
 	KVStoreVersionKey = "kv_store_version"
@@ -19,6 +28,12 @@ const (
 
 // runKVStoreMigrations checks the KV store version and runs necessary migrations
 func (p *Plugin) runKVStoreMigrations() error {
+	_, err := p.runKVStoreMigrationsWithResults()
+	return err
+}
+
+// runKVStoreMigrationsWithResults checks the KV store version and runs necessary migrations, returning detailed results
+func (p *Plugin) runKVStoreMigrationsWithResults() (*MigrationResult, error) {
 	// Get current KV store version
 	versionBytes, err := p.kvstore.Get(KVStoreVersionKey)
 	currentVersion := 0
@@ -30,25 +45,34 @@ func (p *Plugin) runKVStoreMigrations() error {
 
 	p.logger.LogInfo("Checking KV store migrations", "current_version", currentVersion, "target_version", CurrentKVStoreVersion)
 
+	result := &MigrationResult{}
+
 	// Run migrations if needed
 	if currentVersion < CurrentKVStoreVersion {
 		p.logger.LogInfo("Running KV store migrations", "from_version", currentVersion, "to_version", CurrentKVStoreVersion)
 
 		if currentVersion < 1 {
-			if err := p.runMigrationToVersion1(); err != nil {
-				return errors.Wrap(err, "failed to migrate to version 1")
+			v1Result, err := p.runMigrationToVersion1WithResults()
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to migrate to version 1")
 			}
+			result.UserMappingsCreated += v1Result.UserMappingsCreated
+			result.ChannelMappingsCreated += v1Result.ChannelMappingsCreated
+			result.RoomMappingsCreated += v1Result.RoomMappingsCreated
 		}
 
 		if currentVersion < 2 {
-			if err := p.runMigrationToVersion2(); err != nil {
-				return errors.Wrap(err, "failed to migrate to version 2")
+			v2Result, err := p.runMigrationToVersion2WithResults()
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to migrate to version 2")
 			}
+			result.DMMappingsCreated += v2Result.DMMappingsCreated
+			result.ReverseDMMappingsCreated += v2Result.ReverseDMMappingsCreated
 		}
 
 		// Update version marker
 		if err := p.kvstore.Set(KVStoreVersionKey, []byte(strconv.Itoa(CurrentKVStoreVersion))); err != nil {
-			return errors.Wrap(err, "failed to update KV store version")
+			return nil, errors.Wrap(err, "failed to update KV store version")
 		}
 
 		p.logger.LogInfo("KV store migrations completed successfully", "new_version", CurrentKVStoreVersion)
@@ -56,28 +80,35 @@ func (p *Plugin) runKVStoreMigrations() error {
 		p.logger.LogDebug("KV store is up to date", "version", currentVersion)
 	}
 
-	return nil
+	return result, nil
 }
 
-// runMigrationToVersion1 migrates to version 1: adds reverse mappings for users and channels
-func (p *Plugin) runMigrationToVersion1() error {
+// runMigrationToVersion1WithResults migrates to version 1: adds reverse mappings for users and channels, returning results
+func (p *Plugin) runMigrationToVersion1WithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Running migration to version 1: adding reverse mappings")
 
+	result := &MigrationResult{}
+
 	// Migrate user mappings
-	if err := p.migrateUserMappings(); err != nil {
-		return errors.Wrap(err, "failed to migrate user mappings")
+	userResult, err := p.migrateUserMappingsWithResults()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to migrate user mappings")
 	}
+	result.UserMappingsCreated = userResult.UserMappingsCreated
 
 	// Migrate channel mappings
-	if err := p.migrateChannelMappings(); err != nil {
-		return errors.Wrap(err, "failed to migrate channel mappings")
+	channelResult, err := p.migrateChannelMappingsWithResults()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to migrate channel mappings")
 	}
+	result.ChannelMappingsCreated = channelResult.ChannelMappingsCreated
+	result.RoomMappingsCreated = channelResult.RoomMappingsCreated
 
-	return nil
+	return result, nil
 }
 
-// migrateUserMappings creates reverse mappings for existing user mappings
-func (p *Plugin) migrateUserMappings() error {
+// migrateUserMappingsWithResults creates reverse mappings for existing user mappings, returning results
+func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Migrating user mappings to add reverse lookups")
 
 	userMappingPrefix := "matrix_user_"
@@ -88,7 +119,7 @@ func (p *Plugin) migrateUserMappings() error {
 		// Get keys in batches
 		keys, err := p.kvstore.ListKeys(page, MigrationBatchSize)
 		if err != nil {
-			return errors.Wrap(err, "failed to list KV store keys")
+			return nil, errors.Wrap(err, "failed to list KV store keys")
 		}
 
 		if len(keys) == 0 {
@@ -149,22 +180,23 @@ func (p *Plugin) migrateUserMappings() error {
 	}
 
 	p.logger.LogInfo("User mapping migration completed", "total_migrated", totalMigratedCount, "pages_processed", page+1)
-	return nil
+	return &MigrationResult{UserMappingsCreated: totalMigratedCount}, nil
 }
 
-// migrateChannelMappings creates reverse mappings for existing channel mappings
-func (p *Plugin) migrateChannelMappings() error {
+// migrateChannelMappingsWithResults creates reverse mappings for existing channel mappings, returning results
+func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Migrating channel mappings to add reverse lookups")
 
 	channelMappingPrefix := "channel_mapping_"
 	totalMigratedCount := 0
+	totalRoomMappingsCount := 0
 	page := 0
 
 	for {
 		// Get keys in batches
 		keys, err := p.kvstore.ListKeys(page, MigrationBatchSize)
 		if err != nil {
-			return errors.Wrap(err, "failed to list KV store keys")
+			return nil, errors.Wrap(err, "failed to list KV store keys")
 		}
 
 		if len(keys) == 0 {
@@ -218,6 +250,7 @@ func (p *Plugin) migrateChannelMappings() error {
 						if err := p.kvstore.Set(roomIDKey, []byte(channelID)); err != nil {
 							p.logger.LogWarn("Failed to create/update room ID mapping during migration", "channel_id", channelID, "room_id", resolvedRoomID, "error", err)
 						} else {
+							totalRoomMappingsCount++
 							p.logger.LogDebug("Created/updated room ID mapping", "channel_id", channelID, "room_id", resolvedRoomID)
 						}
 					} else {
@@ -238,24 +271,25 @@ func (p *Plugin) migrateChannelMappings() error {
 		page++
 	}
 
-	p.logger.LogInfo("Channel mapping migration completed", "total_migrated", totalMigratedCount, "pages_processed", page+1)
-	return nil
+	p.logger.LogInfo("Channel mapping migration completed", "total_migrated", totalMigratedCount, "room_mappings_created", totalRoomMappingsCount, "pages_processed", page+1)
+	return &MigrationResult{ChannelMappingsCreated: totalMigratedCount, RoomMappingsCreated: totalRoomMappingsCount}, nil
 }
 
-// runMigrationToVersion2 migrates to version 2: unify DM and regular channel mappings
-func (p *Plugin) runMigrationToVersion2() error {
+// runMigrationToVersion2WithResults migrates to version 2: unify DM and regular channel mappings, returning results
+func (p *Plugin) runMigrationToVersion2WithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Running migration to version 2: unifying DM and channel mappings")
 
 	// Migrate DM mappings to use unified channel_mapping_ prefix
-	if err := p.migrateDMMappings(); err != nil {
-		return errors.Wrap(err, "failed to migrate DM mappings")
+	result, err := p.migrateDMMappingsWithResults()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to migrate DM mappings")
 	}
 
-	return nil
+	return result, nil
 }
 
-// migrateDMMappings moves DM mappings from dm_mapping_ prefix to channel_mapping_ prefix
-func (p *Plugin) migrateDMMappings() error {
+// migrateDMMappingsWithResults moves DM mappings from dm_mapping_ prefix to channel_mapping_ prefix, returning results
+func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Migrating DM mappings to unified channel mapping prefix")
 
 	dmMappingPrefix := "dm_mapping_"
@@ -268,7 +302,7 @@ func (p *Plugin) migrateDMMappings() error {
 		// Get keys in batches
 		keys, err := p.kvstore.ListKeys(page, MigrationBatchSize)
 		if err != nil {
-			return errors.Wrap(err, "failed to list KV store keys")
+			return nil, errors.Wrap(err, "failed to list KV store keys")
 		}
 
 		if len(keys) == 0 {
@@ -380,5 +414,5 @@ func (p *Plugin) migrateDMMappings() error {
 	}
 
 	p.logger.LogInfo("DM mapping migration completed", "total_migrated", totalMigratedCount, "total_reverse_migrated", totalReverseMigratedCount, "pages_processed", page+1)
-	return nil
+	return &MigrationResult{DMMappingsCreated: totalMigratedCount, ReverseDMMappingsCreated: totalReverseMigratedCount}, nil
 }

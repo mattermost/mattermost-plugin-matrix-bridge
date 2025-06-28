@@ -113,7 +113,7 @@ func TestMigrateUserMappings(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Run user migration
-		err = plugin.migrateUserMappings()
+		_, err = plugin.migrateUserMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Check that reverse mappings were created
@@ -151,7 +151,7 @@ func TestMigrateUserMappings(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Run migration
-		err = plugin.migrateUserMappings()
+		_, err = plugin.migrateUserMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Incorrect reverse mapping should be corrected based on forward mapping
@@ -182,7 +182,7 @@ func TestMigrateUserMappings(t *testing.T) {
 		}
 
 		// Run migration
-		err := plugin.migrateUserMappings()
+		_, err := plugin.migrateUserMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Verify all reverse mappings were created
@@ -217,7 +217,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 		}
 
 		// Run channel migration
-		err := plugin.migrateChannelMappings()
+		_, err := plugin.migrateChannelMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Check that reverse mappings were created
@@ -245,7 +245,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Run channel migration
-		err = plugin.migrateChannelMappings()
+		_, err = plugin.migrateChannelMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Check that alias reverse mapping was created (even without Matrix client)
@@ -270,7 +270,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Run channel migration - should not fail even if alias resolution fails
-		err = plugin.migrateChannelMappings()
+		_, err = plugin.migrateChannelMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Check that alias reverse mapping was created
@@ -296,7 +296,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Run migration
-		err = plugin.migrateChannelMappings()
+		_, err = plugin.migrateChannelMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Incorrect reverse mapping should be corrected based on forward mapping
@@ -320,7 +320,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 		}
 
 		// Run migration
-		err := plugin.migrateChannelMappings()
+		_, err := plugin.migrateChannelMappingsWithResults()
 		assert.NoError(t, err)
 
 		// Verify all reverse mappings were created

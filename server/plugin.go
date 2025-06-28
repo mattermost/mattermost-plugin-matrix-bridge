@@ -245,4 +245,21 @@ func (p *Plugin) RunKVStoreMigrations() error {
 	return p.runKVStoreMigrations()
 }
 
+// RunKVStoreMigrationsWithResults exposes migration functionality to command handlers and returns detailed results
+func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, error) {
+	result, err := p.runKVStoreMigrationsWithResults()
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert from internal MigrationResult to command.MigrationResult
+	return &command.MigrationResult{
+		UserMappingsCreated:      result.UserMappingsCreated,
+		ChannelMappingsCreated:   result.ChannelMappingsCreated,
+		RoomMappingsCreated:      result.RoomMappingsCreated,
+		DMMappingsCreated:        result.DMMappingsCreated,
+		ReverseDMMappingsCreated: result.ReverseDMMappingsCreated,
+	}, nil
+}
+
 // See https://developers.mattermost.com/extend/plugins/server/reference/

@@ -64,6 +64,16 @@ func (m *mockPlugin) RunKVStoreMigrations() error {
 	return nil // Mock implementation always succeeds
 }
 
+func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error) {
+	return &MigrationResult{
+		UserMappingsCreated:      5,
+		ChannelMappingsCreated:   3,
+		RoomMappingsCreated:      2,
+		DMMappingsCreated:        1,
+		ReverseDMMappingsCreated: 1,
+	}, nil // Mock implementation returns sample results
+}
+
 func setupTest() *env {
 	api := &plugintest.API{}
 	driver := &plugintest.Driver{}
