@@ -103,14 +103,15 @@ func (p *Plugin) OnActivate() error {
 		return errors.Wrap(err, "failed to run KV store migrations")
 	}
 
-	// Initialize bridge components
-	p.initBridges()
-
-	p.commandClient = command.NewCommandHandler(p)
-
+	// Register for shared channels first to get remote ID
 	if err := p.registerForSharedChannels(); err != nil {
 		p.logger.LogWarn("Failed to register for shared channels", "error", err)
 	}
+
+	// Initialize bridge components after getting remote ID
+	p.initBridges()
+
+	p.commandClient = command.NewCommandHandler(p)
 
 	job, err := cluster.Schedule(
 		p.API,
@@ -237,6 +238,28 @@ func (p *Plugin) GetPluginAPI() plugin.API {
 // GetPluginAPIClient returns the pluginapi client
 func (p *Plugin) GetPluginAPIClient() *pluginapi.Client {
 	return p.client
+}
+
+// RunKVStoreMigrations exposes migration functionality to command handlers
+func (p *Plugin) RunKVStoreMigrations() error {
+	return p.runKVStoreMigrations()
+}
+
+// RunKVStoreMigrationsWithResults exposes migration functionality to command handlers and returns detailed results
+func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, error) {
+	result, err := p.runKVStoreMigrationsWithResults()
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert from internal MigrationResult to command.MigrationResult
+	return &command.MigrationResult{
+		UserMappingsCreated:      result.UserMappingsCreated,
+		ChannelMappingsCreated:   result.ChannelMappingsCreated,
+		RoomMappingsCreated:      result.RoomMappingsCreated,
+		DMMappingsCreated:        result.DMMappingsCreated,
+		ReverseDMMappingsCreated: result.ReverseDMMappingsCreated,
+	}, nil
 }
 
 // See https://developers.mattermost.com/extend/plugins/server/reference/

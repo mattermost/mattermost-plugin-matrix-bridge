@@ -18,6 +18,15 @@ type Configuration interface {
 	GetMatrixServerURL() string
 }
 
+// MigrationResult holds the results of a migration operation
+type MigrationResult struct {
+	UserMappingsCreated      int
+	ChannelMappingsCreated   int
+	RoomMappingsCreated      int
+	DMMappingsCreated        int
+	ReverseDMMappingsCreated int
+}
+
 // PluginAccessor defines the interface for plugin functionality needed by command handlers
 type PluginAccessor interface {
 	// Matrix client access
@@ -35,6 +44,10 @@ type PluginAccessor interface {
 	// Mattermost API access
 	GetPluginAPI() plugin.API
 	GetPluginAPIClient() *pluginapi.Client
+
+	// Migration access
+	RunKVStoreMigrations() error
+	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 }
 
 // sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
@@ -118,6 +131,7 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", "Show bridge status"))
+	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", "Reset and re-run KV store migrations to fix missing room mappings"))
 
 	err = client.SlashCommand.Register(&model.Command{
 		Trigger:          matrixCommandTrigger,
@@ -360,7 +374,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	// Create the Matrix room
 	// Extract server domain from Matrix server URL
 	serverDomain := c.extractServerDomain()
-	roomID, err := c.matrixClient.CreateRoom(roomName, topic, serverDomain, publish)
+	roomID, err := c.matrixClient.CreateRoom(roomName, topic, serverDomain, publish, args.ChannelId)
 	if err != nil {
 		c.client.Log.Error("Failed to create Matrix room", "error", err, "room_name", roomName)
 		return &model.CommandResponse{
@@ -456,29 +470,44 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	var responseText strings.Builder
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
 
-	// Use ListKeys to get all channel mapping keys
-	keys, err := c.kvstore.ListKeys(0, 1000) // Get up to 1000 mappings
-	if err != nil {
-		c.client.Log.Error("Failed to list KV store keys", "error", err)
-		responseText.WriteString("❌ Failed to retrieve mappings. Check plugin logs for details.\n")
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         responseText.String(),
-		}
-	}
-
-	// Filter for channel mapping keys and build mappings
+	// Get all channel mapping keys using pagination
 	mappings := make(map[string]string)
 	channelMappingPrefix := "channel_mapping_"
+	page := 0
+	batchSize := 1000
 
-	for _, key := range keys {
-		if strings.HasPrefix(key, channelMappingPrefix) {
-			channelID := strings.TrimPrefix(key, channelMappingPrefix)
-			roomIDBytes, err := c.kvstore.Get(key)
-			if err == nil && len(roomIDBytes) > 0 {
-				mappings[channelID] = string(roomIDBytes)
+	for {
+		keys, err := c.kvstore.ListKeys(page, batchSize)
+		if err != nil {
+			c.client.Log.Error("Failed to list KV store keys", "error", err, "page", page)
+			responseText.WriteString("❌ Failed to retrieve mappings. Check plugin logs for details.\n")
+			return &model.CommandResponse{
+				ResponseType: model.CommandResponseTypeEphemeral,
+				Text:         responseText.String(),
 			}
 		}
+
+		if len(keys) == 0 {
+			break // No more keys
+		}
+
+		// Filter for channel mapping keys and build mappings
+		for _, key := range keys {
+			if strings.HasPrefix(key, channelMappingPrefix) {
+				channelID := strings.TrimPrefix(key, channelMappingPrefix)
+				roomIDBytes, err := c.kvstore.Get(key)
+				if err == nil && len(roomIDBytes) > 0 {
+					mappings[channelID] = string(roomIDBytes)
+				}
+			}
+		}
+
+		// If we got fewer keys than the batch size, we've reached the end
+		if len(keys) < batchSize {
+			break
+		}
+
+		page++
 	}
 
 	if len(mappings) == 0 {
@@ -542,7 +571,7 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 	if len(fields) < 2 {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Usage: /matrix [test|create|map|list|status] [room_name|room_alias|room_id]",
+			Text:         "Usage: /matrix [test|create|map|list|status|migrate] [room_name|room_alias|room_id]",
 		}
 	}
 
@@ -617,10 +646,12 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         "Matrix Bridge Status:\n- Plugin: Active\n- Configuration: Check System Console → Plugins → Matrix Bridge\n- Logs: Check plugin logs for connection status",
 		}
+	case "migrate":
+		return c.executeMigrateCommand(args)
 	default:
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Unknown subcommand. Use: test, create, map, list, or status",
+			Text:         "Unknown subcommand. Use: test, create, map, list, status, or migrate",
 		}
 	}
 }
@@ -744,5 +775,56 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
 		Text:         responseText.String(),
+	}
+}
+
+func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResponse {
+	// Get current version before reset
+	kvstore := c.plugin.GetKVStore()
+	versionBytes, _ := kvstore.Get("kv_store_version")
+	currentVersion := "0"
+	if len(versionBytes) > 0 {
+		currentVersion = string(versionBytes)
+	}
+
+	// Reset KV store version to 0 to force re-migration
+	if err := kvstore.Set("kv_store_version", []byte("0")); err != nil {
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         fmt.Sprintf("❌ Failed to reset migration version: %v", err),
+		}
+	}
+
+	// Run migrations and get detailed results
+	migrationResult, err := c.plugin.RunKVStoreMigrationsWithResults()
+	if err != nil {
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         fmt.Sprintf("❌ Migration failed: %v", err),
+		}
+	}
+
+	// Get the results from migration
+	userMappingsAdded := migrationResult.UserMappingsCreated
+	channelMappingsAdded := migrationResult.ChannelMappingsCreated
+	roomMappingsAdded := migrationResult.RoomMappingsCreated
+	dmMappingsAdded := migrationResult.DMMappingsCreated
+	reverseDMMappingsAdded := migrationResult.ReverseDMMappingsCreated
+
+	return &model.CommandResponse{
+		ResponseType: model.CommandResponseTypeEphemeral,
+		Text: fmt.Sprintf("✅ **Migration completed successfully!**\n\n"+
+			"**Migration Results:**\n"+
+			"   • Reset version: %s → 2\n"+
+			"   • User reverse mappings created/updated: %d\n"+
+			"   • Channel reverse mappings created/updated: %d\n"+
+			"   • Room ID mappings created/updated: %d\n"+
+			"   • DM mappings migrated: %d\n"+
+			"   • DM reverse mappings created: %d\n\n"+
+			"This should have resolved any missing or incorrect mappings.\n"+
+			"Check the plugin logs for detailed migration information.",
+			currentVersion,
+			userMappingsAdded, channelMappingsAdded, roomMappingsAdded,
+			dmMappingsAdded, reverseDMMappingsAdded),
 	}
 }

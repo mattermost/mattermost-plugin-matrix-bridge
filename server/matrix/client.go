@@ -433,7 +433,7 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 
 // CreateRoom creates a new Matrix room with the specified name, topic, and settings.
 // Returns the room ID or alias on success.
-func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (string, error) {
+func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, mattermostChannelID string) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
 	}
@@ -476,6 +476,14 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool) (str
 				"state_key": "",
 				"content": map[string]any{
 					"join_rule": "public",
+				},
+			},
+			{
+				"type":      "com.mattermost.bridge.channel",
+				"state_key": "",
+				"content": map[string]any{
+					"mattermost_channel_id": mattermostChannelID,
+					"created_at":            time.Now().Unix(),
 				},
 			},
 		},
@@ -1783,4 +1791,52 @@ func (c *Client) GetServerInfo() (*ServerInfo, error) {
 	}
 
 	return serverInfo, nil
+}
+
+// GetMattermostChannelID retrieves the Mattermost channel ID from the Matrix room's custom state.
+// Returns the channel ID if found, or empty string if not set.
+func (c *Client) GetMattermostChannelID(roomID string) (string, error) {
+	if c.serverURL == "" || c.asToken == "" {
+		return "", errors.New("matrix client not configured")
+	}
+
+	url := c.serverURL + "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/state/com.mattermost.bridge.channel/"
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create room state request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send room state request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// State event doesn't exist - this is normal for non-Mattermost rooms
+		return "", nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to get room state: %d %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read room state response")
+	}
+
+	var stateContent struct {
+		MattermostChannelID string `json:"mattermost_channel_id"`
+		CreatedAt           int64  `json:"created_at"`
+	}
+	if err := json.Unmarshal(body, &stateContent); err != nil {
+		return "", errors.Wrap(err, "failed to unmarshal room state response")
+	}
+
+	return stateContent.MattermostChannelID, nil
 }

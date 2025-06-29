@@ -577,20 +577,36 @@ func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string
 	}
 
 	// Create the user in Mattermost
+	// Generate valid email by replacing colon with underscore (email local part cannot contain colons)
+	emailUsername := strings.ReplaceAll(mattermostUsername, ":", "_")
+
 	user := &model.User{
 		Username:    mattermostUsername,
-		Email:       fmt.Sprintf("%s@matrix.bridge", mattermostUsername), // Placeholder email
-		Password:    model.NewId(),                                       // Generate random password (user won't use it for login)
-		Nickname:    displayName,                                         // Use real Matrix display name
-		FirstName:   firstName,                                           // Parsed from display name if possible
-		LastName:    lastName,                                            // Parsed from display name if possible
+		Email:       fmt.Sprintf("%s@matrix.bridge", emailUsername), // Placeholder email with valid format
+		Password:    model.NewId(),                                  // Generate random password (user won't use it for login)
+		Nickname:    displayName,                                    // Use real Matrix display name
+		FirstName:   firstName,                                      // Parsed from display name if possible
+		LastName:    lastName,                                       // Parsed from display name if possible
 		AuthData:    nil,
 		AuthService: "",
 		RemoteId:    &b.remoteID, // Attribute to Matrix remote
 	}
 
+	b.logger.LogDebug("Creating Mattermost user with remote details",
+		"username", mattermostUsername,
+		"email", user.Email,
+		"remote_id", b.remoteID,
+		"remote_id_ptr", user.RemoteId,
+		"matrix_user_id", matrixUserID)
+
 	createdUser, appErr := b.API.CreateUser(user)
 	if appErr != nil {
+		b.logger.LogError("Failed to create Mattermost user",
+			"error", appErr.Error(),
+			"username", mattermostUsername,
+			"remote_id", b.remoteID,
+			"remote_id_empty", b.remoteID == "",
+			"matrix_user_id", matrixUserID)
 		return "", errors.Wrap(appErr, "failed to create Mattermost user")
 	}
 
