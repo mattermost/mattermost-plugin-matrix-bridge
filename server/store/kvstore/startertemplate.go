@@ -66,3 +66,12 @@ func (kv Client) ListKeys(page, perPage int) ([]string, error) {
 	}
 	return keys, nil
 }
+
+// ListKeysWithPrefix retrieves a paginated list of keys with a specific prefix from the KV store.
+func (kv Client) ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error) {
+	keys, appErr := kv.client.KV.ListKeys(page, perPage, pluginapi.WithPrefix(prefix))
+	if appErr != nil {
+		return nil, errors.Wrap(appErr, "failed to list keys with prefix from KV store")
+	}
+	return keys, nil
+}

@@ -470,16 +470,16 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	var responseText strings.Builder
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
 
-	// Get all channel mapping keys using pagination
+	// Get channel mapping keys using efficient prefix filtering
 	mappings := make(map[string]string)
 	channelMappingPrefix := "channel_mapping_"
 	page := 0
 	batchSize := 1000
 
 	for {
-		keys, err := c.kvstore.ListKeys(page, batchSize)
+		keys, err := c.kvstore.ListKeysWithPrefix(page, batchSize, channelMappingPrefix)
 		if err != nil {
-			c.client.Log.Error("Failed to list KV store keys", "error", err, "page", page)
+			c.client.Log.Error("Failed to list KV store keys with prefix", "error", err, "page", page, "prefix", channelMappingPrefix)
 			responseText.WriteString("❌ Failed to retrieve mappings. Check plugin logs for details.\n")
 			return &model.CommandResponse{
 				ResponseType: model.CommandResponseTypeEphemeral,
@@ -491,14 +491,12 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 			break // No more keys
 		}
 
-		// Filter for channel mapping keys and build mappings
+		// Build mappings directly (no need to filter since prefix filtering is server-side)
 		for _, key := range keys {
-			if strings.HasPrefix(key, channelMappingPrefix) {
-				channelID := strings.TrimPrefix(key, channelMappingPrefix)
-				roomIDBytes, err := c.kvstore.Get(key)
-				if err == nil && len(roomIDBytes) > 0 {
-					mappings[channelID] = string(roomIDBytes)
-				}
+			channelID := strings.TrimPrefix(key, channelMappingPrefix)
+			roomIDBytes, err := c.kvstore.Get(key)
+			if err == nil && len(roomIDBytes) > 0 {
+				mappings[channelID] = string(roomIDBytes)
 			}
 		}
 

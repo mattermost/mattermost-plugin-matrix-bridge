@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -309,6 +310,36 @@ func (m *MemoryKVStore) ListKeys(page, perPage int) ([]string, error) {
 	keys := make([]string, 0, len(m.data))
 	for key := range m.data {
 		keys = append(keys, key)
+	}
+
+	// Sort keys for consistent ordering
+	sort.Strings(keys)
+
+	// Apply pagination
+	start := page * perPage
+	if start >= len(keys) {
+		return []string{}, nil
+	}
+
+	end := start + perPage
+	if end > len(keys) {
+		end = len(keys)
+	}
+
+	return keys[start:end], nil
+}
+
+// ListKeysWithPrefix retrieves a paginated list of keys with a specific prefix from the KV store.
+func (m *MemoryKVStore) ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Collect keys with the specified prefix
+	keys := make([]string, 0, len(m.data))
+	for key := range m.data {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
 	}
 
 	// Sort keys for consistent ordering
