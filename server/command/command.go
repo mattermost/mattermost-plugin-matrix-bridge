@@ -99,14 +99,12 @@ type Handler struct {
 // Command defines the interface for handling Matrix Bridge slash commands.
 type Command interface {
 	Handle(args *model.CommandArgs) (*model.CommandResponse, error)
-	executeHelloCommand(args *model.CommandArgs) *model.CommandResponse
 	executeMatrixCommand(args *model.CommandArgs) *model.CommandResponse
 }
 
 // Command usage and help text constants
 const (
 	// Triggers
-	helloCommandTrigger  = "hello"
 	matrixCommandTrigger = "matrix"
 
 	// Main command usage
@@ -177,26 +175,25 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	matrixClient := plugin.GetMatrixClient()
 	pluginAPI := plugin.GetPluginAPI()
 
-	err := client.SlashCommand.Register(&model.Command{
-		Trigger:          helloCommandTrigger,
-		AutoComplete:     true,
-		AutoCompleteDesc: "Say hello to someone",
-		AutoCompleteHint: "[@username]",
-		AutocompleteData: model.NewAutocompleteData(helloCommandTrigger, "[@username]", "Username to say hello to"),
-	})
-	if err != nil {
-		client.Log.Error("Failed to register hello command", "error", err)
-	}
-
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
 	matrixData.AddCommand(model.NewAutocompleteData("test", "", testCommandDesc))
-	matrixData.AddCommand(model.NewAutocompleteData("create", createCommandHint, createCommandDesc))
-	matrixData.AddCommand(model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc))
+
+	// Create command with argument completion
+	createCmd := model.NewAutocompleteData("create", createCommandHint, createCommandDesc)
+	createCmd.AddTextArgument("Optional room name (defaults to channel name)", "[room_name]", "")
+	createCmd.AddTextArgument("Optional publish flag", "[publish=true|false]", "")
+	matrixData.AddCommand(createCmd)
+
+	// Map command with argument completion
+	mapCmd := model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc)
+	mapCmd.AddTextArgument("Matrix room alias or room ID", "[room_alias|room_id]", "")
+	matrixData.AddCommand(mapCmd)
+
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", listCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
 
-	err = client.SlashCommand.Register(&model.Command{
+	err := client.SlashCommand.Register(&model.Command{
 		Trigger:          matrixCommandTrigger,
 		AutoComplete:     true,
 		AutoCompleteDesc: "Matrix bridge commands",
@@ -220,8 +217,6 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error) {
 	trigger := strings.TrimPrefix(strings.Fields(args.Command)[0], "/")
 	switch trigger {
-	case helloCommandTrigger:
-		return c.executeHelloCommand(args), nil
 	case matrixCommandTrigger:
 		return c.executeMatrixCommand(args), nil
 	default:
@@ -229,19 +224,6 @@ func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         fmt.Sprintf("Unknown command: %s", args.Command),
 		}, nil
-	}
-}
-
-func (c *Handler) executeHelloCommand(args *model.CommandArgs) *model.CommandResponse {
-	if len(strings.Fields(args.Command)) < 2 {
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Please specify a username",
-		}
-	}
-	username := strings.Fields(args.Command)[1]
-	return &model.CommandResponse{
-		Text: "Hello, " + username,
 	}
 }
 
