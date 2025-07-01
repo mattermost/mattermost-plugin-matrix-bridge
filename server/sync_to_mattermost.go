@@ -738,29 +738,49 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 }
 
 // getPostIDFromMatrixEvent finds the Mattermost post ID for a Matrix event ID
+// This method efficiently retrieves the post ID from Matrix event metadata
 func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, channelID string) string {
-	// Search through posts in the channel to find one with matching Matrix event ID
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
-
-	// Get recent posts in the channel (Matrix events are usually recent)
-	postList, appErr := b.API.GetPostsForChannel(channelID, 0, 100)
-	if appErr != nil {
-		b.logger.LogWarn("Failed to get posts for channel", "error", appErr, "channel_id", channelID)
+	// Get the Matrix room ID for this channel
+	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	if err != nil {
+		b.logger.LogDebug("Failed to get Matrix room identifier", "error", err, "channel_id", channelID, "matrix_event_id", matrixEventID)
 		return ""
 	}
 
-	// Search through posts for matching Matrix event ID
-	for _, postID := range postList.Order {
-		post := postList.Posts[postID]
-		if post.Props != nil {
-			if eventID, exists := post.Props[propertyKey].(string); exists && eventID == matrixEventID {
-				return postID
-			}
-		}
+	if matrixRoomIdentifier == "" {
+		b.logger.LogDebug("No Matrix room identifier found for channel", "channel_id", channelID, "matrix_event_id", matrixEventID)
+		return ""
 	}
 
+	// Resolve room alias to room ID if needed
+	matrixRoomID, err := b.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		b.logger.LogDebug("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomIdentifier, "matrix_event_id", matrixEventID)
+		return ""
+	}
+
+	// Get the Matrix event to extract Mattermost metadata
+	event, err := b.matrixClient.GetEvent(matrixRoomID, matrixEventID)
+	if err != nil {
+		b.logger.LogDebug("Failed to get Matrix event", "error", err, "event_id", matrixEventID, "room_id", matrixRoomID)
+		return ""
+	}
+
+	// Extract Mattermost post ID from event content
+	content, ok := event["content"].(map[string]any)
+	if !ok {
+		b.logger.LogDebug("Matrix event has no content field", "event_id", matrixEventID)
+		return ""
+	}
+
+	if postID, exists := content["mattermost_post_id"].(string); exists && postID != "" {
+		b.logger.LogDebug("Found Mattermost post ID in Matrix event metadata", "matrix_event_id", matrixEventID, "mattermost_post_id", postID)
+		return postID
+	}
+
+	// If no mattermost_post_id is found, this Matrix event did not originate from Mattermost
+	// This is normal for events created directly in Matrix
+	b.logger.LogDebug("Matrix event has no Mattermost post ID metadata - event did not originate from Mattermost", "event_id", matrixEventID)
 	return ""
 }
 
