@@ -11,7 +11,7 @@ import (
 	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
-// MatrixClientTestSuite contains integration tests for Matrix client operations
+// MatrixClientTestSuite contains integration tests for Matrix client operations.
 type MatrixClientTestSuite struct {
 	suite.Suite
 	matrixContainer *matrixtest.MatrixContainer
@@ -48,7 +48,6 @@ func (suite *MatrixClientTestSuite) SetupTest() {
 // TestMatrixClientOperations tests core Matrix client operations that affect change
 // and then query the server to verify the changes were applied correctly.
 func (suite *MatrixClientTestSuite) TestMatrixClientOperations() {
-
 	// Test server connectivity first
 	suite.Run("TestConnection", func() {
 		err := suite.client.TestConnection()
