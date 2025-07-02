@@ -116,10 +116,10 @@ func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 	page := 0
 
 	for {
-		// Get keys in batches
-		keys, err := p.kvstore.ListKeys(page, MigrationBatchSize)
+		// Get keys in batches using prefix filtering for efficiency
+		keys, err := p.kvstore.ListKeysWithPrefix(page, MigrationBatchSize, userMappingPrefix)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to list KV store keys")
+			return nil, errors.Wrap(err, "failed to list KV store keys with prefix")
 		}
 
 		if len(keys) == 0 {
@@ -130,7 +130,8 @@ func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 		batchSkippedCount := 0
 		batchProcessedCount := 0
 		for _, key := range keys {
-			if strings.HasPrefix(key, userMappingPrefix) {
+			// No need to check prefix since ListKeysWithPrefix already filters
+			{
 				batchProcessedCount++
 
 				// Get the Mattermost user ID
@@ -193,10 +194,10 @@ func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 	page := 0
 
 	for {
-		// Get keys in batches
-		keys, err := p.kvstore.ListKeys(page, MigrationBatchSize)
+		// Get keys in batches using prefix filtering for efficiency
+		keys, err := p.kvstore.ListKeysWithPrefix(page, MigrationBatchSize, channelMappingPrefix)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to list KV store keys")
+			return nil, errors.Wrap(err, "failed to list KV store keys with prefix")
 		}
 
 		if len(keys) == 0 {
@@ -207,7 +208,8 @@ func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 		batchSkippedCount := 0
 		batchProcessedCount := 0
 		for _, key := range keys {
-			if strings.HasPrefix(key, channelMappingPrefix) {
+			// No need to check prefix since ListKeysWithPrefix already filters
+			{
 				batchProcessedCount++
 
 				// Get the room identifier (alias or room ID)
@@ -233,7 +235,7 @@ func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 						p.logger.LogWarn("Failed to create/update reverse channel mapping during migration", "channel_id", channelID, "room_identifier", roomIdentifier, "error", err)
 					} else {
 						batchMigratedCount++
-						if err == nil && len(existingData) > 0 {
+						if len(existingData) > 0 {
 							p.logger.LogDebug("Updated incorrect reverse channel mapping", "channel_id", channelID, "room_identifier", roomIdentifier, "old_value", string(existingData))
 						} else {
 							p.logger.LogDebug("Created reverse channel mapping", "channel_id", channelID, "room_identifier", roomIdentifier)
@@ -296,13 +298,14 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 	matrixDMMappingPrefix := "matrix_dm_mapping_"
 	totalMigratedCount := 0
 	totalReverseMigratedCount := 0
-	page := 0
 
+	// First, migrate dm_mapping_ keys
+	page := 0
 	for {
-		// Get keys in batches
-		keys, err := p.kvstore.ListKeys(page, MigrationBatchSize)
+		// Get keys in batches using prefix filtering for efficiency
+		keys, err := p.kvstore.ListKeysWithPrefix(page, MigrationBatchSize, dmMappingPrefix)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to list KV store keys")
+			return nil, errors.Wrap(err, "failed to list KV store keys with prefix")
 		}
 
 		if len(keys) == 0 {
@@ -313,97 +316,124 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 		batchReverseMigratedCount := 0
 		batchProcessedCount := 0
 		for _, key := range keys {
-			if strings.HasPrefix(key, dmMappingPrefix) {
-				batchProcessedCount++
+			batchProcessedCount++
 
-				// Get the Matrix room ID
-				matrixRoomIDBytes, err := p.kvstore.Get(key)
-				if err != nil {
-					p.logger.LogWarn("Failed to get DM mapping during migration", "key", key, "error", err)
+			// Get the Matrix room ID
+			matrixRoomIDBytes, err := p.kvstore.Get(key)
+			if err != nil {
+				p.logger.LogWarn("Failed to get DM mapping during migration", "key", key, "error", err)
+				continue
+			}
+
+			matrixRoomID := string(matrixRoomIDBytes)
+			channelID := strings.TrimPrefix(key, dmMappingPrefix)
+
+			// Create unified mapping: channel_mapping_<channelID> -> matrixRoomID
+			unifiedKey := "channel_mapping_" + channelID
+
+			// Check if unified mapping already exists
+			existingData, err := p.kvstore.Get(unifiedKey)
+			if err == nil && len(existingData) > 0 {
+				p.logger.LogDebug("Unified mapping already exists, skipping", "channel_id", channelID, "matrix_room_id", matrixRoomID)
+			} else {
+				// Create the unified mapping
+				if err := p.kvstore.Set(unifiedKey, []byte(matrixRoomID)); err != nil {
+					p.logger.LogWarn("Failed to create unified DM mapping during migration", "channel_id", channelID, "matrix_room_id", matrixRoomID, "error", err)
 					continue
 				}
+				batchMigratedCount++
+				p.logger.LogDebug("Created unified DM mapping", "channel_id", channelID, "matrix_room_id", matrixRoomID)
+			}
 
-				matrixRoomID := string(matrixRoomIDBytes)
-				channelID := strings.TrimPrefix(key, dmMappingPrefix)
-
-				// Create unified mapping: channel_mapping_<channelID> -> matrixRoomID
-				unifiedKey := "channel_mapping_" + channelID
-
-				// Check if unified mapping already exists
-				existingData, err := p.kvstore.Get(unifiedKey)
-				if err == nil && len(existingData) > 0 {
-					p.logger.LogDebug("Unified mapping already exists, skipping", "channel_id", channelID, "matrix_room_id", matrixRoomID)
+			// Also create reverse mapping for room_mapping_ if it doesn't exist
+			reverseKey := "room_mapping_" + matrixRoomID
+			existingReverse, err := p.kvstore.Get(reverseKey)
+			if err != nil || len(existingReverse) == 0 {
+				if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
+					p.logger.LogWarn("Failed to create reverse DM mapping during migration", "matrix_room_id", matrixRoomID, "channel_id", channelID, "error", err)
 				} else {
-					// Create the unified mapping
-					if err := p.kvstore.Set(unifiedKey, []byte(matrixRoomID)); err != nil {
-						p.logger.LogWarn("Failed to create unified DM mapping during migration", "channel_id", channelID, "matrix_room_id", matrixRoomID, "error", err)
-						continue
-					}
-					batchMigratedCount++
-					p.logger.LogDebug("Created unified DM mapping", "channel_id", channelID, "matrix_room_id", matrixRoomID)
-				}
-
-				// Also create reverse mapping for room_mapping_ if it doesn't exist
-				reverseKey := "room_mapping_" + matrixRoomID
-				existingReverse, err := p.kvstore.Get(reverseKey)
-				if err != nil || len(existingReverse) == 0 {
-					if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
-						p.logger.LogWarn("Failed to create reverse DM mapping during migration", "matrix_room_id", matrixRoomID, "channel_id", channelID, "error", err)
-					} else {
-						batchReverseMigratedCount++
-						p.logger.LogDebug("Created reverse DM mapping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
-					}
-				}
-
-				// Remove old DM mapping
-				if err := p.kvstore.Delete(key); err != nil {
-					p.logger.LogWarn("Failed to delete old DM mapping during migration", "key", key, "error", err)
-				} else {
-					p.logger.LogDebug("Deleted old DM mapping", "key", key)
-				}
-			} else if strings.HasPrefix(key, matrixDMMappingPrefix) {
-				// Also migrate reverse DM mappings from matrix_dm_mapping_ to room_mapping_
-				batchProcessedCount++
-
-				// Get the channel ID
-				channelIDBytes, err := p.kvstore.Get(key)
-				if err != nil {
-					p.logger.LogWarn("Failed to get reverse DM mapping during migration", "key", key, "error", err)
-					continue
-				}
-
-				channelID := string(channelIDBytes)
-				matrixRoomID := strings.TrimPrefix(key, matrixDMMappingPrefix)
-
-				// Create unified reverse mapping: room_mapping_<matrixRoomID> -> channelID
-				unifiedReverseKey := "room_mapping_" + matrixRoomID
-
-				// Check if unified reverse mapping already exists
-				existingReverseData, err := p.kvstore.Get(unifiedReverseKey)
-				if err == nil && len(existingReverseData) > 0 {
-					p.logger.LogDebug("Unified reverse mapping already exists, skipping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
-				} else {
-					// Create the unified reverse mapping
-					if err := p.kvstore.Set(unifiedReverseKey, []byte(channelID)); err != nil {
-						p.logger.LogWarn("Failed to create unified reverse DM mapping during migration", "matrix_room_id", matrixRoomID, "channel_id", channelID, "error", err)
-						continue
-					}
 					batchReverseMigratedCount++
-					p.logger.LogDebug("Created unified reverse DM mapping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
+					p.logger.LogDebug("Created reverse DM mapping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
 				}
+			}
 
-				// Remove old reverse DM mapping
-				if err := p.kvstore.Delete(key); err != nil {
-					p.logger.LogWarn("Failed to delete old reverse DM mapping during migration", "key", key, "error", err)
-				} else {
-					p.logger.LogDebug("Deleted old reverse DM mapping", "key", key)
-				}
+			// Remove old DM mapping
+			if err := p.kvstore.Delete(key); err != nil {
+				p.logger.LogWarn("Failed to delete old DM mapping during migration", "key", key, "error", err)
+			} else {
+				p.logger.LogDebug("Deleted old DM mapping", "key", key)
 			}
 		}
 
 		totalMigratedCount += batchMigratedCount
 		totalReverseMigratedCount += batchReverseMigratedCount
-		p.logger.LogDebug("Processed DM mapping batch", "page", page, "batch_size", len(keys), "processed_in_batch", batchProcessedCount, "migrated_in_batch", batchMigratedCount, "reverse_migrated_in_batch", batchReverseMigratedCount)
+
+		p.logger.LogDebug("Migrated DM batch", "page", page, "processed", batchProcessedCount, "migrated", batchMigratedCount, "reverse_migrated", batchReverseMigratedCount)
+
+		// If we got fewer keys than the batch size, we've reached the end
+		if len(keys) < MigrationBatchSize {
+			break
+		}
+
+		page++
+	}
+
+	// Second, migrate matrix_dm_mapping_ keys
+	page = 0
+	for {
+		// Get keys in batches using prefix filtering for efficiency
+		keys, err := p.kvstore.ListKeysWithPrefix(page, MigrationBatchSize, matrixDMMappingPrefix)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to list KV store keys with prefix")
+		}
+
+		if len(keys) == 0 {
+			break // No more keys
+		}
+
+		batchReverseMigratedCount := 0
+		batchProcessedCount := 0
+		for _, key := range keys {
+			// Also migrate reverse DM mappings from matrix_dm_mapping_ to room_mapping_
+			batchProcessedCount++
+
+			// Get the channel ID
+			channelIDBytes, err := p.kvstore.Get(key)
+			if err != nil {
+				p.logger.LogWarn("Failed to get reverse DM mapping during migration", "key", key, "error", err)
+				continue
+			}
+
+			channelID := string(channelIDBytes)
+			matrixRoomID := strings.TrimPrefix(key, matrixDMMappingPrefix)
+
+			// Create unified reverse mapping: room_mapping_<matrixRoomID> -> channelID
+			unifiedReverseKey := "room_mapping_" + matrixRoomID
+
+			// Check if unified reverse mapping already exists
+			existingReverseData, err := p.kvstore.Get(unifiedReverseKey)
+			if err == nil && len(existingReverseData) > 0 {
+				p.logger.LogDebug("Unified reverse mapping already exists, skipping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
+			} else {
+				// Create the unified reverse mapping
+				if err := p.kvstore.Set(unifiedReverseKey, []byte(channelID)); err != nil {
+					p.logger.LogWarn("Failed to create unified reverse DM mapping during migration", "matrix_room_id", matrixRoomID, "channel_id", channelID, "error", err)
+					continue
+				}
+				batchReverseMigratedCount++
+				p.logger.LogDebug("Created unified reverse DM mapping", "matrix_room_id", matrixRoomID, "channel_id", channelID)
+			}
+
+			// Remove old reverse DM mapping
+			if err := p.kvstore.Delete(key); err != nil {
+				p.logger.LogWarn("Failed to delete old reverse DM mapping during migration", "key", key, "error", err)
+			} else {
+				p.logger.LogDebug("Deleted old reverse DM mapping", "key", key)
+			}
+		}
+
+		totalReverseMigratedCount += batchReverseMigratedCount
+		p.logger.LogDebug("Processed reverse DM mapping batch", "page", page, "batch_size", len(keys), "processed_in_batch", batchProcessedCount, "reverse_migrated_in_batch", batchReverseMigratedCount)
 
 		// If we got fewer keys than the batch size, we've reached the end
 		if len(keys) < MigrationBatchSize {

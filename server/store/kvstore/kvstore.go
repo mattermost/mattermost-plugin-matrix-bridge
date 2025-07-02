@@ -9,4 +9,5 @@ type KVStore interface {
 	Set(key string, value []byte) error
 	Delete(key string) error
 	ListKeys(page, perPage int) ([]string, error)
+	ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error)
 }

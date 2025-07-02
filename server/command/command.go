@@ -6,11 +6,11 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // Configuration interface for accessing plugin configuration
@@ -99,12 +99,73 @@ type Handler struct {
 // Command defines the interface for handling Matrix Bridge slash commands.
 type Command interface {
 	Handle(args *model.CommandArgs) (*model.CommandResponse, error)
-	executeHelloCommand(args *model.CommandArgs) *model.CommandResponse
 	executeMatrixCommand(args *model.CommandArgs) *model.CommandResponse
 }
 
-const helloCommandTrigger = "hello"
-const matrixCommandTrigger = "matrix"
+// Command usage and help text constants
+const (
+	// Triggers
+	matrixCommandTrigger = "matrix"
+
+	// Main command usage
+	matrixCommandUsage = "Usage: /matrix [test|create|map|list|status|migrate] [room_name|room_alias|room_id]"
+
+	// Subcommand descriptions for autocomplete
+	testCommandDesc    = "Test Matrix server connection and configuration"
+	createCommandDesc  = "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"
+	createCommandHint  = "[room_name] [publish=true|false]"
+	mapCommandDesc     = "Map current channel to Matrix room (prefer #alias:server.com)"
+	mapCommandHint     = "[room_alias|room_id]"
+	listCommandDesc    = "List all channel-to-room mappings"
+	statusCommandDesc  = "Show bridge status"
+	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings"
+
+	// Map command usage and validation
+	mapCommandUsage     = "Usage: /matrix map [room_alias|room_id]\nExample: /matrix map #test-sync:synapse-wiggin77.ngrok.io"
+	roomIdentifierError = "Invalid room identifier format. Use either:\n• Room alias: `#roomname:server.com` (preferred for joining)\n• Room ID: `!roomid:server.com`"
+
+	// Error messages
+	matrixClientNotConfigured = "❌ Matrix client not configured. Please configure Matrix settings in System Console."
+	unknownSubcommandError    = "Unknown subcommand. Use: test, create, map, list, status, or migrate"
+
+	// Status messages
+	autoJoinSuccess     = "\n\n✅ **Auto-joined** Matrix room successfully!"
+	autoJoinWithUser    = "\n\n✅ **Auto-joined** Matrix room successfully! You're ready to start messaging."
+	autoJoinFailed      = "\n\n⚠️ **Note:** Could not auto-join Matrix room. You may need to manually invite the bridge user or make the room public in Matrix."
+	matrixClientMissing = "\n\n⚠️ **Note:** Matrix client not configured. Please configure Matrix settings and manually invite the bridge user."
+
+	// Room creation status messages
+	roomCreatorJoined        = "\n\nThe bridge user is automatically joined as the room creator."
+	roomCreatorWithUserReady = "\n\nThe bridge user is automatically joined as the room creator. You're ready to start messaging."
+
+	// Sharing status messages
+	channelSharingEnabled = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
+	channelSharingFailed  = "\n\n⚠️ **Note:** Failed to automatically enable channel sharing. You may need to manually enable shared channels for this channel to start syncing."
+
+	// Directory status messages
+	publishedToDirectory    = "\n**Directory:** Published to public directory"
+	notPublishedToDirectory = "\n**Directory:** Not published (private room)"
+
+	// Common help text for commands
+	getStartedHelp = "**Get Started:**\n" +
+		"• `/matrix create` - Create new Matrix room using channel name and map to current channel\n" +
+		"• `/matrix create [room_name]` - Create new Matrix room with custom name and map to current channel\n" +
+		"• `/matrix map [room_alias|room_id]` - Map current channel to existing Matrix room\n"
+
+	commandsHelp = "**Commands:**\n" +
+		"• `/matrix map [room_alias|room_id]` - Map current channel to Matrix room\n" +
+		"• `/matrix create` - Create new Matrix room using channel name and map to current channel\n" +
+		"• `/matrix create [room_name]` - Create new Matrix room with custom name and map to current channel\n" +
+		"• `/matrix status` - Check bridge status\n"
+
+	// Status command response
+	statusCommandResponse = "Matrix Bridge Status:\n- Plugin: Active\n- Configuration: Check System Console → Plugins → Matrix Bridge\n- Logs: Check plugin logs for connection status"
+
+	// Test command next steps
+	testCommandNextSteps = "\n📋 **Next Steps:**\n" +
+		"   • Use `/matrix create \"Room Name\"` to create a Matrix room\n" +
+		"   • The channel will be automatically configured for syncing\n"
+)
 
 // NewCommandHandler creates and registers all slash commands for the Matrix Bridge plugin.
 func NewCommandHandler(plugin PluginAccessor) Command {
@@ -114,26 +175,25 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	matrixClient := plugin.GetMatrixClient()
 	pluginAPI := plugin.GetPluginAPI()
 
-	err := client.SlashCommand.Register(&model.Command{
-		Trigger:          helloCommandTrigger,
-		AutoComplete:     true,
-		AutoCompleteDesc: "Say hello to someone",
-		AutoCompleteHint: "[@username]",
-		AutocompleteData: model.NewAutocompleteData(helloCommandTrigger, "[@username]", "Username to say hello to"),
-	})
-	if err != nil {
-		client.Log.Error("Failed to register hello command", "error", err)
-	}
-
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix server connection and configuration"))
-	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
-	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
-	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
-	matrixData.AddCommand(model.NewAutocompleteData("status", "", "Show bridge status"))
-	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", "Reset and re-run KV store migrations to fix missing room mappings"))
+	matrixData.AddCommand(model.NewAutocompleteData("test", "", testCommandDesc))
 
-	err = client.SlashCommand.Register(&model.Command{
+	// Create command with argument completion
+	createCmd := model.NewAutocompleteData("create", createCommandHint, createCommandDesc)
+	createCmd.AddTextArgument("Optional room name (defaults to channel name)", "[room_name]", "")
+	createCmd.AddTextArgument("Optional publish flag", "[publish=true|false]", "")
+	matrixData.AddCommand(createCmd)
+
+	// Map command with argument completion
+	mapCmd := model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc)
+	mapCmd.AddTextArgument("Matrix room alias or room ID", "[room_alias|room_id]", "")
+	matrixData.AddCommand(mapCmd)
+
+	matrixData.AddCommand(model.NewAutocompleteData("list", "", listCommandDesc))
+	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
+	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
+
+	err := client.SlashCommand.Register(&model.Command{
 		Trigger:          matrixCommandTrigger,
 		AutoComplete:     true,
 		AutoCompleteDesc: "Matrix bridge commands",
@@ -157,8 +217,6 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error) {
 	trigger := strings.TrimPrefix(strings.Fields(args.Command)[0], "/")
 	switch trigger {
-	case helloCommandTrigger:
-		return c.executeHelloCommand(args), nil
 	case matrixCommandTrigger:
 		return c.executeMatrixCommand(args), nil
 	default:
@@ -169,25 +227,12 @@ func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error
 	}
 }
 
-func (c *Handler) executeHelloCommand(args *model.CommandArgs) *model.CommandResponse {
-	if len(strings.Fields(args.Command)) < 2 {
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Please specify a username",
-		}
-	}
-	username := strings.Fields(args.Command)[1]
-	return &model.CommandResponse{
-		Text: "Hello, " + username,
-	}
-}
-
 func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier string) *model.CommandResponse {
 	// Validate room identifier format (should start with ! or # and contain a colon)
 	if (!strings.HasPrefix(roomIdentifier, "!") && !strings.HasPrefix(roomIdentifier, "#")) || !strings.Contains(roomIdentifier, ":") {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Invalid room identifier format. Use either:\n• Room alias: `#roomname:server.com` (preferred for joining)\n• Room ID: `!roomid:server.com`",
+			Text:         roomIdentifierError,
 		}
 	}
 
@@ -207,7 +252,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		// Join the AS bot to establish bridge presence
 		if err := c.matrixClient.JoinRoom(roomIdentifier); err != nil {
 			c.client.Log.Warn("Failed to auto-join Matrix room", "error", err, "room_identifier", roomIdentifier)
-			joinStatus = "\n\n⚠️ **Note:** Could not auto-join Matrix room. You may need to manually invite the bridge user or make the room public in Matrix."
+			joinStatus = autoJoinFailed
 		} else {
 			c.client.Log.Info("Successfully joined Matrix room as AS bot", "room_identifier", roomIdentifier)
 
@@ -215,27 +260,27 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 			user, appErr := c.client.User.Get(args.UserId)
 			if appErr != nil {
 				c.client.Log.Warn("Failed to get command issuer for ghost user join", "error", appErr, "user_id", args.UserId)
-				joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+				joinStatus = autoJoinSuccess
 			} else {
 				// Create or get ghost user for the command issuer
 				ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
 				if err != nil {
 					c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
-					joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+					joinStatus = autoJoinSuccess
 				} else {
 					// Join the ghost user to the room
 					if err := c.matrixClient.JoinRoomAsUser(roomIdentifier, ghostUserID); err != nil {
 						c.client.Log.Warn("Failed to join ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
-						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully!"
+						joinStatus = autoJoinSuccess
 					} else {
 						c.client.Log.Info("Successfully joined ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
-						joinStatus = "\n\n✅ **Auto-joined** Matrix room successfully! You're ready to start messaging."
+						joinStatus = autoJoinWithUser
 					}
 				}
 			}
 		}
 	} else {
-		joinStatus = "\n\n⚠️ **Note:** Matrix client not configured. Please configure Matrix settings and manually invite the bridge user."
+		joinStatus = matrixClientMissing
 	}
 
 	// Save both directions of the mapping
@@ -334,10 +379,10 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
 	if shareErr != nil {
 		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
-		shareStatus = "\n\n⚠️ **Note:** Failed to automatically enable channel sharing. You may need to manually enable shared channels for this channel to start syncing."
+		shareStatus = channelSharingFailed
 	} else {
 		c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
-		shareStatus = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
+		shareStatus = channelSharingEnabled
 	}
 
 	return &model.CommandResponse{
@@ -350,7 +395,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	if c.matrixClient == nil {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "❌ Matrix client not configured. Please configure Matrix settings in System Console.",
+			Text:         matrixClientNotConfigured,
 		}
 	}
 
@@ -390,21 +435,21 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	user, appErr := c.client.User.Get(args.UserId)
 	if appErr != nil {
 		c.client.Log.Warn("Failed to get command issuer for ghost user join", "error", appErr, "user_id", args.UserId)
-		joinStatus = "\n\nThe bridge user is automatically joined as the room creator."
+		joinStatus = roomCreatorJoined
 	} else {
 		// Create or get ghost user for the command issuer
 		ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
 		if err != nil {
 			c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
-			joinStatus = "\n\nThe bridge user is automatically joined as the room creator."
+			joinStatus = roomCreatorJoined
 		} else {
 			// Join the ghost user to the room
 			if err := c.matrixClient.JoinRoomAsUser(roomID, ghostUserID); err != nil {
 				c.client.Log.Warn("Failed to join ghost user to created room", "error", err, "ghost_user_id", ghostUserID, "room_id", roomID)
-				joinStatus = "\n\nThe bridge user is automatically joined as the room creator."
+				joinStatus = roomCreatorJoined
 			} else {
 				c.client.Log.Info("Successfully joined ghost user to created room", "ghost_user_id", ghostUserID, "room_id", roomID)
-				joinStatus = "\n\nThe bridge user is automatically joined as the room creator. You're ready to start messaging."
+				joinStatus = roomCreatorWithUserReady
 			}
 		}
 	}
@@ -446,18 +491,18 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
 	if shareErr != nil {
 		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_id", roomID)
-		shareStatus = "\n\n⚠️ **Note:** Failed to automatically enable channel sharing. You may need to manually enable shared channels for this channel to start syncing."
+		shareStatus = channelSharingFailed
 	} else {
 		c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId, "room_id", roomID)
-		shareStatus = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
+		shareStatus = channelSharingEnabled
 	}
 
 	// Build status message based on publish parameter
 	publishStatus := ""
 	if publish {
-		publishStatus = "\n**Directory:** Published to public directory"
+		publishStatus = publishedToDirectory
 	} else {
-		publishStatus = "\n**Directory:** Not published (private room)"
+		publishStatus = notPublishedToDirectory
 	}
 
 	return &model.CommandResponse{
@@ -470,16 +515,16 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	var responseText strings.Builder
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
 
-	// Get all channel mapping keys using pagination
+	// Get channel mapping keys using efficient prefix filtering
 	mappings := make(map[string]string)
 	channelMappingPrefix := "channel_mapping_"
 	page := 0
 	batchSize := 1000
 
 	for {
-		keys, err := c.kvstore.ListKeys(page, batchSize)
+		keys, err := c.kvstore.ListKeysWithPrefix(page, batchSize, channelMappingPrefix)
 		if err != nil {
-			c.client.Log.Error("Failed to list KV store keys", "error", err, "page", page)
+			c.client.Log.Error("Failed to list KV store keys with prefix", "error", err, "page", page, "prefix", channelMappingPrefix)
 			responseText.WriteString("❌ Failed to retrieve mappings. Check plugin logs for details.\n")
 			return &model.CommandResponse{
 				ResponseType: model.CommandResponseTypeEphemeral,
@@ -491,14 +536,12 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 			break // No more keys
 		}
 
-		// Filter for channel mapping keys and build mappings
+		// Build mappings directly (no need to filter since prefix filtering is server-side)
 		for _, key := range keys {
-			if strings.HasPrefix(key, channelMappingPrefix) {
-				channelID := strings.TrimPrefix(key, channelMappingPrefix)
-				roomIDBytes, err := c.kvstore.Get(key)
-				if err == nil && len(roomIDBytes) > 0 {
-					mappings[channelID] = string(roomIDBytes)
-				}
+			channelID := strings.TrimPrefix(key, channelMappingPrefix)
+			roomIDBytes, err := c.kvstore.Get(key)
+			if err == nil && len(roomIDBytes) > 0 {
+				mappings[channelID] = string(roomIDBytes)
 			}
 		}
 
@@ -512,10 +555,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 
 	if len(mappings) == 0 {
 		responseText.WriteString("No channel mappings found.\n\n")
-		responseText.WriteString("**Get Started:**\n")
-		responseText.WriteString("• `/matrix create` - Create new Matrix room using channel name and map to current channel\n")
-		responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room with custom name and map to current channel\n")
-		responseText.WriteString("• `/matrix map [room_alias|room_id]` - Map current channel to existing Matrix room\n")
+		responseText.WriteString(getStartedHelp)
 	} else {
 		// Show current channel first if it has a mapping
 		currentChannelMapping := mappings[args.ChannelId]
@@ -554,11 +594,8 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 		}
 	}
 
-	responseText.WriteString("\n**Commands:**\n")
-	responseText.WriteString("• `/matrix map [room_alias|room_id]` - Map current channel to Matrix room\n")
-	responseText.WriteString("• `/matrix create` - Create new Matrix room using channel name and map to current channel\n")
-	responseText.WriteString("• `/matrix create [room_name]` - Create new Matrix room with custom name and map to current channel\n")
-	responseText.WriteString("• `/matrix status` - Check bridge status\n")
+	responseText.WriteString("\n")
+	responseText.WriteString(commandsHelp)
 
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
@@ -571,7 +608,7 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 	if len(fields) < 2 {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Usage: /matrix [test|create|map|list|status|migrate] [room_name|room_alias|room_id]",
+			Text:         matrixCommandUsage,
 		}
 	}
 
@@ -634,7 +671,7 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 		if len(fields) < 3 {
 			return &model.CommandResponse{
 				ResponseType: model.CommandResponseTypeEphemeral,
-				Text:         "Usage: /matrix map [room_alias|room_id]\nExample: /matrix map #test-sync:synapse-wiggin77.ngrok.io",
+				Text:         mapCommandUsage,
 			}
 		}
 		roomID := fields[2]
@@ -644,14 +681,14 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 	case "status":
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Matrix Bridge Status:\n- Plugin: Active\n- Configuration: Check System Console → Plugins → Matrix Bridge\n- Logs: Check plugin logs for connection status",
+			Text:         statusCommandResponse,
 		}
 	case "migrate":
 		return c.executeMigrateCommand(args)
 	default:
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "Unknown subcommand. Use: test, create, map, list, status, or migrate",
+			Text:         unknownSubcommandError,
 		}
 	}
 }
@@ -768,9 +805,7 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	}
 
 	// Test shared channels registration
-	responseText.WriteString("\n📋 **Next Steps:**\n")
-	responseText.WriteString("   • Use `/matrix create \"Room Name\"` to create a Matrix room\n")
-	responseText.WriteString("   • The channel will be automatically configured for syncing\n")
+	responseText.WriteString(testCommandNextSteps)
 
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,

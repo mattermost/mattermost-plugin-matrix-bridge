@@ -6,9 +6,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 // MatrixToMattermostBridge handles syncing FROM Matrix TO Mattermost

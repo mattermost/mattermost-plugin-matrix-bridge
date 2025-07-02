@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 type env struct {
@@ -83,54 +83,6 @@ func setupTest() *env {
 		client: client,
 		api:    api,
 	}
-}
-
-func TestHelloCommand(t *testing.T) {
-	assert := assert.New(t)
-	env := setupTest()
-
-	// Expect both command registrations
-	env.api.On("RegisterCommand", &model.Command{
-		Trigger:          helloCommandTrigger,
-		AutoComplete:     true,
-		AutoCompleteDesc: "Say hello to someone",
-		AutoCompleteHint: "[@username]",
-		AutocompleteData: model.NewAutocompleteData("hello", "[@username]", "Username to say hello to"),
-	}).Return(nil)
-
-	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix server connection and configuration"))
-	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
-	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
-	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
-	matrixData.AddCommand(model.NewAutocompleteData("status", "", "Show bridge status"))
-	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", "Reset and re-run KV store migrations to fix missing room mappings"))
-
-	env.api.On("RegisterCommand", &model.Command{
-		Trigger:          matrixCommandTrigger,
-		AutoComplete:     true,
-		AutoCompleteDesc: "Matrix bridge commands",
-		AutoCompleteHint: "[subcommand]",
-		AutocompleteData: matrixData,
-	}).Return(nil)
-
-	// Create mock plugin API
-	mockPlugin := &mockPlugin{
-		client:       env.client,
-		kvstore:      kvstore.NewKVStore(env.client),
-		matrixClient: matrix.NewClient("http://test.com", "test_token", "test_remote_id", env.api),
-		config:       &mockConfiguration{serverURL: "http://test.com"},
-		pluginAPI:    env.api,
-	}
-
-	cmdHandler := NewCommandHandler(mockPlugin)
-
-	args := &model.CommandArgs{
-		Command: "/hello world",
-	}
-	response, err := cmdHandler.Handle(args)
-	assert.Nil(err)
-	assert.Equal("Hello, world", response.Text)
 }
 
 func TestMatrixCreateCommandParsing(t *testing.T) {
@@ -378,23 +330,24 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 }
 
 func setupCommandRegistration(env *env) {
-	// Hello command registration
-	env.api.On("RegisterCommand", &model.Command{
-		Trigger:          helloCommandTrigger,
-		AutoComplete:     true,
-		AutoCompleteDesc: "Say hello to someone",
-		AutoCompleteHint: "[@username]",
-		AutocompleteData: model.NewAutocompleteData("hello", "[@username]", "Username to say hello to"),
-	}).Return(nil)
-
 	// Matrix command registration
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", "Test Matrix server connection and configuration"))
-	matrixData.AddCommand(model.NewAutocompleteData("create", "[room_name] [publish=true|false]", "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"))
-	matrixData.AddCommand(model.NewAutocompleteData("map", "[room_alias|room_id]", "Map current channel to Matrix room (prefer #alias:server.com)"))
-	matrixData.AddCommand(model.NewAutocompleteData("list", "", "List all channel-to-room mappings"))
-	matrixData.AddCommand(model.NewAutocompleteData("status", "", "Show bridge status"))
-	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", "Reset and re-run KV store migrations to fix missing room mappings"))
+	matrixData.AddCommand(model.NewAutocompleteData("test", "", testCommandDesc))
+
+	// Create command with argument completion
+	createCmd := model.NewAutocompleteData("create", createCommandHint, createCommandDesc)
+	createCmd.AddTextArgument("Optional room name (defaults to channel name)", "[room_name]", "")
+	createCmd.AddTextArgument("Optional publish flag", "[publish=true|false]", "")
+	matrixData.AddCommand(createCmd)
+
+	// Map command with argument completion
+	mapCmd := model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc)
+	mapCmd.AddTextArgument("Matrix room alias or room ID", "[room_alias|room_id]", "")
+	matrixData.AddCommand(mapCmd)
+
+	matrixData.AddCommand(model.NewAutocompleteData("list", "", listCommandDesc))
+	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
+	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
 
 	env.api.On("RegisterCommand", &model.Command{
 		Trigger:          matrixCommandTrigger,
@@ -509,10 +462,10 @@ func TestMatrixCommandErrors(t *testing.T) {
 			description: "should handle missing subcommand",
 		},
 		{
-			name:        "completely different command",
-			command:     "/hello",
+			name:        "unknown command",
+			command:     "/unknown",
 			expectError: false,
-			description: "should handle hello command normally",
+			description: "should handle unknown commands gracefully",
 		},
 	}
 

@@ -1,19 +1,21 @@
 package main
 
 import (
+	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
-	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // testLogger implements Logger interface for testing
@@ -328,6 +330,36 @@ func (m *MemoryKVStore) ListKeys(page, perPage int) ([]string, error) {
 	return keys[start:end], nil
 }
 
+// ListKeysWithPrefix retrieves a paginated list of keys with a specific prefix from the KV store.
+func (m *MemoryKVStore) ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Collect keys with the specified prefix
+	keys := make([]string, 0, len(m.data))
+	for key := range m.data {
+		if strings.HasPrefix(key, prefix) {
+			keys = append(keys, key)
+		}
+	}
+
+	// Sort keys for consistent ordering
+	sort.Strings(keys)
+
+	// Apply pagination
+	start := page * perPage
+	if start >= len(keys) {
+		return []string{}, nil
+	}
+
+	end := start + perPage
+	if end > len(keys) {
+		end = len(keys)
+	}
+
+	return keys[start:end], nil
+}
+
 // Clear removes all data from the store (useful for test cleanup).
 func (m *MemoryKVStore) Clear() {
 	m.mu.Lock()
@@ -378,4 +410,15 @@ func TestMemoryKVStore(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for deleted key")
 	}
+}
+
+// TestMain provides global test setup and cleanup
+func TestMain(m *testing.M) {
+	// Run tests
+	code := m.Run()
+
+	// Ensure all Matrix containers are cleaned up
+	matrixtest.CleanupAllContainers()
+
+	os.Exit(code)
 }

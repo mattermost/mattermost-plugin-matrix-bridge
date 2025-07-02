@@ -319,7 +319,7 @@ detach: setup-attach
 .PHONY: test
 test: apply webapp/node_modules install-go-tools
 ifneq ($(HAS_SERVER),)
-	$(GOBIN)/gotestsum -- -v ./...
+	$(GOBIN)/gotestsum -- -v -count=1 -p 1 ./...
 endif
 ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test;
@@ -330,7 +330,7 @@ endif
 .PHONY: test-ci
 test-ci: apply webapp/node_modules install-go-tools
 ifneq ($(HAS_SERVER),)
-	$(GOBIN)/gotestsum --format standard-verbose --junitfile report.xml -- ./...
+	$(GOBIN)/gotestsum --format standard-verbose --junitfile report.xml -- -p 1 ./...
 endif
 ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test;
@@ -413,7 +413,7 @@ help:
 mock:
 ifneq ($(HAS_SERVER),)
 	go install github.com/golang/mock/mockgen@v1.6.0
-	$(GOBIN)/mockgen -destination=server/command/mocks/mock_commands.go -package=mocks github.com/wiggin77/mattermost-plugin-matrix-bridge/server/command Command
+	$(GOBIN)/mockgen -destination=server/command/mocks/mock_commands.go -package=mocks github.com/mattermost/mattermost-plugin-matrix-bridge/server/command Command
 	$(GOBIN)/mockgen -destination=server/mocks/mock_plugin_api.go -package=mocks github.com/mattermost/mattermost/server/public/plugin API
-	$(GOBIN)/mockgen -destination=server/mocks/mock_kvstore.go -package=mocks github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore KVStore
+	$(GOBIN)/mockgen -destination=server/mocks/mock_kvstore.go -package=mocks github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore KVStore
 endif
