@@ -172,7 +172,6 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	// Cache frequently used services for reduced verbosity
 	client := plugin.GetPluginAPIClient()
 	kvstore := plugin.GetKVStore()
-	matrixClient := plugin.GetMatrixClient()
 	pluginAPI := plugin.GetPluginAPI()
 
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
@@ -208,7 +207,7 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 		plugin:       plugin,
 		client:       client,
 		kvstore:      kvstore,
-		matrixClient: matrixClient,
+		matrixClient: nil, // Get dynamically to avoid stale references
 		pluginAPI:    pluginAPI,
 	}
 }
@@ -228,6 +227,15 @@ func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error
 }
 
 func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier string) *model.CommandResponse {
+	// Get current Matrix client and fail fast if not configured
+	matrixClient := c.plugin.GetMatrixClient()
+	if matrixClient == nil {
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         matrixClientNotConfigured,
+		}
+	}
+
 	// Validate room identifier format (should start with ! or # and contain a colon)
 	if (!strings.HasPrefix(roomIdentifier, "!") && !strings.HasPrefix(roomIdentifier, "#")) || !strings.Contains(roomIdentifier, ":") {
 		return &model.CommandResponse{
@@ -248,39 +256,35 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 
 	// Try to join the Matrix room automatically
 	var joinStatus string
-	if c.matrixClient != nil {
-		// Join the AS bot to establish bridge presence
-		if err := c.matrixClient.JoinRoom(roomIdentifier); err != nil {
-			c.client.Log.Warn("Failed to auto-join Matrix room", "error", err, "room_identifier", roomIdentifier)
-			joinStatus = autoJoinFailed
-		} else {
-			c.client.Log.Info("Successfully joined Matrix room as AS bot", "room_identifier", roomIdentifier)
+	// Join the AS bot to establish bridge presence
+	if err := matrixClient.JoinRoom(roomIdentifier); err != nil {
+		c.client.Log.Warn("Failed to auto-join Matrix room", "error", err, "room_identifier", roomIdentifier)
+		joinStatus = autoJoinFailed
+	} else {
+		c.client.Log.Info("Successfully joined Matrix room as AS bot", "room_identifier", roomIdentifier)
 
-			// Also join the ghost user of the command issuer for immediate messaging capability
-			user, appErr := c.client.User.Get(args.UserId)
-			if appErr != nil {
-				c.client.Log.Warn("Failed to get command issuer for ghost user join", "error", appErr, "user_id", args.UserId)
+		// Also join the ghost user of the command issuer for immediate messaging capability
+		user, appErr := c.client.User.Get(args.UserId)
+		if appErr != nil {
+			c.client.Log.Warn("Failed to get command issuer for ghost user join", "error", appErr, "user_id", args.UserId)
+			joinStatus = autoJoinSuccess
+		} else {
+			// Create or get ghost user for the command issuer
+			ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
+			if err != nil {
+				c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
 				joinStatus = autoJoinSuccess
 			} else {
-				// Create or get ghost user for the command issuer
-				ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
-				if err != nil {
-					c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
+				// Join the ghost user to the room
+				if err := matrixClient.JoinRoomAsUser(roomIdentifier, ghostUserID); err != nil {
+					c.client.Log.Warn("Failed to join ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
 					joinStatus = autoJoinSuccess
 				} else {
-					// Join the ghost user to the room
-					if err := c.matrixClient.JoinRoomAsUser(roomIdentifier, ghostUserID); err != nil {
-						c.client.Log.Warn("Failed to join ghost user to room", "error", err, "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
-						joinStatus = autoJoinSuccess
-					} else {
-						c.client.Log.Info("Successfully joined ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
-						joinStatus = autoJoinWithUser
-					}
+					c.client.Log.Info("Successfully joined ghost user to room", "ghost_user_id", ghostUserID, "room_identifier", roomIdentifier)
+					joinStatus = autoJoinWithUser
 				}
 			}
 		}
-	} else {
-		joinStatus = matrixClientMissing
 	}
 
 	// Save both directions of the mapping
@@ -303,8 +307,8 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	}
 
 	// If roomIdentifier is an alias, also resolve to room ID and store that mapping
-	if strings.HasPrefix(roomIdentifier, "#") && c.matrixClient != nil {
-		if resolvedRoomID, err := c.matrixClient.ResolveRoomAlias(roomIdentifier); err == nil {
+	if strings.HasPrefix(roomIdentifier, "#") {
+		if resolvedRoomID, err := matrixClient.ResolveRoomAlias(roomIdentifier); err == nil {
 			roomIDMappingKey := "room_mapping_" + resolvedRoomID
 			if err := c.kvstore.Set(roomIDMappingKey, []byte(args.ChannelId)); err != nil {
 				c.client.Log.Error("Failed to save room ID mapping", "error", err, "room_id", resolvedRoomID, "channel_id", args.ChannelId)
@@ -315,46 +319,44 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	c.client.Log.Info("Channel mapping saved", "channel_id", args.ChannelId, "channel_name", channelName, "room_identifier", roomIdentifier)
 
 	// Add bridge alias for Matrix Application Service filtering
-	if c.matrixClient != nil {
-		// Extract room name from the identifier for the bridge alias
-		var roomName string
-		if strings.HasPrefix(roomIdentifier, "#") {
-			// Extract local part from room alias (#name:server.com -> name)
-			parts := strings.Split(roomIdentifier[1:], ":")
-			if len(parts) > 0 {
-				roomName = parts[0]
+	// Extract room name from the identifier for the bridge alias
+	var roomName string
+	if strings.HasPrefix(roomIdentifier, "#") {
+		// Extract local part from room alias (#name:server.com -> name)
+		parts := strings.Split(roomIdentifier[1:], ":")
+		if len(parts) > 0 {
+			roomName = parts[0]
+		}
+	} else {
+		// For room IDs, use channel name as fallback
+		roomName = strings.ToLower(strings.ReplaceAll(channelName, " ", "-"))
+		roomName = strings.ReplaceAll(roomName, "_", "-")
+	}
+
+	if roomName != "" {
+		// Create bridge alias
+		serverDomain := c.extractServerDomain()
+		bridgeAlias := "#mattermost-bridge-" + roomName + ":" + serverDomain
+
+		// First resolve room identifier to room ID
+		roomID, err := matrixClient.ResolveRoomAlias(roomIdentifier)
+		if err != nil {
+			// If it's already a room ID, use it directly
+			if strings.HasPrefix(roomIdentifier, "!") {
+				roomID = roomIdentifier
+			} else {
+				c.client.Log.Warn("Failed to resolve room identifier for bridge alias", "error", err, "room_identifier", roomIdentifier)
+				roomID = ""
 			}
-		} else {
-			// For room IDs, use channel name as fallback
-			roomName = strings.ToLower(strings.ReplaceAll(channelName, " ", "-"))
-			roomName = strings.ReplaceAll(roomName, "_", "-")
 		}
 
-		if roomName != "" {
-			// Create bridge alias
-			serverDomain := c.extractServerDomain()
-			bridgeAlias := "#mattermost-bridge-" + roomName + ":" + serverDomain
-
-			// First resolve room identifier to room ID
-			roomID, err := c.matrixClient.ResolveRoomAlias(roomIdentifier)
+		if roomID != "" {
+			err = matrixClient.AddRoomAlias(roomID, bridgeAlias)
 			if err != nil {
-				// If it's already a room ID, use it directly
-				if strings.HasPrefix(roomIdentifier, "!") {
-					roomID = roomIdentifier
-				} else {
-					c.client.Log.Warn("Failed to resolve room identifier for bridge alias", "error", err, "room_identifier", roomIdentifier)
-					roomID = ""
-				}
-			}
-
-			if roomID != "" {
-				err = c.matrixClient.AddRoomAlias(roomID, bridgeAlias)
-				if err != nil {
-					c.client.Log.Warn("Failed to add bridge filtering alias for manual mapping", "error", err, "bridge_alias", bridgeAlias, "room_id", roomID)
-					// Continue - mapping still works, just no filtering alias
-				} else {
-					c.client.Log.Info("Successfully added bridge filtering alias for manual mapping", "room_id", roomID, "bridge_alias", bridgeAlias, "original_identifier", roomIdentifier)
-				}
+				c.client.Log.Warn("Failed to add bridge filtering alias for manual mapping", "error", err, "bridge_alias", bridgeAlias, "room_id", roomID)
+				// Continue - mapping still works, just no filtering alias
+			} else {
+				c.client.Log.Info("Successfully added bridge filtering alias for manual mapping", "room_id", roomID, "bridge_alias", bridgeAlias, "original_identifier", roomIdentifier)
 			}
 		}
 	}
@@ -392,7 +394,9 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 }
 
 func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName string, publish bool) *model.CommandResponse {
-	if c.matrixClient == nil {
+	// Get current Matrix client and fail fast if not configured
+	matrixClient := c.plugin.GetMatrixClient()
+	if matrixClient == nil {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         matrixClientNotConfigured,
@@ -419,7 +423,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	// Create the Matrix room
 	// Extract server domain from Matrix server URL
 	serverDomain := c.extractServerDomain()
-	roomID, err := c.matrixClient.CreateRoom(roomName, topic, serverDomain, publish, args.ChannelId)
+	roomID, err := matrixClient.CreateRoom(roomName, topic, serverDomain, publish, args.ChannelId)
 	if err != nil {
 		c.client.Log.Error("Failed to create Matrix room", "error", err, "room_name", roomName)
 		return &model.CommandResponse{
@@ -444,7 +448,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 			joinStatus = roomCreatorJoined
 		} else {
 			// Join the ghost user to the room
-			if err := c.matrixClient.JoinRoomAsUser(roomID, ghostUserID); err != nil {
+			if err := matrixClient.JoinRoomAsUser(roomID, ghostUserID); err != nil {
 				c.client.Log.Warn("Failed to join ghost user to created room", "error", err, "ghost_user_id", ghostUserID, "room_id", roomID)
 				joinStatus = roomCreatorJoined
 			} else {
@@ -750,8 +754,9 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 
 	responseText.WriteString(fmt.Sprintf("✅ **Server URL:** %s\n", serverURL))
 
-	// Check Matrix client availability
-	if c.matrixClient == nil {
+	// Get current Matrix client and check if configured
+	matrixClient := c.plugin.GetMatrixClient()
+	if matrixClient == nil {
 		responseText.WriteString("❌ **Matrix Client:** Not initialized\n")
 		responseText.WriteString("📝 **Action:** Check that Application Service and Homeserver tokens are generated\n")
 		return &model.CommandResponse{
@@ -763,7 +768,7 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	responseText.WriteString("✅ **Matrix Client:** Initialized\n")
 
 	// Test Matrix server connection
-	err := c.matrixClient.TestConnection()
+	err := matrixClient.TestConnection()
 	if err != nil {
 		responseText.WriteString("❌ **Connection:** Failed to connect to Matrix server\n")
 		responseText.WriteString(fmt.Sprintf("🔍 **Error:** %s\n", err.Error()))
@@ -780,7 +785,7 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	responseText.WriteString("✅ **Connection:** Successfully connected to Matrix server\n")
 
 	// Try to get server information (name and version)
-	serverInfo, infoErr := c.matrixClient.GetServerInfo()
+	serverInfo, infoErr := matrixClient.GetServerInfo()
 	if infoErr == nil && serverInfo != nil {
 		if serverInfo.Name != "Matrix Server" || serverInfo.Version != "Unknown" {
 			responseText.WriteString(fmt.Sprintf("📊 **Matrix Server:** %s", serverInfo.Name))
@@ -792,7 +797,7 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	}
 
 	// Test Application Service permissions without making invasive changes
-	asErr := c.matrixClient.TestApplicationServicePermissions()
+	asErr := matrixClient.TestApplicationServicePermissions()
 	if asErr != nil {
 		responseText.WriteString("❌ **Application Service:** Permission test failed\n")
 		responseText.WriteString(fmt.Sprintf("🔍 **Error:** %s\n", asErr.Error()))
