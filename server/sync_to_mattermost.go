@@ -154,6 +154,13 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 		return errors.Wrap(appErr, "failed to create Mattermost post")
 	}
 
+	// Store Matrix event ID to Mattermost post ID mapping for efficient reverse lookups
+	mappingKey := "matrix_event_post_" + event.EventID
+	if err := b.kvstore.Set(mappingKey, []byte(createdPost.Id)); err != nil {
+		b.logger.LogWarn("Failed to store Matrix event to post mapping", "error", err, "matrix_event_id", event.EventID, "post_id", createdPost.Id)
+		// Continue anyway - post was created successfully
+	}
+
 	b.logger.LogDebug("Successfully synced Matrix message to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "sender", event.Sender, "channel_id", channelID)
 	return nil
 }
@@ -287,6 +294,13 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 	createdPost, appErr := b.API.CreatePost(post)
 	if appErr != nil {
 		return errors.Wrap(appErr, "failed to create Mattermost post with file attachment")
+	}
+
+	// Store Matrix event ID to Mattermost post ID mapping for efficient reverse lookups
+	mappingKey := "matrix_event_post_" + event.EventID
+	if err := b.kvstore.Set(mappingKey, []byte(createdPost.Id)); err != nil {
+		b.logger.LogWarn("Failed to store Matrix event to post mapping", "error", err, "matrix_event_id", event.EventID, "post_id", createdPost.Id)
+		// Continue anyway - post was created successfully
 	}
 
 	b.logger.LogDebug("Successfully synced Matrix file to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "filename", body, "file_id", uploadedFileInfo.Id)
@@ -778,9 +792,17 @@ func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, chann
 		return postID
 	}
 
-	// If no mattermost_post_id is found, this Matrix event did not originate from Mattermost
-	// This is normal for events created directly in Matrix
-	b.logger.LogDebug("Matrix event has no Mattermost post ID metadata - event did not originate from Mattermost", "event_id", matrixEventID)
+	// If no mattermost_post_id metadata found, check KV store for Matrix-originated events
+	// that have been synced to Mattermost
+	mappingKey := "matrix_event_post_" + matrixEventID
+	if postIDBytes, err := b.kvstore.Get(mappingKey); err == nil && len(postIDBytes) > 0 {
+		postID := string(postIDBytes)
+		b.logger.LogDebug("Found Mattermost post ID for Matrix-originated event in KV store", "matrix_event_id", matrixEventID, "mattermost_post_id", postID)
+		return postID
+	}
+
+	// No Mattermost post found for this Matrix event - event was not synced to Mattermost
+	b.logger.LogDebug("No Mattermost post found for Matrix event", "event_id", matrixEventID)
 	return ""
 }
 
