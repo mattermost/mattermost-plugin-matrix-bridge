@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
-	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // testLogger implements Logger interface for testing

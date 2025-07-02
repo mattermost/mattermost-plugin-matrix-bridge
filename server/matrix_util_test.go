@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
 	"github.com/mattermost/mattermost/server/public/model"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/mocks"
 )
 
 func TestParseDisplayName(t *testing.T) {

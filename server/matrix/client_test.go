@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
-	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // MatrixClientTestSuite contains integration tests for Matrix client operations.

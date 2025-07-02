@@ -2,8 +2,8 @@
     "id": "com.mattermost.plugin-matrix-bridge",
     "name": "Mattermost bridge for Matrix",
     "description": "This plugin provides a bridge connecting Mattermost and Matrix servers.",
-    "homepage_url": "https://github.com/wiggin77/mattermost-plugin-matrix-bridge",
-    "support_url": "https://github.com/wiggin77/mattermost-plugin-matrix-bridge/issues",
+    "homepage_url": "https://github.com/mattermost/mattermost-plugin-matrix-bridge",
+    "support_url": "https://github.com/mattermost/mattermost-plugin-matrix-bridge/issues",
     "icon_path": "assets/matrix-bridge.svg",
     "min_server_version": "10.7.1",
     "server": {

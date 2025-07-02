@@ -4,13 +4,13 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/mocks"
-	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // TestGetThreadRootFromPostID tests the thread root resolution functionality with mocked API

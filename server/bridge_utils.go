@@ -3,11 +3,11 @@ package main
 import (
 	"strings"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/pkg/errors"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // ConfigurationGetter interface for getting plugin configuration
