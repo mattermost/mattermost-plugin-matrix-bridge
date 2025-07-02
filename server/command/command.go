@@ -13,6 +13,11 @@ import (
 	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
+const (
+	// CurrentKVStoreVersion is the current version requiring migrations
+	CurrentKVStoreVersion = 2
+)
+
 // Configuration interface for accessing plugin configuration
 type Configuration interface {
 	GetMatrixServerURL() string
@@ -850,7 +855,7 @@ func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResp
 		ResponseType: model.CommandResponseTypeEphemeral,
 		Text: fmt.Sprintf("✅ **Migration completed successfully!**\n\n"+
 			"**Migration Results:**\n"+
-			"   • Reset version: %s → 2\n"+
+			"   • Reset version: %s → %d\n"+
 			"   • User reverse mappings created/updated: %d\n"+
 			"   • Channel reverse mappings created/updated: %d\n"+
 			"   • Room ID mappings created/updated: %d\n"+
@@ -858,7 +863,7 @@ func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResp
 			"   • DM reverse mappings created: %d\n\n"+
 			"This should have resolved any missing or incorrect mappings.\n"+
 			"Check the plugin logs for detailed migration information.",
-			currentVersion,
+			currentVersion, CurrentKVStoreVersion,
 			userMappingsAdded, channelMappingsAdded, roomMappingsAdded,
 			dmMappingsAdded, reverseDMMappingsAdded),
 	}
