@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/command"
 	"github.com/pkg/errors"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/command"
 )
 
 // MigrationResult holds the results of a migration operation

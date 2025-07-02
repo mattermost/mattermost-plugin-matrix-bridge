@@ -591,7 +591,7 @@ func TestGetMattermostUsernameFromMatrix(t *testing.T) {
 		},
 		{
 			name:         "ghost user found successfully",
-			matrixUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-wiggin77.ngrok.io",
+			matrixUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-mydomain.com",
 			expected:     "doug_lauder",
 			setup: func(mockAPI *mocks.MockAPI, _ *mocks.MockKVStore) {
 				user := &model.User{
@@ -743,12 +743,12 @@ func TestProcessMatrixMentions(t *testing.T) {
 		},
 		{
 			name:        "ghost user mention from real example",
-			htmlContent: `This is a test mention for <a href="https://matrix.to/#/@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-wiggin77.ngrok.io">Doug Lauder</a> hope it works`,
+			htmlContent: `This is a test mention for <a href="https://matrix.to/#/@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-mydomain.com">Doug Lauder</a> hope it works`,
 			event: MatrixEvent{
 				EventID: "event6",
 				Content: map[string]any{
 					"m.mentions": map[string]any{
-						"user_ids": []any{"@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-wiggin77.ngrok.io"},
+						"user_ids": []any{"@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-mydomain.com"},
 					},
 				},
 			},
@@ -926,7 +926,7 @@ func TestExtractMattermostUserIDFromGhost(t *testing.T) {
 	}{
 		{
 			name:        "valid ghost user ID",
-			ghostUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-wiggin77.ngrok.io",
+			ghostUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-mydomain.com",
 			expected:    "yeqo3irkujdstfmbnkx46bbhuw",
 			setup: func(_ *mocks.MockAPI) {
 			},

@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/command"
 	"github.com/stretchr/testify/assert"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/command"
 )
 
 func TestRunKVStoreMigrations(t *testing.T) {

@@ -126,7 +126,7 @@ const (
 	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings"
 
 	// Map command usage and validation
-	mapCommandUsage     = "Usage: /matrix map [room_alias|room_id]\nExample: /matrix map #test-sync:synapse-wiggin77.ngrok.io"
+	mapCommandUsage     = "Usage: /matrix map [room_alias|room_id]\nExample: /matrix map #test-sync:synapse-mydomain.com"
 	roomIdentifierError = "Invalid room identifier format. Use either:\n• Room alias: `#roomname:server.com` (preferred for joining)\n• Room ID: `!roomid:server.com`"
 
 	// Error messages
