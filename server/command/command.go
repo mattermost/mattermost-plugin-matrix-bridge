@@ -89,11 +89,10 @@ func sanitizeShareName(name string) string {
 
 // Handler implements slash command processing for the Matrix Bridge plugin.
 type Handler struct {
-	plugin       PluginAccessor
-	client       *pluginapi.Client
-	kvstore      kvstore.KVStore
-	matrixClient *matrix.Client
-	pluginAPI    plugin.API
+	plugin    PluginAccessor
+	client    *pluginapi.Client
+	kvstore   kvstore.KVStore
+	pluginAPI plugin.API
 }
 
 // Command defines the interface for handling Matrix Bridge slash commands.
@@ -204,11 +203,10 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	}
 
 	return &Handler{
-		plugin:       plugin,
-		client:       client,
-		kvstore:      kvstore,
-		matrixClient: nil, // Get dynamically to avoid stale references
-		pluginAPI:    pluginAPI,
+		plugin:    plugin,
+		client:    client,
+		kvstore:   kvstore,
+		pluginAPI: pluginAPI,
 	}
 }
 
@@ -226,14 +224,23 @@ func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error
 	}
 }
 
-func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier string) *model.CommandResponse {
-	// Get current Matrix client and fail fast if not configured
+// getMatrixClientOrError gets the current Matrix client or returns an error response if not configured
+func (c *Handler) getMatrixClientOrError() (*matrix.Client, *model.CommandResponse) {
 	matrixClient := c.plugin.GetMatrixClient()
 	if matrixClient == nil {
-		return &model.CommandResponse{
+		return nil, &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         matrixClientNotConfigured,
 		}
+	}
+	return matrixClient, nil
+}
+
+func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier string) *model.CommandResponse {
+	// Get current Matrix client and fail fast if not configured
+	matrixClient, errResponse := c.getMatrixClientOrError()
+	if errResponse != nil {
+		return errResponse
 	}
 
 	// Validate room identifier format (should start with ! or # and contain a colon)
@@ -395,12 +402,9 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 
 func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName string, publish bool) *model.CommandResponse {
 	// Get current Matrix client and fail fast if not configured
-	matrixClient := c.plugin.GetMatrixClient()
-	if matrixClient == nil {
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         matrixClientNotConfigured,
-		}
+	matrixClient, errResponse := c.getMatrixClientOrError()
+	if errResponse != nil {
+		return errResponse
 	}
 
 	// Get channel info for room name (if not provided) and topic
