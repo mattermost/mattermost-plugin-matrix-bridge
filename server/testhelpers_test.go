@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -409,4 +410,15 @@ func TestMemoryKVStore(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for deleted key")
 	}
+}
+
+// TestMain provides global test setup and cleanup
+func TestMain(m *testing.M) {
+	// Run tests
+	code := m.Run()
+
+	// Ensure all Matrix containers are cleaned up
+	matrixtest.CleanupAllContainers()
+
+	os.Exit(code)
 }

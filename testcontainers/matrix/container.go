@@ -7,12 +7,19 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+)
+
+// Global container registry for cleanup
+var (
+	activeContainers = make(map[*MatrixContainer]bool)
+	containerMutex   sync.RWMutex
 )
 
 // MatrixContainer wraps a testcontainer running Synapse
@@ -28,7 +35,8 @@ type MatrixContainer struct {
 
 // StartMatrixContainer starts a Synapse container for testing
 func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContainer {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	// Create Synapse configuration
 	synapseConfig := generateSynapseConfig(config)
@@ -88,6 +96,11 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContaine
 		HSToken:      config.HSToken,
 	}
 
+	// Register container for cleanup tracking
+	containerMutex.Lock()
+	activeContainers[mc] = true
+	containerMutex.Unlock()
+
 	// Wait for Matrix to be fully ready
 	mc.waitForMatrixReady(t)
 
@@ -96,9 +109,42 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContaine
 
 // Cleanup terminates the Matrix container
 func (mc *MatrixContainer) Cleanup(t *testing.T) {
-	ctx := context.Background()
+	if mc.Container == nil {
+		return
+	}
+
+	// Unregister from active containers
+	containerMutex.Lock()
+	delete(activeContainers, mc)
+	containerMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	err := mc.Container.Terminate(ctx)
-	require.NoError(t, err)
+	if err != nil {
+		t.Logf("Warning: Failed to terminate Matrix container: %v", err)
+		// Don't fail the test on cleanup errors, just log them
+	}
+}
+
+// CleanupAllContainers forcibly cleans up any remaining active containers
+// This should be called as a safety measure, e.g., in TestMain
+func CleanupAllContainers() {
+	containerMutex.Lock()
+	defer containerMutex.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for mc := range activeContainers {
+		if mc.Container != nil {
+			_ = mc.Container.Terminate(ctx) // Ignore errors in emergency cleanup
+		}
+	}
+
+	// Clear the map
+	activeContainers = make(map[*MatrixContainer]bool)
 }
 
 // waitForMatrixReady waits for Matrix server to be fully operational
