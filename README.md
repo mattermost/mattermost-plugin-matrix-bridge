@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/wiggin77/mattermost-plugin-matrix-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wiggin77/mattermost-plugin-matrix-bridge/actions/workflows/ci.yml)
 
-A seamless bridge that connects Mattermost and Matrix, enabling real-time bidirectional message synchronization between platforms.
+A bidirectional bridge that connects Mattermost and Matrix, enabling real-time message synchronization between platforms.
 
 ## Features
 

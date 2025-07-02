@@ -179,11 +179,24 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 
 // getChannelIDFromMatrixRoom finds the Mattermost channel ID for a Matrix room ID
 func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
-	// Check for room mapping: room_mapping_<roomID> -> channelID
+	// First check KV store mapping (trusted source): room_mapping_<roomID> -> channelID
 	roomMappingKey := "room_mapping_" + roomID
 	channelIDBytes, err := p.kvstore.Get(roomMappingKey)
 	if err == nil && len(channelIDBytes) > 0 {
-		return string(channelIDBytes), nil
+		channelID := string(channelIDBytes)
+		p.logger.LogDebug("Found channel ID in KV store", "room_id", roomID, "channel_id", channelID)
+		return channelID, nil
+	}
+
+	// Fallback: get channel ID from Matrix room state (for race condition during room creation)
+	if p.matrixClient != nil {
+		channelID, err := p.matrixClient.GetMattermostChannelID(roomID)
+		if err != nil {
+			p.logger.LogDebug("Failed to get channel ID from room state", "room_id", roomID, "error", err)
+		} else if channelID != "" {
+			p.logger.LogDebug("Found channel ID in room state (no KV mapping yet)", "room_id", roomID, "channel_id", channelID)
+			return channelID, nil
+		}
 	}
 
 	return "", nil // No mapping found
