@@ -307,7 +307,7 @@ func (b *XMPPToMattermostBridge) generateMattermostUsername(jid string) string {
 
 ## Reference Implementation
 
-**Matrix Bridge Location**: `/home/dlauder/Development/wiggin77/mattermost-plugin-matrix-bridge/`
+**Matrix Bridge Location**: `https://github.com/mattermost/mattermost-plugin-matrix-bridge`
 
 ### Critical Files to Study:
 1. **Loop Prevention**: `server/sync_to_mattermost.go:generateMattermostUsername()` (lines 120-140)

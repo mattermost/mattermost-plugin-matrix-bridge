@@ -6,14 +6,14 @@ import (
 	"time"
 
 	"github.com/mattermost/logr/v2"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/command"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/mattermost/mattermost/server/public/pluginapi/cluster"
 	"github.com/pkg/errors"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/command"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 const (

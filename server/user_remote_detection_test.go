@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
-	"github.com/wiggin77/mattermost-plugin-matrix-bridge/server/matrix"
-	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // UserRemoteDetectionIntegrationTestSuite tests real loop prevention logic with a Matrix server

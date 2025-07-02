@@ -1,6 +1,6 @@
 # Mattermost Bridge for Matrix
 
-[![Build Status](https://github.com/wiggin77/mattermost-plugin-matrix-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wiggin77/mattermost-plugin-matrix-bridge/actions/workflows/ci.yml)
+[![Build Status](https://github.com/mattermost/mattermost-plugin-matrix-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/mattermost/mattermost-plugin-matrix-bridge/actions/workflows/ci.yml)
 
 A bidirectional bridge that connects Mattermost and Matrix, enabling real-time message synchronization between platforms.
 
@@ -15,7 +15,7 @@ A bidirectional bridge that connects Mattermost and Matrix, enabling real-time m
 ## Quick Start
 
 ### 1. Install Plugin
-- Download from [releases](https://github.com/wiggin77/mattermost-plugin-matrix-bridge/releases)
+- Download from [releases](https://github.com/mattermost/mattermost-plugin-matrix-bridge/releases)
 - Upload via System Console → Plugins → Plugin Management
 
 ### 2. Configure Settings
@@ -94,7 +94,7 @@ make deploy
 
 ## Support
 
-- [GitHub Issues](https://github.com/wiggin77/mattermost-plugin-matrix-bridge/issues)
+- [GitHub Issues](https://github.com/mattermost/mattermost-plugin-matrix-bridge/issues)
 - [Matrix Specification](https://spec.matrix.org/)
 - [Mattermost Plugin Documentation](https://developers.mattermost.com/integrate/plugins/)
 

@@ -1,4 +1,4 @@
-module github.com/wiggin77/mattermost-plugin-matrix-bridge
+module github.com/mattermost/mattermost-plugin-matrix-bridge
 
 go 1.23.0
 

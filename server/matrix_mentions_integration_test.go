@@ -4,11 +4,11 @@ import (
 	"testing"
 	"time"
 
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	matrixtest "github.com/wiggin77/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // TestMatrixMentionProcessing tests mention processing with real Matrix server
