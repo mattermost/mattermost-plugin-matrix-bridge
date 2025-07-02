@@ -232,11 +232,10 @@ func TestMatrixCreateCommandParsing(t *testing.T) {
 
 			testHandler := &testCommandHandler{
 				Handler: &Handler{
-					plugin:       mockPlugin,
-					client:       env.client,
-					kvstore:      kvstore.NewKVStore(env.client),
-					matrixClient: nil,
-					pluginAPI:    env.api,
+					plugin:    mockPlugin,
+					client:    env.client,
+					kvstore:   kvstore.NewKVStore(env.client),
+					pluginAPI: env.api,
 				},
 				onCreateRoom: func(roomName string, publish bool) {
 					capturedRoomName = roomName
@@ -277,11 +276,10 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 	// Override the executeCreateRoomCommand to capture parameters
 	originalHandler := t.Handler
 	t.Handler = &Handler{
-		plugin:       originalHandler.plugin,
-		client:       originalHandler.client,
-		kvstore:      originalHandler.kvstore,
-		matrixClient: originalHandler.matrixClient,
-		pluginAPI:    originalHandler.pluginAPI,
+		plugin:    originalHandler.plugin,
+		client:    originalHandler.client,
+		kvstore:   originalHandler.kvstore,
+		pluginAPI: originalHandler.pluginAPI,
 	}
 
 	// Parse the command to extract create parameters
@@ -552,11 +550,10 @@ func TestChannelNameFallback(t *testing.T) {
 		}
 		testHandler := &testCommandHandler{
 			Handler: &Handler{
-				plugin:       mockPlugin,
-				client:       env.client,
-				kvstore:      kvstore.NewKVStore(env.client),
-				matrixClient: nil,
-				pluginAPI:    env.api,
+				plugin:    mockPlugin,
+				client:    env.client,
+				kvstore:   kvstore.NewKVStore(env.client),
+				pluginAPI: env.api,
 			},
 			onCreateRoom: func(roomName string, _ bool) {
 				capturedRoomName = roomName
