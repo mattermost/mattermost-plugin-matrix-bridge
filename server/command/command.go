@@ -13,11 +13,6 @@ import (
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 )
 
-const (
-	// CurrentKVStoreVersion is the current version requiring migrations
-	CurrentKVStoreVersion = 2
-)
-
 // Configuration interface for accessing plugin configuration
 type Configuration interface {
 	GetMatrixServerURL() string
@@ -300,7 +295,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	}
 
 	// Save both directions of the mapping
-	mappingKey := "channel_mapping_" + args.ChannelId
+	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
 	err := c.kvstore.Set(mappingKey, []byte(roomIdentifier))
 	if err != nil {
 		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
@@ -311,7 +306,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	}
 
 	// Store reverse mapping: room_mapping_<roomIdentifier> -> channelID
-	roomMappingKey := "room_mapping_" + roomIdentifier
+	roomMappingKey := kvstore.BuildRoomMappingKey(roomIdentifier)
 	err = c.kvstore.Set(roomMappingKey, []byte(args.ChannelId))
 	if err != nil {
 		c.client.Log.Error("Failed to save room mapping", "error", err, "room_identifier", roomIdentifier, "channel_id", args.ChannelId)
@@ -321,7 +316,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	// If roomIdentifier is an alias, also resolve to room ID and store that mapping
 	if strings.HasPrefix(roomIdentifier, "#") {
 		if resolvedRoomID, err := matrixClient.ResolveRoomAlias(roomIdentifier); err == nil {
-			roomIDMappingKey := "room_mapping_" + resolvedRoomID
+			roomIDMappingKey := kvstore.BuildRoomMappingKey(resolvedRoomID)
 			if err := c.kvstore.Set(roomIDMappingKey, []byte(args.ChannelId)); err != nil {
 				c.client.Log.Error("Failed to save room ID mapping", "error", err, "room_id", resolvedRoomID, "channel_id", args.ChannelId)
 			}
@@ -468,7 +463,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	}
 
 	// Automatically map the created room to this channel (both directions)
-	mappingKey := "channel_mapping_" + args.ChannelId
+	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
 	if err := c.kvstore.Set(mappingKey, []byte(roomID)); err != nil {
 		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId, "room_id", roomID)
 		return &model.CommandResponse{
@@ -478,7 +473,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	}
 
 	// Store reverse mapping: room_mapping_<roomID> -> channelID
-	roomMappingKey := "room_mapping_" + roomID
+	roomMappingKey := kvstore.BuildRoomMappingKey(roomID)
 	if err := c.kvstore.Set(roomMappingKey, []byte(args.ChannelId)); err != nil {
 		c.client.Log.Error("Failed to save room mapping", "error", err, "room_id", roomID, "channel_id", args.ChannelId)
 		// Continue anyway - the forward mapping was saved successfully
@@ -530,7 +525,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 
 	// Get channel mapping keys using efficient prefix filtering
 	mappings := make(map[string]string)
-	channelMappingPrefix := "channel_mapping_"
+	channelMappingPrefix := kvstore.KeyPrefixChannelMapping
 	page := 0
 	batchSize := 1000
 
@@ -829,15 +824,15 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 
 func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResponse {
 	// Get current version before reset
-	kvstore := c.plugin.GetKVStore()
-	versionBytes, _ := kvstore.Get("kv_store_version")
+	kvstorage := c.plugin.GetKVStore()
+	versionBytes, _ := kvstorage.Get(kvstore.KeyStoreVersion)
 	currentVersion := "0"
 	if len(versionBytes) > 0 {
 		currentVersion = string(versionBytes)
 	}
 
 	// Reset KV store version to 0 to force re-migration
-	if err := kvstore.Set("kv_store_version", []byte("0")); err != nil {
+	if err := kvstorage.Set(kvstore.KeyStoreVersion, []byte("0")); err != nil {
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         fmt.Sprintf("❌ Failed to reset migration version: %v", err),
@@ -872,7 +867,7 @@ func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResp
 			"   • DM reverse mappings created: %d\n\n"+
 			"This should have resolved any missing or incorrect mappings.\n"+
 			"Check the plugin logs for detailed migration information.",
-			currentVersion, CurrentKVStoreVersion,
+			currentVersion, kvstore.CurrentKVStoreVersion,
 			userMappingsAdded, channelMappingsAdded, roomMappingsAdded,
 			dmMappingsAdded, reverseDMMappingsAdded),
 	}

@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/command"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -15,7 +15,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		plugin.logger = &testLogger{t: t}
 
 		// Set current version to target version
-		err := plugin.kvstore.Set(KVStoreVersionKey, []byte(strconv.Itoa(command.CurrentKVStoreVersion)))
+		err := plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(kvstore.CurrentKVStoreVersion)))
 		assert.NoError(t, err)
 
 		// Run migrations
@@ -23,11 +23,11 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Version should remain the same
-		versionBytes, err := plugin.kvstore.Get(KVStoreVersionKey)
+		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, command.CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 
 	t.Run("MigrationFromVersion0", func(t *testing.T) {
@@ -37,7 +37,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// No version key exists (version 0)
-		_, err := plugin.kvstore.Get(KVStoreVersionKey)
+		_, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.Error(t, err) // Should not exist
 
 		// Add some test data that would need migration
@@ -51,11 +51,11 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Version should be updated
-		versionBytes, err := plugin.kvstore.Get(KVStoreVersionKey)
+		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, command.CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 
 		// Reverse mappings should be created
 		userReverseBytes, err := plugin.kvstore.Get("mattermost_user_user123")
@@ -73,7 +73,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		plugin.logger = &testLogger{t: t}
 
 		// Set invalid version
-		err := plugin.kvstore.Set(KVStoreVersionKey, []byte("invalid"))
+		err := plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("invalid"))
 		assert.NoError(t, err)
 
 		// Should treat as version 0 and run migration
@@ -81,11 +81,11 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Version should be updated to current
-		versionBytes, err := plugin.kvstore.Get(KVStoreVersionKey)
+		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, command.CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 }
 
@@ -191,7 +191,7 @@ func TestMigrateUserMappings(t *testing.T) {
 			mattermostUserID := "user" + strconv.Itoa(i)
 			expectedMatrixUserID := "@user" + strconv.Itoa(i) + ":matrix.org"
 
-			reverseKey := "mattermost_user_" + mattermostUserID
+			reverseKey := kvstore.BuildMattermostUserKey(mattermostUserID)
 			valueBytes, err := plugin.kvstore.Get(reverseKey)
 			assert.NoError(t, err)
 			assert.Equal(t, expectedMatrixUserID, string(valueBytes))
@@ -329,7 +329,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 			channelID := "channel" + strconv.Itoa(i)
 			roomID := "!room" + strconv.Itoa(i) + ":matrix.org"
 
-			reverseKey := "room_mapping_" + roomID
+			reverseKey := kvstore.BuildRoomMappingKey(roomID)
 			valueBytes, err := plugin.kvstore.Get(reverseKey)
 			assert.NoError(t, err)
 			assert.Equal(t, channelID, string(valueBytes))
@@ -375,7 +375,7 @@ func TestMigrationIntegration(t *testing.T) {
 		}
 
 		// Verify no version key exists initially
-		_, err := plugin.kvstore.Get(KVStoreVersionKey)
+		_, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.Error(t, err)
 
 		// Run full migration
@@ -383,11 +383,11 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Check version was set
-		versionBytes, err := plugin.kvstore.Get(KVStoreVersionKey)
+		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, command.CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 
 		// Check user reverse mappings
 		userReverse1, err := plugin.kvstore.Get("mattermost_user_user123")
@@ -472,11 +472,11 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.Equal(t, "channel456", string(channelReverse2))
 
 		// Version should still be current
-		versionBytes, err := plugin.kvstore.Get(KVStoreVersionKey)
+		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, command.CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 
 	t.Run("EmptyKVStoreHandledGracefully", func(t *testing.T) {
@@ -490,10 +490,10 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Version should be set
-		versionBytes, err := plugin.kvstore.Get(KVStoreVersionKey)
+		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, command.CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 }
