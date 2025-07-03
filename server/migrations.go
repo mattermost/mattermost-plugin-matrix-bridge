@@ -46,7 +46,7 @@ func (p *Plugin) runKVStoreMigrationsWithResults() (*MigrationResult, error) {
 
 	// Run migrations if needed
 	if currentVersion < kvstore.CurrentKVStoreVersion {
-		p.logger.LogInfo("Running KV store migrations", "from_version", currentVersion, "to_version", kvstore.CurrentKVStoreVersion)
+		p.logger.LogInfo("Running KV store migrations", "from_version", currentVersion, "target_version", kvstore.CurrentKVStoreVersion)
 
 		if currentVersion < 1 {
 			v1Result, err := p.runMigrationToVersion1WithResults()
