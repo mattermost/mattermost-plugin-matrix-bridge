@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/pkg/errors"
 )
 
@@ -18,8 +19,6 @@ type MigrationResult struct {
 }
 
 const (
-	// KVStoreVersionKey tracks the current KV store schema version
-	KVStoreVersionKey = "kv_store_version"
 	// CurrentKVStoreVersion is the current version requiring migrations
 	CurrentKVStoreVersion = 2
 	// MigrationBatchSize is the number of keys to process in each batch
@@ -35,7 +34,7 @@ func (p *Plugin) runKVStoreMigrations() error {
 // runKVStoreMigrationsWithResults checks the KV store version and runs necessary migrations, returning detailed results
 func (p *Plugin) runKVStoreMigrationsWithResults() (*MigrationResult, error) {
 	// Get current KV store version
-	versionBytes, err := p.kvstore.Get(KVStoreVersionKey)
+	versionBytes, err := p.kvstore.Get(kvstore.KeyStoreVersion)
 	currentVersion := 0
 	if err == nil && len(versionBytes) > 0 {
 		if version, parseErr := strconv.Atoi(string(versionBytes)); parseErr == nil {
@@ -71,7 +70,7 @@ func (p *Plugin) runKVStoreMigrationsWithResults() (*MigrationResult, error) {
 		}
 
 		// Update version marker
-		if err := p.kvstore.Set(KVStoreVersionKey, []byte(strconv.Itoa(CurrentKVStoreVersion))); err != nil {
+		if err := p.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(CurrentKVStoreVersion))); err != nil {
 			return nil, errors.Wrap(err, "failed to update KV store version")
 		}
 
@@ -111,7 +110,7 @@ func (p *Plugin) runMigrationToVersion1WithResults() (*MigrationResult, error) {
 func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Migrating user mappings to add reverse lookups")
 
-	userMappingPrefix := "matrix_user_"
+	userMappingPrefix := kvstore.KeyPrefixMatrixUser
 	totalMigratedCount := 0
 	page := 0
 
@@ -145,7 +144,7 @@ func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 				matrixUserID := strings.TrimPrefix(key, userMappingPrefix)
 
 				// Create reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID
-				reverseKey := "mattermost_user_" + mattermostUserID
+				reverseKey := kvstore.BuildMattermostUserKey(mattermostUserID)
 
 				// Check if reverse mapping already exists with correct value
 				existingData, err := p.kvstore.Get(reverseKey)
@@ -188,7 +187,7 @@ func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Migrating channel mappings to add reverse lookups")
 
-	channelMappingPrefix := "channel_mapping_"
+	channelMappingPrefix := kvstore.KeyPrefixChannelMapping
 	totalMigratedCount := 0
 	totalRoomMappingsCount := 0
 	page := 0
@@ -223,7 +222,7 @@ func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 				channelID := strings.TrimPrefix(key, channelMappingPrefix)
 
 				// Create reverse mapping: room_mapping_<roomIdentifier> -> channelID
-				reverseKey := "room_mapping_" + roomIdentifier
+				reverseKey := kvstore.BuildRoomMappingKey(roomIdentifier)
 
 				// Check if reverse mapping already exists with correct value
 				existingData, err := p.kvstore.Get(reverseKey)
@@ -246,7 +245,7 @@ func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 				// Always try room ID mapping for aliases, regardless of reverse mapping result
 				if strings.HasPrefix(roomIdentifier, "#") && p.matrixClient != nil {
 					if resolvedRoomID, resolveErr := p.matrixClient.ResolveRoomAlias(roomIdentifier); resolveErr == nil {
-						roomIDKey := "room_mapping_" + resolvedRoomID
+						roomIDKey := kvstore.BuildRoomMappingKey(resolvedRoomID)
 
 						// Always update room ID mapping to match alias mapping
 						if err := p.kvstore.Set(roomIDKey, []byte(channelID)); err != nil {
@@ -294,8 +293,8 @@ func (p *Plugin) runMigrationToVersion2WithResults() (*MigrationResult, error) {
 func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Migrating DM mappings to unified channel mapping prefix")
 
-	dmMappingPrefix := "dm_mapping_"
-	matrixDMMappingPrefix := "matrix_dm_mapping_"
+	dmMappingPrefix := kvstore.KeyPrefixLegacyDMMapping
+	matrixDMMappingPrefix := kvstore.KeyPrefixLegacyMatrixDMMapping
 	totalMigratedCount := 0
 	totalReverseMigratedCount := 0
 
@@ -329,7 +328,7 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 			channelID := strings.TrimPrefix(key, dmMappingPrefix)
 
 			// Create unified mapping: channel_mapping_<channelID> -> matrixRoomID
-			unifiedKey := "channel_mapping_" + channelID
+			unifiedKey := kvstore.BuildChannelMappingKey(channelID)
 
 			// Check if unified mapping already exists
 			existingData, err := p.kvstore.Get(unifiedKey)
@@ -346,7 +345,7 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 			}
 
 			// Also create reverse mapping for room_mapping_ if it doesn't exist
-			reverseKey := "room_mapping_" + matrixRoomID
+			reverseKey := kvstore.BuildRoomMappingKey(matrixRoomID)
 			existingReverse, err := p.kvstore.Get(reverseKey)
 			if err != nil || len(existingReverse) == 0 {
 				if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
@@ -408,7 +407,7 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 			matrixRoomID := strings.TrimPrefix(key, matrixDMMappingPrefix)
 
 			// Create unified reverse mapping: room_mapping_<matrixRoomID> -> channelID
-			unifiedReverseKey := "room_mapping_" + matrixRoomID
+			unifiedReverseKey := kvstore.BuildRoomMappingKey(matrixRoomID)
 
 			// Check if unified reverse mapping already exists
 			existingReverseData, err := p.kvstore.Get(unifiedReverseKey)
