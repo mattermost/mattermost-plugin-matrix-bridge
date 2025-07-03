@@ -751,9 +751,24 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 	return username
 }
 
-// getPostIDFromMatrixEvent finds the Mattermost post ID for a Matrix event ID
-// This method efficiently retrieves the post ID from Matrix event metadata
+// getPostIDFromMatrixEvent finds the Mattermost post ID for a Matrix event ID.
+// Uses an optimized lookup strategy: KV store first (fast for Matrix-originated events),
+// then Matrix event metadata (for Mattermost-originated events).
 func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, channelID string) string {
+	// First check KV store for Matrix-originated events (O(1), no network calls)
+	mappingKey := "matrix_event_post_" + matrixEventID
+	if postIDBytes, err := b.kvstore.Get(mappingKey); err == nil && len(postIDBytes) > 0 {
+		postID := string(postIDBytes)
+		b.logger.LogDebug("Found Mattermost post ID for Matrix-originated event in KV store", "matrix_event_id", matrixEventID, "mattermost_post_id", postID)
+		return postID
+	}
+
+	// Fall back to Matrix event metadata for Mattermost-originated events
+	return b.getPostIDFromMatrixEventMetadata(matrixEventID, channelID)
+}
+
+// getPostIDFromMatrixEventMetadata retrieves post ID from Matrix event content (for Mattermost-originated events)
+func (b *MatrixToMattermostBridge) getPostIDFromMatrixEventMetadata(matrixEventID, channelID string) string {
 	// Get the Matrix room ID for this channel
 	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
 	if err != nil {
@@ -766,7 +781,7 @@ func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, chann
 		return ""
 	}
 
-	// Resolve room alias to room ID if needed
+	// Resolve room alias to room ID if needed (handles both aliases and room IDs correctly)
 	matrixRoomID, err := b.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
 	if err != nil {
 		b.logger.LogDebug("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomIdentifier, "matrix_event_id", matrixEventID)
@@ -792,16 +807,7 @@ func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, chann
 		return postID
 	}
 
-	// If no mattermost_post_id metadata found, check KV store for Matrix-originated events
-	// that have been synced to Mattermost
-	mappingKey := "matrix_event_post_" + matrixEventID
-	if postIDBytes, err := b.kvstore.Get(mappingKey); err == nil && len(postIDBytes) > 0 {
-		postID := string(postIDBytes)
-		b.logger.LogDebug("Found Mattermost post ID for Matrix-originated event in KV store", "matrix_event_id", matrixEventID, "mattermost_post_id", postID)
-		return postID
-	}
-
-	// No Mattermost post found for this Matrix event - event was not synced to Mattermost
+	// No Mattermost post found for this Matrix event
 	b.logger.LogDebug("No Mattermost post found for Matrix event", "event_id", matrixEventID)
 	return ""
 }
