@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 )
@@ -43,7 +44,7 @@ func NewMattermostToMatrixBridge(utils *BridgeUtils, fileTracker FileTracker, po
 // MattermostToMatrix-specific utility methods
 
 func (b *MattermostToMatrixBridge) getGhostUser(userID string) (string, bool) {
-	ghostUserKey := "ghost_user_" + userID
+	ghostUserKey := kvstore.BuildGhostUserKey(userID)
 	ghostUserIDBytes, err := b.kvstore.Get(ghostUserKey)
 	if err == nil && len(ghostUserIDBytes) > 0 {
 		return string(ghostUserIDBytes), true
@@ -89,7 +90,7 @@ func (b *MattermostToMatrixBridge) CreateOrGetGhostUser(userID string) (string, 
 	}
 
 	// Cache the ghost user ID
-	ghostUserKey := "ghost_user_" + userID
+	ghostUserKey := kvstore.BuildGhostUserKey(userID)
 	err = b.kvstore.Set(ghostUserKey, []byte(ghostUser.UserID))
 	if err != nil {
 		b.logger.LogWarn("Failed to cache ghost user ID", "error", err, "ghost_user_id", ghostUser.UserID)
@@ -106,7 +107,7 @@ func (b *MattermostToMatrixBridge) CreateOrGetGhostUser(userID string) (string, 
 
 func (b *MattermostToMatrixBridge) ensureGhostUserInRoom(ghostUserID, roomID, userID string) error {
 	// Check if we've already confirmed this ghost user is in this room
-	roomMembershipKey := "ghost_room_" + userID + "_" + roomID
+	roomMembershipKey := kvstore.BuildGhostRoomKey(userID, roomID)
 	membershipBytes, err := b.kvstore.Get(roomMembershipKey)
 	if err == nil && len(membershipBytes) > 0 && string(membershipBytes) == "joined" {
 		// Already confirmed this user is in the room
@@ -1281,7 +1282,7 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 // getMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
 func (b *MattermostToMatrixBridge) getMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Use Mattermost user ID as key: mattermost_user_<mattermostUserID> -> matrixUserID
-	mattermostUserKey := "mattermost_user_" + mattermostUserID
+	mattermostUserKey := kvstore.BuildMattermostUserKey(mattermostUserID)
 	matrixUserIDBytes, err := b.kvstore.Get(mattermostUserKey)
 	if err != nil {
 		return "", errors.Wrap(err, "no Matrix user ID mapping found for Mattermost user")

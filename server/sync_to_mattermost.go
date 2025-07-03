@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 )
@@ -154,6 +155,9 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 		return errors.Wrap(appErr, "failed to create Mattermost post")
 	}
 
+	// Store Matrix event ID to Mattermost post ID mapping for efficient reverse lookups
+	b.storeMatrixEventPostMapping(event.EventID, createdPost.Id)
+
 	b.logger.LogDebug("Successfully synced Matrix message to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "sender", event.Sender, "channel_id", channelID)
 	return nil
 }
@@ -289,6 +293,9 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 		return errors.Wrap(appErr, "failed to create Mattermost post with file attachment")
 	}
 
+	// Store Matrix event ID to Mattermost post ID mapping for efficient reverse lookups
+	b.storeMatrixEventPostMapping(event.EventID, createdPost.Id)
+
 	b.logger.LogDebug("Successfully synced Matrix file to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "filename", body, "file_id", uploadedFileInfo.Id)
 	return nil
 }
@@ -352,7 +359,7 @@ func (b *MatrixToMattermostBridge) syncMatrixReactionToMattermost(event MatrixEv
 
 	// Store mapping of Matrix reaction event ID to Mattermost reaction info for deletion purposes
 	// We need to store the info to reconstruct the model.Reaction object for deletion
-	reactionKey := "matrix_reaction_" + event.EventID
+	reactionKey := kvstore.BuildMatrixReactionKey(event.EventID)
 	reactionInfo := map[string]string{
 		"post_id":    postID,
 		"user_id":    mattermostUserID,
@@ -439,7 +446,7 @@ func (b *MatrixToMattermostBridge) handleReactionDeletion(redactedReactionEvent 
 	}
 
 	// Look up the stored Mattermost reaction info using the Matrix reaction event ID
-	reactionKey := "matrix_reaction_" + redactedEventID
+	reactionKey := kvstore.BuildMatrixReactionKey(redactedEventID)
 	reactionInfoBytes, err := b.kvstore.Get(reactionKey)
 	if err != nil {
 		b.logger.LogWarn("Cannot find stored Matrix reaction mapping", "matrix_event_id", redactedEventID, "redaction_event_id", redactionEventID)
@@ -507,7 +514,7 @@ func (b *MatrixToMattermostBridge) handlePostDeletion(redactsEventID, channelID,
 // If channelID is provided, ensures the user is added to the team associated with that channel
 func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string, channelID string) (string, error) {
 	// Check if we already have a mapping for this Matrix user
-	userMapKey := "matrix_user_" + matrixUserID
+	userMapKey := kvstore.BuildMatrixUserKey(matrixUserID)
 	userIDBytes, err := b.kvstore.Get(userMapKey)
 	if err == nil && len(userIDBytes) > 0 {
 		mattermostUserID := string(userIDBytes)
@@ -635,7 +642,7 @@ func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string
 
 	// Store reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID
 	// This mapping is critical for user lookups - treat failure as a serious issue
-	mattermostUserKey := "mattermost_user_" + createdUser.Id
+	mattermostUserKey := kvstore.BuildMattermostUserKey(createdUser.Id)
 	err = b.kvstore.Set(mattermostUserKey, []byte(matrixUserID))
 	if err != nil {
 		b.logger.LogError("Failed to store critical reverse user mapping", "error", err, "mattermost_user_id", createdUser.Id, "matrix_user_id", matrixUserID)
@@ -737,30 +744,74 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 	return username
 }
 
-// getPostIDFromMatrixEvent finds the Mattermost post ID for a Matrix event ID
+// getPostIDFromMatrixEvent finds the Mattermost post ID for a Matrix event ID.
+// Uses an optimized lookup strategy: KV store first (fast for Matrix-originated events),
+// then Matrix event metadata (for Mattermost-originated events).
 func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, channelID string) string {
-	// Search through posts in the channel to find one with matching Matrix event ID
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
+	// First check KV store for Matrix-originated events (O(1), no network calls)
+	mappingKey := kvstore.BuildMatrixEventPostKey(matrixEventID)
+	if postIDBytes, err := b.kvstore.Get(mappingKey); err == nil && len(postIDBytes) > 0 {
+		postID := string(postIDBytes)
+		b.logger.LogDebug("Found Mattermost post ID for Matrix-originated event in KV store", "matrix_event_id", matrixEventID, "mattermost_post_id", postID)
+		return postID
+	}
 
-	// Get recent posts in the channel (Matrix events are usually recent)
-	postList, appErr := b.API.GetPostsForChannel(channelID, 0, 100)
-	if appErr != nil {
-		b.logger.LogWarn("Failed to get posts for channel", "error", appErr, "channel_id", channelID)
+	// Fall back to Matrix event metadata for Mattermost-originated events
+	return b.getPostIDFromMatrixEventMetadata(matrixEventID, channelID)
+}
+
+// storeMatrixEventPostMapping stores the mapping from Matrix event ID to Mattermost post ID
+// for efficient reverse lookups. This is used by both message and file sync functions.
+func (b *MatrixToMattermostBridge) storeMatrixEventPostMapping(matrixEventID, mattermostPostID string) {
+	mappingKey := kvstore.BuildMatrixEventPostKey(matrixEventID)
+	if err := b.kvstore.Set(mappingKey, []byte(mattermostPostID)); err != nil {
+		b.logger.LogWarn("Failed to store Matrix event to post mapping", "error", err, "matrix_event_id", matrixEventID, "post_id", mattermostPostID)
+		// Continue anyway - post was created successfully
+	}
+}
+
+// getPostIDFromMatrixEventMetadata retrieves post ID from Matrix event content (for Mattermost-originated events)
+func (b *MatrixToMattermostBridge) getPostIDFromMatrixEventMetadata(matrixEventID, channelID string) string {
+	// Get the Matrix room ID for this channel
+	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	if err != nil {
+		b.logger.LogDebug("Failed to get Matrix room identifier", "error", err, "channel_id", channelID, "matrix_event_id", matrixEventID)
 		return ""
 	}
 
-	// Search through posts for matching Matrix event ID
-	for _, postID := range postList.Order {
-		post := postList.Posts[postID]
-		if post.Props != nil {
-			if eventID, exists := post.Props[propertyKey].(string); exists && eventID == matrixEventID {
-				return postID
-			}
-		}
+	if matrixRoomIdentifier == "" {
+		b.logger.LogDebug("No Matrix room identifier found for channel", "channel_id", channelID, "matrix_event_id", matrixEventID)
+		return ""
 	}
 
+	// Resolve room alias to room ID if needed (handles both aliases and room IDs correctly)
+	matrixRoomID, err := b.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		b.logger.LogDebug("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomIdentifier, "matrix_event_id", matrixEventID)
+		return ""
+	}
+
+	// Get the Matrix event to extract Mattermost metadata
+	event, err := b.matrixClient.GetEvent(matrixRoomID, matrixEventID)
+	if err != nil {
+		b.logger.LogDebug("Failed to get Matrix event", "error", err, "event_id", matrixEventID, "room_id", matrixRoomID)
+		return ""
+	}
+
+	// Extract Mattermost post ID from event content
+	content, ok := event["content"].(map[string]any)
+	if !ok {
+		b.logger.LogDebug("Matrix event has no content field", "event_id", matrixEventID)
+		return ""
+	}
+
+	if postID, exists := content["mattermost_post_id"].(string); exists && postID != "" {
+		b.logger.LogDebug("Found Mattermost post ID in Matrix event metadata", "matrix_event_id", matrixEventID, "mattermost_post_id", postID)
+		return postID
+	}
+
+	// No Mattermost post found for this Matrix event
+	b.logger.LogDebug("No Mattermost post found for Matrix event", "event_id", matrixEventID)
 	return ""
 }
 
@@ -1121,7 +1172,7 @@ func (b *MatrixToMattermostBridge) syncMatrixMemberEventToMattermost(event Matri
 	}
 
 	// Check if we have a Mattermost user for this Matrix user
-	userMapKey := "matrix_user_" + event.Sender
+	userMapKey := kvstore.BuildMatrixUserKey(event.Sender)
 	userIDBytes, err := b.kvstore.Get(userMapKey)
 	existingUserID := ""
 	userExists := false

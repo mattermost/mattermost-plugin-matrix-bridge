@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/mattermost/logr/v2"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/pkg/errors"
 )
 
@@ -180,7 +181,7 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 // getChannelIDFromMatrixRoom finds the Mattermost channel ID for a Matrix room ID
 func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
 	// First check KV store mapping (trusted source): room_mapping_<roomID> -> channelID
-	roomMappingKey := "room_mapping_" + roomID
+	roomMappingKey := kvstore.BuildRoomMappingKey(roomID)
 	channelIDBytes, err := p.kvstore.Get(roomMappingKey)
 	if err == nil && len(channelIDBytes) > 0 {
 		channelID := string(channelIDBytes)
@@ -304,7 +305,7 @@ func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID s
 	}
 
 	// Verify that this ghost user exists in our KV store (meaning we created it)
-	ghostUserKey := "ghost_user_" + mattermostUserID
+	ghostUserKey := kvstore.BuildGhostUserKey(mattermostUserID)
 	ghostUserData, err := p.kvstore.Get(ghostUserKey)
 	if err != nil || len(ghostUserData) == 0 {
 		p.logger.LogDebug("Rejecting DM creation for unrecognized ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
