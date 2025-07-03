@@ -156,11 +156,7 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 	}
 
 	// Store Matrix event ID to Mattermost post ID mapping for efficient reverse lookups
-	mappingKey := kvstore.BuildMatrixEventPostKey(event.EventID)
-	if err := b.kvstore.Set(mappingKey, []byte(createdPost.Id)); err != nil {
-		b.logger.LogWarn("Failed to store Matrix event to post mapping", "error", err, "matrix_event_id", event.EventID, "post_id", createdPost.Id)
-		// Continue anyway - post was created successfully
-	}
+	b.storeMatrixEventPostMapping(event.EventID, createdPost.Id)
 
 	b.logger.LogDebug("Successfully synced Matrix message to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "sender", event.Sender, "channel_id", channelID)
 	return nil
@@ -298,11 +294,7 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 	}
 
 	// Store Matrix event ID to Mattermost post ID mapping for efficient reverse lookups
-	mappingKey := kvstore.BuildMatrixEventPostKey(event.EventID)
-	if err := b.kvstore.Set(mappingKey, []byte(createdPost.Id)); err != nil {
-		b.logger.LogWarn("Failed to store Matrix event to post mapping", "error", err, "matrix_event_id", event.EventID, "post_id", createdPost.Id)
-		// Continue anyway - post was created successfully
-	}
+	b.storeMatrixEventPostMapping(event.EventID, createdPost.Id)
 
 	b.logger.LogDebug("Successfully synced Matrix file to Mattermost", "matrix_event_id", event.EventID, "mattermost_post_id", createdPost.Id, "filename", body, "file_id", uploadedFileInfo.Id)
 	return nil
@@ -766,6 +758,16 @@ func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, chann
 
 	// Fall back to Matrix event metadata for Mattermost-originated events
 	return b.getPostIDFromMatrixEventMetadata(matrixEventID, channelID)
+}
+
+// storeMatrixEventPostMapping stores the mapping from Matrix event ID to Mattermost post ID
+// for efficient reverse lookups. This is used by both message and file sync functions.
+func (b *MatrixToMattermostBridge) storeMatrixEventPostMapping(matrixEventID, mattermostPostID string) {
+	mappingKey := kvstore.BuildMatrixEventPostKey(matrixEventID)
+	if err := b.kvstore.Set(mappingKey, []byte(mattermostPostID)); err != nil {
+		b.logger.LogWarn("Failed to store Matrix event to post mapping", "error", err, "matrix_event_id", matrixEventID, "post_id", mattermostPostID)
+		// Continue anyway - post was created successfully
+	}
 }
 
 // getPostIDFromMatrixEventMetadata retrieves post ID from Matrix event content (for Mattermost-originated events)
