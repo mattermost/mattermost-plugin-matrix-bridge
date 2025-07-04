@@ -15,7 +15,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		plugin.logger = &testLogger{t: t}
 
 		// Set current version to target version
-		err := plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(CurrentKVStoreVersion)))
+		err := plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(kvstore.CurrentKVStoreVersion)))
 		assert.NoError(t, err)
 
 		// Run migrations
@@ -27,7 +27,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 
 	t.Run("MigrationFromVersion0", func(t *testing.T) {
@@ -55,7 +55,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 
 		// Reverse mappings should be created
 		userReverseBytes, err := plugin.kvstore.Get("mattermost_user_user123")
@@ -85,7 +85,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 }
 
@@ -387,7 +387,7 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 
 		// Check user reverse mappings
 		userReverse1, err := plugin.kvstore.Get("mattermost_user_user123")
@@ -476,7 +476,7 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 
 	t.Run("EmptyKVStoreHandledGracefully", func(t *testing.T) {
@@ -494,6 +494,6 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.NoError(t, err)
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
-		assert.Equal(t, CurrentKVStoreVersion, version)
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 	})
 }

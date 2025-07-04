@@ -5,6 +5,8 @@ package kvstore
 // to ensure consistency and avoid key conflicts.
 
 const (
+	// CurrentKVStoreVersion is the current version requiring migrations
+	CurrentKVStoreVersion = 2
 	// KeyPrefixMatrixUser is the prefix for Matrix user ID -> Mattermost user ID mappings
 	KeyPrefixMatrixUser = "matrix_user_"
 	// KeyPrefixMattermostUser is the prefix for Mattermost user ID -> Matrix user ID mappings

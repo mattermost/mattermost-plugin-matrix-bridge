@@ -19,8 +19,6 @@ type MigrationResult struct {
 }
 
 const (
-	// CurrentKVStoreVersion is the current version requiring migrations
-	CurrentKVStoreVersion = 2
 	// MigrationBatchSize is the number of keys to process in each batch
 	MigrationBatchSize = 1000
 )
@@ -42,13 +40,13 @@ func (p *Plugin) runKVStoreMigrationsWithResults() (*MigrationResult, error) {
 		}
 	}
 
-	p.logger.LogInfo("Checking KV store migrations", "current_version", currentVersion, "target_version", CurrentKVStoreVersion)
+	p.logger.LogInfo("Checking KV store migrations", "current_version", currentVersion, "target_version", kvstore.CurrentKVStoreVersion)
 
 	result := &MigrationResult{}
 
 	// Run migrations if needed
-	if currentVersion < CurrentKVStoreVersion {
-		p.logger.LogInfo("Running KV store migrations", "from_version", currentVersion, "to_version", CurrentKVStoreVersion)
+	if currentVersion < kvstore.CurrentKVStoreVersion {
+		p.logger.LogInfo("Running KV store migrations", "from_version", currentVersion, "target_version", kvstore.CurrentKVStoreVersion)
 
 		if currentVersion < 1 {
 			v1Result, err := p.runMigrationToVersion1WithResults()
@@ -70,11 +68,11 @@ func (p *Plugin) runKVStoreMigrationsWithResults() (*MigrationResult, error) {
 		}
 
 		// Update version marker
-		if err := p.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(CurrentKVStoreVersion))); err != nil {
+		if err := p.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(kvstore.CurrentKVStoreVersion))); err != nil {
 			return nil, errors.Wrap(err, "failed to update KV store version")
 		}
 
-		p.logger.LogInfo("KV store migrations completed successfully", "new_version", CurrentKVStoreVersion)
+		p.logger.LogInfo("KV store migrations completed successfully", "new_version", kvstore.CurrentKVStoreVersion)
 	} else {
 		p.logger.LogDebug("KV store is up to date", "version", currentVersion)
 	}
