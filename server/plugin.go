@@ -193,7 +193,7 @@ func (p *Plugin) registerForSharedChannels() error {
 		PluginID:     "com.mattermost.plugin-matrix-bridge",
 		CreatorID:    creatorID,
 		AutoShareDMs: false,
-		AutoInvited:  true,
+		AutoInvited:  false,
 	}
 
 	remoteID, appErr := p.API.RegisterPluginForSharedChannels(opts)
