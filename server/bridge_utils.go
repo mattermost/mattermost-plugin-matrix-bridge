@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
@@ -124,27 +125,53 @@ func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID strin
 	return postID, remoteID
 }
 
+// isHTML checks if content contains HTML tags or entities
+func isHTML(content string) bool {
+	// Check for HTML tags
+	htmlTagRegex := regexp.MustCompile(`<[^>]+>`)
+	if htmlTagRegex.MatchString(content) {
+		return true
+	}
+
+	// Check for HTML entities
+	htmlEntityRegex := regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
+	return htmlEntityRegex.MatchString(content)
+}
+
+// isHTMLContent checks if content should be treated as HTML based on Matrix format field or content analysis
+func (s *BridgeUtils) isHTMLContent(content string, event MatrixEvent) bool {
+	// Check Matrix format field first (most reliable)
+	if format, ok := event.Content["format"].(string); ok {
+		return format == "org.matrix.custom.html"
+	}
+	// Fall back to content analysis
+	return isHTML(content)
+}
+
 func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 	if event.Content == nil {
 		return ""
 	}
 
+	var content string
+
 	// Prefer formatted_body if available and different from body
 	if formattedBody, ok := event.Content["formatted_body"].(string); ok {
 		if body, hasBody := event.Content["body"].(string); hasBody {
+			content = body
 			// Only use formatted_body if it's different from body (indicating actual formatting)
 			if formattedBody != body {
-				return formattedBody
+				content = formattedBody
 			}
 		}
 	}
 
-	// Fall back to plain body
-	if body, ok := event.Content["body"].(string); ok {
-		return body
+	// Convert HTML to Markdown if needed
+	if s.isHTMLContent(content, event) {
+		content = convertHTMLToMarkdown(s.logger, content)
 	}
 
-	return ""
+	return content
 }
 
 func (s *BridgeUtils) downloadMatrixFile(mxcURL string) ([]byte, error) {

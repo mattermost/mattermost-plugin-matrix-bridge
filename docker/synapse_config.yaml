@@ -1,0 +1,70 @@
+server_name: "localhost"
+pid_file: /data/homeserver.pid
+public_baseurl: http://localhost:8888/
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources:
+      - names: [client, federation]
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: synapse
+    database: synapse
+    host: postgres
+    port: 5432
+    cp_min: 5
+    cp_max: 10
+
+log:
+  version: 1
+  formatters:
+    precise:
+      format: '%(asctime)s - %(name)s - %(lineno)d - %(levelname)s - %(request)s - %(message)s'
+  handlers:
+    console:
+      class: logging.StreamHandler
+      formatter: precise
+  loggers:
+    synapse:
+      level: INFO
+    synapse.access:
+      level: INFO
+  root:
+    level: INFO
+    handlers: [console]
+
+media_store_path: "/data/media_store"
+max_upload_size: 50M
+max_image_pixels: 32M
+
+registration_shared_secret: "development_secret_key_change_in_production"
+macaroon_secret_key: "development_macaroon_secret_change_in_production"
+form_secret: "development_form_secret_change_in_production"
+
+signing_key_path: "/data/signing.key"
+
+trusted_key_servers:
+  - server_name: "matrix.org"
+
+enable_registration: true
+enable_registration_without_verification: true
+
+suppress_key_server_warning: true
+
+room_list_publication_rules:
+  - user_id: "@_mattermost_bridge:localhost"
+    action: allow
+  - user_id: "*"
+    action: deny
+
+app_service_config_files:
+  - /data/mattermost-bridge-registration.yaml
+
+report_stats: false

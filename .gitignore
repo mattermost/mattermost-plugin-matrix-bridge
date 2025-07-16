@@ -17,3 +17,6 @@ server/server.test
 
 # VS Code
 .vscode
+
+# Matrix bridge registration file
+docker/mattermost-bridge-registration.yaml
