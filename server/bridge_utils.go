@@ -153,17 +153,20 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 		return ""
 	}
 
-	// Step 1: Choose content source (prefer body, fall back to formatted_body)
-	var content string
-	if body, ok := event.Content["body"].(string); ok && body != "" {
-		content = body
-	} else if formattedBody, ok := event.Content["formatted_body"].(string); ok {
-		content = formattedBody
-	} else {
-		return ""
+    var content string
+
+	// Prefer formatted_body if available and different from body
+	if formattedBody, ok := event.Content["formatted_body"].(string); ok {
+		if body, hasBody := event.Content["body"].(string); hasBody {
+			content = body
+			// Only use formatted_body if it's different from body (indicating actual formatting)
+			if formattedBody != body {
+				content = formattedBody
+			}
+		}
 	}
 
-	// Step 2: Convert HTML to markdown if needed
+	// Convert HTML to Markdown if needed
 	if s.isHTMLContent(content, event) {
 		content = convertHTMLToMarkdown(s.logger, content)
 	}
