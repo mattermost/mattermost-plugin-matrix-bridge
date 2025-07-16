@@ -80,6 +80,56 @@ make test
 make deploy
 ```
 
+### Emoji Generation
+
+To generate the emoji mappings in the `server/emoji_mappings_generated.go` file:
+
+```bash
+make generate-emoji
+```
+
+## Local Development with Matrix Synapse
+
+For local development and testing, you can run a Matrix Synapse server using Docker Compose.
+
+### Prerequisites
+
+1. Install and configure the Mattermost Matrix Bridge plugin first
+2. Generate the bridge registration file through the plugin configuration
+3. Copy the generated registration file to `docker/mattermost-bridge-registration.yaml`
+
+### Starting the Matrix Synapse Server
+
+1. Start the services:
+   ```bash
+   docker-compose up -d
+   ```
+
+2. Create an admin user:
+   ```bash
+   docker exec -it mattermost-plugin-matrix-bridge-synapse-1 register_new_matrix_user -c /data/homeserver.yaml -u admin -p admin123 -a http://localhost:8008
+   ```
+
+3. The Matrix server will be available at `http://localhost:8888`
+
+### Configuration Notes
+
+- The Synapse server is configured to use PostgreSQL as the database
+- Registration is enabled for development purposes
+- App service configuration is loaded from `docker/mattermost-bridge-registration.yaml`
+- Room list publication is restricted to the bridge user only
+
+### Stopping the Services
+
+```bash
+docker-compose down
+```
+
+To completely reset (remove all data):
+```bash
+docker-compose down -v
+```
+
 ## Troubleshooting
 
 **Connection Issues:**

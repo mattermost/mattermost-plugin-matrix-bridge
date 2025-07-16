@@ -1,0 +1,44 @@
+services:
+  synapse-init:
+    image: alpine:latest
+    command: |
+      sh -c "
+        chown -R 991:991 /data
+        chmod -R 755 /data
+      "
+    volumes:
+      - synapse-data:/data
+
+  synapse:
+    image: matrixdotorg/synapse:latest
+    restart: unless-stopped
+    environment:
+      - SYNAPSE_SERVER_NAME=localhost
+      - SYNAPSE_REPORT_STATS=no
+      - UID=991
+      - GID=991
+    volumes:
+      - synapse-data:/data
+      - ./docker/synapse_config.yaml:/data/homeserver.yaml:ro
+      - ./docker/mattermost-bridge-registration.yaml:/data/mattermost-bridge-registration.yaml:ro
+    ports:
+      - "8888:8008"
+      - "8448:8448"
+    depends_on:
+      - synapse-init
+      - postgres
+
+  postgres:
+    image: postgres:13
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=synapse
+      - POSTGRES_USER=synapse
+      - POSTGRES_PASSWORD=synapse
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  synapse-data:
+  postgres-data:
