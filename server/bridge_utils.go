@@ -153,7 +153,7 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 		return ""
 	}
 
-    var content string
+	var content string
 
 	// Prefer formatted_body if available and different from body
 	if formattedBody, ok := event.Content["formatted_body"].(string); ok {
