@@ -82,11 +82,11 @@ func (p *Plugin) OnConfigurationChange() error {
 	var configuration = new(configuration)
 
 	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableRemoteClusterService != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableRemoteClusterService {
-		return fmt.Errorf("Remote Cluster Service it's required and is currently not enabled")
+		return fmt.Errorf("remote Cluster Service it's required and is currently not enabled")
 	}
 
 	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels {
-		return fmt.Errorf("Shared Channels it's required and is currently not enabled")
+		return fmt.Errorf("shared Channels it's required and is currently not enabled")
 	}
 
 	// Load the public configuration fields from the Mattermost server configuration.
