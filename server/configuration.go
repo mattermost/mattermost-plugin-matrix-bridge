@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"reflect"
 
 	"github.com/pkg/errors"
@@ -79,6 +80,14 @@ func (p *Plugin) setConfiguration(configuration *configuration) {
 // OnConfigurationChange is invoked when configuration changes may have been made.
 func (p *Plugin) OnConfigurationChange() error {
 	var configuration = new(configuration)
+
+	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableRemoteClusterService != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableRemoteClusterService {
+		return fmt.Errorf("Remote Cluster Service it's required and is currently not enabled")
+	}
+
+	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels {
+		return fmt.Errorf("Shared Channels it's required and is currently not enabled")
+	}
 
 	// Load the public configuration fields from the Mattermost server configuration.
 	if err := p.API.LoadPluginConfiguration(configuration); err != nil {
