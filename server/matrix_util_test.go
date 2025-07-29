@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	sampleMultilneHTML = `<h3>Suspected Lateral Movement – Relay Switching Behavior Observed</h3>  
+	sampleMultiLineHTML = `<h3>Suspected Lateral Movement – Relay Switching Behavior Observed</h3>  
 <p>We've observed endpoint switching consistent with lateral movement from SATCOM ingress. Traces suggest adversary is exploring multiple exit points across coalition relay nodes.</p>  
 <ul>
 <li>Origin trace tied to COMSAT-4</li>
@@ -20,7 +20,7 @@ const (
 <li>Request trace overlays from JMOD and ASD</li>
 </ul>`
 
-	sampleMultilneMarkdown = `### Suspected Lateral Movement – Relay Switching Behavior Observed
+	sampleMultiLineMarkdown = `### Suspected Lateral Movement – Relay Switching Behavior Observed
 
 We've observed endpoint switching consistent with lateral movement from SATCOM ingress. Traces suggest adversary is exploring multiple exit points across coalition relay nodes.
 
@@ -391,8 +391,8 @@ func TestConvertHTMLToMarkdown(t *testing.T) {
 		},
 		{
 			name:     "multi-line formatted",
-			input:    sampleMultilneHTML,
-			expected: sampleMultilneMarkdown,
+			input:    sampleMultiLineHTML,
+			expected: sampleMultiLineMarkdown,
 		},
 	}
 
