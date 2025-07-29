@@ -86,7 +86,7 @@ func (p *Plugin) OnConfigurationChange() error {
 	}
 
 	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels {
-		return fmt.Errorf("shared Channels it's required and is currently not enabled")
+		return fmt.Errorf("shared Channels is required but currently not enabled")
 	}
 
 	// Load the public configuration fields from the Mattermost server configuration.
