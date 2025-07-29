@@ -155,14 +155,16 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 
 	var content string
 
+	// Start with body as the default content
+	if body, ok := event.Content["body"].(string); ok {
+		content = body
+	}
+
 	// Prefer formatted_body if available and different from body
 	if formattedBody, ok := event.Content["formatted_body"].(string); ok {
-		if body, hasBody := event.Content["body"].(string); hasBody {
-			content = body
-			// Only use formatted_body if it's different from body (indicating actual formatting)
-			if formattedBody != body {
-				content = formattedBody
-			}
+		// Only use formatted_body if it's different from body (indicating actual formatting)
+		if formattedBody != content {
+			content = formattedBody
 		}
 	}
 

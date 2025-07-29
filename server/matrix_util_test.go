@@ -7,6 +7,28 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
 	"github.com/mattermost/mattermost/server/public/model"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	sampleMultilneHTML = `<h3>Suspected Lateral Movement – Relay Switching Behavior Observed</h3>  
+<p>We've observed endpoint switching consistent with lateral movement from SATCOM ingress. Traces suggest adversary is exploring multiple exit points across coalition relay nodes.</p>  
+<ul>
+<li>Origin trace tied to COMSAT-4</li>
+<li>Switches across 3 endpoint IPs within 90 seconds</li>
+<li>Echoes techniques seen in the 2023 OPFOR sim</li>
+<li>Request trace overlays from JMOD and ASD</li>
+</ul>`
+
+	sampleMultilneMarkdown = `### Suspected Lateral Movement – Relay Switching Behavior Observed
+
+We've observed endpoint switching consistent with lateral movement from SATCOM ingress. Traces suggest adversary is exploring multiple exit points across coalition relay nodes.
+
+- Origin trace tied to COMSAT-4
+- Switches across 3 endpoint IPs within 90 seconds
+- Echoes techniques seen in the 2023 OPFOR sim
+- Request trace overlays from JMOD and ASD
+`
 )
 
 func TestParseDisplayName(t *testing.T) {
@@ -367,6 +389,11 @@ func TestConvertHTMLToMarkdown(t *testing.T) {
 			input:    "Line 1<br>Line 2<br/>Line 3",
 			expected: "Line 1\n\nLine 2\n\nLine 3", // HTML-to-markdown adds double newlines for br tags
 		},
+		{
+			name:     "multi-line formatted",
+			input:    sampleMultilneHTML,
+			expected: sampleMultilneMarkdown,
+		},
 	}
 
 	for _, tt := range tests {
@@ -378,9 +405,7 @@ func TestConvertHTMLToMarkdown(t *testing.T) {
 			result = strings.TrimSpace(result)
 			expected := strings.TrimSpace(tt.expected)
 
-			if result != expected {
-				t.Errorf("convertHTMLToMarkdown(%q) = %q, want %q", tt.input, result, expected)
-			}
+			require.Equal(t, expected, result)
 		})
 	}
 }
