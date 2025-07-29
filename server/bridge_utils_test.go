@@ -265,7 +265,7 @@ func TestIsHTML(t *testing.T) {
 		{
 			name:     "text with angle brackets but not HTML",
 			content:  "2 < 3 and 5 > 4",
-			expected: true, // The regex `<[^>]+>` matches "< 3" as a tag
+			expected: false,
 		},
 		{
 			name:     "text with ampersand but not HTML entity",
