@@ -282,6 +282,21 @@ func TestIsHTML(t *testing.T) {
 			content:  "<div class=\"test\">Hello &quot;world&quot;</div>",
 			expected: true,
 		},
+		{
+			name:     "invalid HTML with special characters in attributes",
+			content:  "<div weird!@#$%^&*()stuff>",
+			expected: false,
+		},
+		{
+			name:     "invalid HTML with numeric attribute name",
+			content:  "<tag 123invalid=value>",
+			expected: false,
+		},
+		{
+			name:     "valid data attribute",
+			content:  "<span data-test=\"value\">",
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -127,8 +127,9 @@ func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID strin
 
 // isHTML checks if content contains HTML tags or entities
 func isHTML(content string) bool {
-	// Check for HTML tags - must start with letter or slash and contain valid tag characters
-	htmlTagRegex := regexp.MustCompile(`</?[a-zA-Z][a-zA-Z0-9]*[^<>]*>`)
+	// Check for HTML tags with proper attribute validation
+	// Matches: <tag>, <tag attr="value">, <tag attr="value" attr2="value2">, </tag>, <tag/>
+	htmlTagRegex := regexp.MustCompile(`</?[a-zA-Z][a-zA-Z0-9]*(?:\s+[a-zA-Z-]+(?:="[^"]*")?)*\s*/?>`)
 	if htmlTagRegex.MatchString(content) {
 		return true
 	}
