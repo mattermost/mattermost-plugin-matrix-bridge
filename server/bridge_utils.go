@@ -11,6 +11,19 @@ import (
 	"github.com/pkg/errors"
 )
 
+var (
+	// Compiled regex patterns for HTML detection
+	// htmlTagRegex matches HTML tags with proper attribute validation:
+	// - <tag>, <tag attr="value">, <tag attr="value" attr2="value2">, </tag>, <tag/>
+	// - Allows attributes with optional quoted values
+	// - Rejects invalid attribute names (must start with letter, can contain letters/hyphens)
+	// - Does not validate tag names or attribute values beyond basic syntax
+	htmlTagRegex = regexp.MustCompile(`</?[a-zA-Z][a-zA-Z0-9]*(?:\s+[a-zA-Z-]+(?:="[^"]*")?)*\s*/?>`)
+
+	// htmlEntityRegex matches HTML entities like &amp;, &lt;, &#39;, etc.
+	htmlEntityRegex = regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
+)
+
 // ConfigurationGetter interface for getting plugin configuration
 type ConfigurationGetter interface {
 	getConfiguration() *configuration
@@ -127,15 +140,12 @@ func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID strin
 
 // isHTML checks if content contains HTML tags or entities
 func isHTML(content string) bool {
-	// Check for HTML tags with proper attribute validation
-	// Matches: <tag>, <tag attr="value">, <tag attr="value" attr2="value2">, </tag>, <tag/>
-	htmlTagRegex := regexp.MustCompile(`</?[a-zA-Z][a-zA-Z0-9]*(?:\s+[a-zA-Z-]+(?:="[^"]*")?)*\s*/?>`)
+	// Check for HTML tags using pre-compiled regex
 	if htmlTagRegex.MatchString(content) {
 		return true
 	}
 
-	// Check for HTML entities
-	htmlEntityRegex := regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
+	// Check for HTML entities using pre-compiled regex
 	return htmlEntityRegex.MatchString(content)
 }
 
