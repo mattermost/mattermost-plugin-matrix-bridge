@@ -11,6 +11,19 @@ import (
 	"github.com/pkg/errors"
 )
 
+var (
+	// Compiled regex patterns for HTML detection
+	// htmlTagRegex matches HTML tags with proper attribute validation:
+	// - <tag>, <tag attr="value">, <tag attr="value" attr2="value2">, </tag>, <tag/>
+	// - Allows attributes with optional quoted values
+	// - Rejects invalid attribute names (must start with letter, can contain letters/hyphens)
+	// - Does not validate tag names or attribute values beyond basic syntax
+	htmlTagRegex = regexp.MustCompile(`</?[a-zA-Z][a-zA-Z0-9]*(?:\s+[a-zA-Z-]+(?:="[^"]*")?)*\s*/?>`)
+
+	// htmlEntityRegex matches HTML entities like &amp;, &lt;, &#39;, etc.
+	htmlEntityRegex = regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
+)
+
 // ConfigurationGetter interface for getting plugin configuration
 type ConfigurationGetter interface {
 	getConfiguration() *configuration
@@ -127,14 +140,12 @@ func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID strin
 
 // isHTML checks if content contains HTML tags or entities
 func isHTML(content string) bool {
-	// Check for HTML tags
-	htmlTagRegex := regexp.MustCompile(`<[^>]+>`)
+	// Check for HTML tags using pre-compiled regex
 	if htmlTagRegex.MatchString(content) {
 		return true
 	}
 
-	// Check for HTML entities
-	htmlEntityRegex := regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
+	// Check for HTML entities using pre-compiled regex
 	return htmlEntityRegex.MatchString(content)
 }
 
@@ -155,14 +166,16 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 
 	var content string
 
+	// Start with body as the default content
+	if body, ok := event.Content["body"].(string); ok {
+		content = body
+	}
+
 	// Prefer formatted_body if available and different from body
 	if formattedBody, ok := event.Content["formatted_body"].(string); ok {
-		if body, hasBody := event.Content["body"].(string); hasBody {
-			content = body
-			// Only use formatted_body if it's different from body (indicating actual formatting)
-			if formattedBody != body {
-				content = formattedBody
-			}
+		// Only use formatted_body if it's different from body (indicating actual formatting)
+		if formattedBody != content {
+			content = formattedBody
 		}
 	}
 
