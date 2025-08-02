@@ -80,15 +80,6 @@ func setupPluginForTestWithLogger(t *testing.T, api plugin.API) *Plugin {
 	return plugin
 }
 
-// setupPluginForTestWithKVStore creates a plugin instance with test logger, API, and KV store
-func setupPluginForTestWithKVStore(t *testing.T, api plugin.API, kvstore kvstore.KVStore) *Plugin {
-	plugin := &Plugin{}
-	plugin.API = api
-	plugin.kvstore = kvstore
-	plugin.logger = &testLogger{t: t}
-	return plugin
-}
-
 // createMatrixClientWithTestLogger creates a matrix client with test logger for testing
 func createMatrixClientWithTestLogger(t *testing.T, serverURL, asToken, remoteID string) *matrix.Client {
 	testLogger := matrix.NewTestLogger(t)
