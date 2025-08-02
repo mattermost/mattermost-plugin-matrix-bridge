@@ -457,3 +457,169 @@ func TestIsGhostUser(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractMentionedUsers(t *testing.T) {
+	// Create test BridgeUtils instance
+	api := &plugintest.API{}
+	logger := &testLogger{t: t}
+	kvstore := NewMemoryKVStore()
+	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+
+	config := BridgeUtilsConfig{
+		Logger:       logger,
+		API:          api,
+		KVStore:      kvstore,
+		MatrixClient: matrixClient,
+		RemoteID:     "test-remote",
+	}
+
+	bridgeUtils := NewBridgeUtils(config)
+
+	tests := []struct {
+		name     string
+		event    MatrixEvent
+		expected []string
+	}{
+		{
+			name: "no mentions field",
+			event: MatrixEvent{
+				EventID: "event1",
+				Content: map[string]any{},
+			},
+			expected: nil,
+		},
+		{
+			name: "empty mentions",
+			event: MatrixEvent{
+				EventID: "event2",
+				Content: map[string]any{
+					"m.mentions": map[string]any{},
+				},
+			},
+			expected: nil,
+		},
+		{
+			name: "single mention",
+			event: MatrixEvent{
+				EventID: "event3",
+				Content: map[string]any{
+					"m.mentions": map[string]any{
+						"user_ids": []any{"@alice:example.com"},
+					},
+				},
+			},
+			expected: []string{"@alice:example.com"},
+		},
+		{
+			name: "multiple mentions",
+			event: MatrixEvent{
+				EventID: "event4",
+				Content: map[string]any{
+					"m.mentions": map[string]any{
+						"user_ids": []any{"@alice:example.com", "@bob:example.com"},
+					},
+				},
+			},
+			expected: []string{"@alice:example.com", "@bob:example.com"},
+		},
+		{
+			name: "invalid mentions format",
+			event: MatrixEvent{
+				EventID: "event5",
+				Content: map[string]any{
+					"m.mentions": "invalid",
+				},
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := bridgeUtils.extractMentionedUsers(tt.event)
+
+			if len(result) != len(tt.expected) {
+				t.Errorf("extractMentionedUsers() returned %d users, want %d", len(result), len(tt.expected))
+				return
+			}
+
+			for i, expected := range tt.expected {
+				if result[i] != expected {
+					t.Errorf("extractMentionedUsers()[%d] = %q, want %q", i, result[i], expected)
+				}
+			}
+		})
+	}
+}
+
+func TestReplaceMatrixMentionHTML(t *testing.T) {
+	// Create test BridgeUtils instance
+	api := &plugintest.API{}
+	logger := &testLogger{t: t}
+	kvstore := NewMemoryKVStore()
+	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+
+	config := BridgeUtilsConfig{
+		Logger:       logger,
+		API:          api,
+		KVStore:      kvstore,
+		MatrixClient: matrixClient,
+		RemoteID:     "test-remote",
+	}
+
+	bridgeUtils := NewBridgeUtils(config)
+
+	tests := []struct {
+		name               string
+		htmlContent        string
+		matrixUserID       string
+		mattermostUsername string
+		expected           string
+	}{
+		{
+			name:               "simple mention",
+			htmlContent:        `Hello <a href="https://matrix.to/#/@alice:example.com">Alice</a>!`,
+			matrixUserID:       "@alice:example.com",
+			mattermostUsername: "alice",
+			expected:           "Hello @alice!",
+		},
+		{
+			name:               "mention with display name",
+			htmlContent:        `Hey <a href="https://matrix.to/#/@bob:server.org">Bob Smith</a>, how are you?`,
+			matrixUserID:       "@bob:server.org",
+			mattermostUsername: "bobsmith",
+			expected:           "Hey @bobsmith, how are you?",
+		},
+		{
+			name:               "multiple mentions of same user",
+			htmlContent:        `<a href="https://matrix.to/#/@alice:example.com">Alice</a> and <a href="https://matrix.to/#/@alice:example.com">Alice again</a>`,
+			matrixUserID:       "@alice:example.com",
+			mattermostUsername: "alice",
+			expected:           "@alice and @alice",
+		},
+		{
+			name:               "no mention links",
+			htmlContent:        "Just plain text",
+			matrixUserID:       "@alice:example.com",
+			mattermostUsername: "alice",
+			expected:           "Just plain text",
+		},
+		{
+			name:               "mention with different formatting",
+			htmlContent:        `<a href='https://matrix.to/#/@user:example.com' class="mention">User Name</a>`,
+			matrixUserID:       "@user:example.com",
+			mattermostUsername: "username",
+			expected:           "@username",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := bridgeUtils.replaceMatrixMentionHTML(tt.htmlContent, tt.matrixUserID, tt.mattermostUsername)
+
+			if result != tt.expected {
+				t.Errorf("replaceMatrixMentionHTML() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
