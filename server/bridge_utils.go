@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -179,12 +180,165 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 		}
 	}
 
-	// Convert HTML to Markdown if needed
+	// Convert HTML to Markdown with mention processing if needed
 	if s.isHTMLContent(content, event) {
-		content = convertHTMLToMarkdown(s.logger, content)
+		content = s.convertHTMLToMarkdownWithMentions(content, event)
 	}
 
 	return content
+}
+
+// processMatrixMentions processes Matrix mentions in HTML content and converts them to Mattermost @mentions
+func (s *BridgeUtils) processMatrixMentions(htmlContent string, event MatrixEvent) string {
+	// Get mentioned users from m.mentions field
+	mentionedUsers := s.extractMentionedUsers(event)
+	if len(mentionedUsers) == 0 {
+		return htmlContent
+	}
+
+	// Process HTML content to replace mention links with @mentions
+	processed := htmlContent
+	for _, matrixUserID := range mentionedUsers {
+		// Look up Mattermost username for this Matrix user
+		mattermostUsername := s.getMattermostUsernameFromMatrix(matrixUserID)
+		if mattermostUsername != "" {
+			// Replace HTML mention links for this user
+			processed = s.replaceMatrixMentionHTML(processed, matrixUserID, mattermostUsername)
+		}
+	}
+
+	return processed
+}
+
+// extractMentionedUsers extracts Matrix user IDs from the m.mentions field
+func (s *BridgeUtils) extractMentionedUsers(event MatrixEvent) []string {
+	mentionsField, hasMentions := event.Content["m.mentions"]
+	if !hasMentions {
+		return nil
+	}
+
+	mentions, ok := mentionsField.(map[string]any)
+	if !ok {
+		s.logger.LogDebug("m.mentions field is not a map", "event_id", event.EventID)
+		return nil
+	}
+
+	// Get user_ids array from mentions
+	userIDsField, hasUserIDs := mentions["user_ids"]
+	if !hasUserIDs {
+		return nil
+	}
+
+	userIDsArray, ok := userIDsField.([]any)
+	if !ok {
+		s.logger.LogDebug("user_ids field is not an array", "event_id", event.EventID)
+		return nil
+	}
+
+	// Convert to string array
+	var userIDs []string
+	for _, userIDInterface := range userIDsArray {
+		if userID, ok := userIDInterface.(string); ok {
+			userIDs = append(userIDs, userID)
+		}
+	}
+
+	s.logger.LogDebug("Extracted mentioned users from Matrix event", "event_id", event.EventID, "user_ids", userIDs)
+	return userIDs
+}
+
+// getMattermostUsernameFromMatrix looks up the Mattermost username for a Matrix user ID
+func (s *BridgeUtils) getMattermostUsernameFromMatrix(matrixUserID string) string {
+	var mattermostUserID string
+
+	// Check if this is a ghost user (Mattermost user represented in Matrix)
+	if ghostMattermostUserID := s.extractMattermostUserIDFromGhost(matrixUserID); ghostMattermostUserID != "" {
+		s.logger.LogDebug("Found ghost user for mention", "matrix_user_id", matrixUserID, "mattermost_user_id", ghostMattermostUserID)
+		mattermostUserID = ghostMattermostUserID
+	} else {
+		// Check if we have a mapping for this regular Matrix user
+		userMapKey := "matrix_user_" + matrixUserID
+		userIDBytes, err := s.kvstore.Get(userMapKey)
+		if err != nil || len(userIDBytes) == 0 {
+			s.logger.LogDebug("No Mattermost user found for Matrix mention", "matrix_user_id", matrixUserID)
+			return ""
+		}
+		mattermostUserID = string(userIDBytes)
+	}
+
+	// Get the Mattermost user to retrieve username
+	user, appErr := s.API.GetUser(mattermostUserID)
+	if appErr != nil {
+		s.logger.LogWarn("Failed to get Mattermost user for mention", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", matrixUserID)
+		return ""
+	}
+
+	s.logger.LogDebug("Found Mattermost username for Matrix mention", "matrix_user_id", matrixUserID, "mattermost_username", user.Username)
+	return user.Username
+}
+
+// extractMattermostUserIDFromGhost extracts the Mattermost user ID from a Matrix ghost user ID
+// Ghost users follow the pattern: @_mattermost_<mattermost_user_id>:<server_domain>
+func (s *BridgeUtils) extractMattermostUserIDFromGhost(ghostUserID string) string {
+	const ghostUserPrefix = "@_mattermost_"
+
+	// Check if this looks like a ghost user
+	if !strings.HasPrefix(ghostUserID, ghostUserPrefix) {
+		return ""
+	}
+
+	// Extract the part after the prefix and before the server domain
+	withoutPrefix := ghostUserID[len(ghostUserPrefix):]
+
+	// Find the colon that separates user ID from server domain
+	colonIndex := strings.Index(withoutPrefix, ":")
+	if colonIndex == -1 {
+		return ""
+	}
+
+	// Extract the Mattermost user ID
+	mattermostUserID := withoutPrefix[:colonIndex]
+
+	if mattermostUserID == "" {
+		return ""
+	}
+
+	s.logger.LogDebug("Extracted Mattermost user ID from ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
+	return mattermostUserID
+}
+
+// replaceMatrixMentionHTML replaces Matrix mention HTML links with Mattermost @mentions
+func (s *BridgeUtils) replaceMatrixMentionHTML(htmlContent, matrixUserID, mattermostUsername string) string {
+	// Matrix mention links typically look like:
+	// <a href="https://matrix.to/#/@user:server.com">Display Name</a>
+	// We want to replace these with @username
+
+	// Create pattern to match Matrix mention links for this specific user
+	// Pattern matches: <a href="https://matrix.to/#/USERID">any text</a>
+	escapedUserID := regexp.QuoteMeta(matrixUserID)
+	pattern := fmt.Sprintf(`<a\s+href=["']https://matrix\.to/#/%s["'][^>]*>([^<]+)</a>`, escapedUserID)
+
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		s.logger.LogWarn("Failed to compile mention regex", "error", err, "pattern", pattern)
+		return htmlContent
+	}
+
+	// Replace with @username
+	replacement := "@" + mattermostUsername
+	result := regex.ReplaceAllString(htmlContent, replacement)
+
+	s.logger.LogDebug("Replaced Matrix mention HTML", "matrix_user_id", matrixUserID, "mattermost_username", mattermostUsername, "original", htmlContent, "result", result)
+	return result
+}
+
+// convertHTMLToMarkdownWithMentions converts Matrix HTML to Mattermost markdown with mention processing
+func (s *BridgeUtils) convertHTMLToMarkdownWithMentions(htmlContent string, event MatrixEvent) string {
+	// First, process Matrix mentions and convert HTML mention links to Mattermost @mentions
+	processedHTML := s.processMatrixMentions(htmlContent, event)
+
+	// Then convert the processed HTML to markdown
+	return convertHTMLToMarkdown(s.logger, processedHTML)
 }
 
 func (s *BridgeUtils) downloadMatrixFile(mxcURL string) ([]byte, error) {
