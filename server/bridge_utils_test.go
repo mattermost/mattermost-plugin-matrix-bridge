@@ -150,6 +150,73 @@ func TestExtractMatrixMessageContent(t *testing.T) {
 			},
 			expected: "This is **bold** and *italic* text with a [link](https://example.com)",
 		},
+		{
+			name: "edit event with plain text",
+			event: MatrixEvent{
+				Content: map[string]any{
+					"body":    " * Edited message", // fallback body has /* prefix
+					"msgtype": "m.text",
+					"m.new_content": map[string]any{
+						"msgtype": "m.text",
+						"body":    "Edited message", // actual content without /*
+					},
+					"m.relates_to": map[string]any{
+						"rel_type": "m.replace",
+						"event_id": "$original_event_id:matrix.org",
+					},
+				},
+			},
+			expected: "Edited message",
+		},
+		{
+			name: "edit event with HTML formatting",
+			event: MatrixEvent{
+				Content: map[string]any{
+					"body":    " * Edited message", // fallback body
+					"msgtype": "m.text",
+					"m.new_content": map[string]any{
+						"msgtype":        "m.text",
+						"body":           "Edited message",
+						"formatted_body": "<p>Edited <strong>message</strong> with <em>formatting</em></p>",
+						"format":         "org.matrix.custom.html",
+					},
+					"m.relates_to": map[string]any{
+						"rel_type": "m.replace",
+						"event_id": "$original_event_id:matrix.org",
+					},
+				},
+			},
+			expected: "Edited **message** with *formatting*",
+		},
+		{
+			name: "edit event without m.new_content (malformed)",
+			event: MatrixEvent{
+				Content: map[string]any{
+					"body":    " * Edited message",
+					"msgtype": "m.text",
+					"m.relates_to": map[string]any{
+						"rel_type": "m.replace",
+						"event_id": "$original_event_id:matrix.org",
+					},
+				},
+			},
+			expected: " * Edited message", // Falls back to top-level body
+		},
+		{
+			name: "edit event with empty m.new_content",
+			event: MatrixEvent{
+				Content: map[string]any{
+					"body":          " * ",
+					"msgtype":       "m.text",
+					"m.new_content": map[string]any{},
+					"m.relates_to": map[string]any{
+						"rel_type": "m.replace",
+						"event_id": "$original_event_id:matrix.org",
+					},
+				},
+			},
+			expected: "", // Empty content from m.new_content
+		},
 	}
 
 	for _, tt := range tests {
