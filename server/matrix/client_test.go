@@ -2,6 +2,7 @@ package matrix
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -1148,6 +1149,71 @@ func TestURLEscapingBehavior(t *testing.T) {
 			assert.Equal(t, expectedURL, result)
 		})
 	}
+}
+
+func TestMXCURIValidationErrorReporting(t *testing.T) {
+	// Test improved error reporting for malformed MXC URIs
+	client := &Client{
+		serverURL:  "https://matrix.example.com",
+		asToken:    "test-token",
+		logger:     NewTestLogger(t),
+		httpClient: &http.Client{},
+	}
+
+	testCases := []struct {
+		name        string
+		mxcURI      string
+		expectedErr string
+	}{
+		{
+			name:        "path traversal in server name",
+			mxcURI:      "mxc://../../evil/validmedia",
+			expectedErr: "path traversal detected in component: ..",
+		},
+		{
+			name:        "path traversal in media ID",
+			mxcURI:      "mxc://matrix.org/../../../etc/passwd",
+			expectedErr: "path traversal detected in component: ..",
+		},
+		{
+			name:        "path traversal in both components",
+			mxcURI:      "mxc://../../server/../../../media",
+			expectedErr: "path traversal detected in component: ..",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := client.DownloadFile(tt.mxcURI, 1024*1024, "image/")
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectedErr)
+
+			// Verify we get specific validation errors rather than generic message
+			assert.NotContains(t, err.Error(), "failed to construct any valid download URLs for MXC URI")
+		})
+	}
+}
+
+func TestMXCURIValidationErrorReportingWithBetterErrorMessages(t *testing.T) {
+	// Test that we get better error messages that help with debugging
+	client := &Client{
+		serverURL:  "https://matrix.example.com",
+		asToken:    "test-token",
+		logger:     NewTestLogger(t),
+		httpClient: &http.Client{},
+	}
+
+	// Test path traversal error gets caught early with descriptive message
+	_, err := client.DownloadFile("mxc://valid.server/../evil", 1024*1024, "image/")
+	require.Error(t, err)
+
+	// Should contain the specific path traversal error, not generic message
+	assert.Contains(t, err.Error(), "path traversal detected")
+	assert.Contains(t, err.Error(), "invalid MXC URI components")
+
+	// Should NOT contain the fallback generic message since validation catches it early
+	assert.NotContains(t, err.Error(), "failed to construct any valid download URLs")
 }
 
 // Test runner functions to connect the suite to Go's testing framework

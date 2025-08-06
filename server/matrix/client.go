@@ -1455,44 +1455,62 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 
 	// Build secure media download URLs with proper escaping
 	var downloadURLs []string
-	var err error
+	var validationErrors []error
 
 	// NEW: Try client API endpoints first (newer Synapse versions use these)
 	url1, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url1)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "client v1 with server"))
 	}
 
 	url2, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url2)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "client v1 media-only"))
 	}
 
 	// Standard Matrix media repository API v3
 	url3, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url3)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v3 with server"))
 	}
 
 	// Fallback to v1 API (some older servers)
 	url4, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url4)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v1 with server"))
 	}
 
 	// Alternative endpoint without server name (some configurations)
 	url5, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url5)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v3 media-only"))
 	}
 
 	url6, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url6)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v1 media-only"))
 	}
 
 	if len(downloadURLs) == 0 {
-		return nil, errors.New("failed to construct any valid download URLs for MXC URI")
+		// Collect all validation error messages for debugging
+		var errorMsgs []string
+		for _, validationErr := range validationErrors {
+			errorMsgs = append(errorMsgs, validationErr.Error())
+		}
+		return nil, errors.Errorf("failed to construct any valid download URLs for MXC URI %s - validation errors: %s",
+			mxcURI, strings.Join(errorMsgs, "; "))
 	}
 
 	var lastErr error
