@@ -77,7 +77,7 @@ type Plugin struct {
 // OnActivate is invoked when the plugin is activated. If an error is returned, the plugin will be deactivated.
 func (p *Plugin) OnActivate() error {
 	var err error
-	p.transactionLogger, err = CreateLogger()
+	p.transactionLogger, err = CreateTransactionLogger()
 	if err != nil {
 		return errors.Wrap(err, "failed to create transaction logger")
 	}

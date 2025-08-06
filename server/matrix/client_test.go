@@ -674,6 +674,482 @@ func (suite *MatrixClientTestSuite) TestMatrixClientWithFiles() {
 	})
 }
 
+// Test path traversal protection functions
+func TestValidatePathComponent(t *testing.T) {
+	tests := []struct {
+		name      string
+		component string
+		wantErr   bool
+		errMsg    string
+	}{
+		// Valid cases
+		{
+			name:      "valid matrix room ID",
+			component: "!abc123:matrix.org",
+			wantErr:   false,
+		},
+		{
+			name:      "valid matrix event ID",
+			component: "$def456:matrix.org",
+			wantErr:   false,
+		},
+		{
+			name:      "valid matrix user ID",
+			component: "@user:matrix.org",
+			wantErr:   false,
+		},
+		{
+			name:      "valid alphanumeric string",
+			component: "valid123",
+			wantErr:   false,
+		},
+		{
+			name:      "empty string",
+			component: "",
+			wantErr:   false,
+		},
+		{
+			name:      "special characters",
+			component: "test-_.:@#$%",
+			wantErr:   false,
+		},
+
+		// Path traversal attacks
+		{
+			name:      "simple path traversal",
+			component: "../",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+		{
+			name:      "double path traversal",
+			component: "../../",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+		{
+			name:      "path traversal in middle",
+			component: "valid/../evil",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+		{
+			name:      "path traversal at start",
+			component: "../evil",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+		{
+			name:      "path traversal at end",
+			component: "evil/..",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+		{
+			name:      "multiple path traversals",
+			component: "../../../etc/passwd",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+		{
+			name:      "disguised path traversal with matrix ID",
+			component: "!room../../../admin:matrix.org",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+		{
+			name:      "path traversal in server name",
+			component: "../../evil:matrix.org",
+			wantErr:   true,
+			errMsg:    "path traversal detected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePathComponent(tt.component)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestBuildSecureURL(t *testing.T) {
+	tests := []struct {
+		name           string
+		baseURL        string
+		pathComponents []string
+		expectedURL    string
+		wantErr        bool
+		errMsg         string
+	}{
+		// Valid cases
+		{
+			name:           "simple matrix room path",
+			baseURL:        "https://matrix.org/_matrix/client/v3/rooms/",
+			pathComponents: []string{"!abc123:matrix.org", "event", "$def456:matrix.org"},
+			expectedURL:    "https://matrix.org/_matrix/client/v3/rooms/%21abc123:matrix.org/event/$def456:matrix.org",
+			wantErr:        false,
+		},
+		{
+			name:           "simple components",
+			baseURL:        "https://example.com/api/",
+			pathComponents: []string{"users", "123", "profile"},
+			expectedURL:    "https://example.com/api/users/123/profile",
+			wantErr:        false,
+		},
+		{
+			name:           "empty components",
+			baseURL:        "https://example.com/api/",
+			pathComponents: []string{},
+			expectedURL:    "https://example.com/api/",
+			wantErr:        false,
+		},
+		{
+			name:           "single component with special chars",
+			baseURL:        "https://matrix.org/media/",
+			pathComponents: []string{"@user:matrix.org"},
+			expectedURL:    "https://matrix.org/media/@user:matrix.org",
+			wantErr:        false,
+		},
+
+		// Path traversal attacks
+		{
+			name:           "path traversal in first component",
+			baseURL:        "https://example.com/api/",
+			pathComponents: []string{"../admin", "secret"},
+			wantErr:        true,
+			errMsg:         "path traversal detected",
+		},
+		{
+			name:           "path traversal in middle component",
+			baseURL:        "https://example.com/api/",
+			pathComponents: []string{"users", "../../../admin", "secret"},
+			wantErr:        true,
+			errMsg:         "path traversal detected",
+		},
+		{
+			name:           "path traversal in last component",
+			baseURL:        "https://example.com/api/",
+			pathComponents: []string{"users", "123", "../../../etc/passwd"},
+			wantErr:        true,
+			errMsg:         "path traversal detected",
+		},
+		{
+			name:           "multiple path traversals",
+			baseURL:        "https://matrix.org/_matrix/client/v3/rooms/",
+			pathComponents: []string{"../../../admin", "../../../etc", "passwd"},
+			wantErr:        true,
+			errMsg:         "path traversal detected",
+		},
+		{
+			name:           "disguised matrix room with traversal",
+			baseURL:        "https://matrix.org/_matrix/client/v3/rooms/",
+			pathComponents: []string{"!room:../../evil", "event", "$event:matrix.org"},
+			wantErr:        true,
+			errMsg:         "path traversal detected",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := buildSecureURL(tt.baseURL, tt.pathComponents...)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+				assert.Empty(t, result)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedURL, result)
+			}
+		})
+	}
+}
+
+func TestValidateMXCComponents(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverName string
+		mediaID    string
+		wantErr    bool
+		errMsg     string
+	}{
+		// Valid cases
+		{
+			name:       "valid matrix.org server and media ID",
+			serverName: "matrix.org",
+			mediaID:    "abc123def456",
+			wantErr:    false,
+		},
+		{
+			name:       "valid server with port and complex media ID",
+			serverName: "matrix.example.com:8448",
+			mediaID:    "GCmhgzMPRjqgpODLsNQzVuHZ_jplHLNpqLy6_fJPmO",
+			wantErr:    false,
+		},
+		{
+			name:       "localhost server",
+			serverName: "localhost:8008",
+			mediaID:    "media123",
+			wantErr:    false,
+		},
+		{
+			name:       "IP address server",
+			serverName: "192.168.1.100:8448",
+			mediaID:    "test_media_file",
+			wantErr:    false,
+		},
+
+		// Path traversal attacks in server name
+		{
+			name:       "path traversal in server name - simple",
+			serverName: "../admin",
+			mediaID:    "validmedia",
+			wantErr:    true,
+			errMsg:     "invalid server name in MXC URI",
+		},
+		{
+			name:       "path traversal in server name - complex",
+			serverName: "../../etc/passwd",
+			mediaID:    "validmedia",
+			wantErr:    true,
+			errMsg:     "invalid server name in MXC URI",
+		},
+		{
+			name:       "path traversal in server name - disguised",
+			serverName: "matrix.org/../../../admin",
+			mediaID:    "validmedia",
+			wantErr:    true,
+			errMsg:     "invalid server name in MXC URI",
+		},
+
+		// Path traversal attacks in media ID
+		{
+			name:       "path traversal in media ID - simple",
+			serverName: "matrix.org",
+			mediaID:    "../secret",
+			wantErr:    true,
+			errMsg:     "invalid media ID in MXC URI",
+		},
+		{
+			name:       "path traversal in media ID - complex",
+			serverName: "matrix.org",
+			mediaID:    "../../../etc/passwd",
+			wantErr:    true,
+			errMsg:     "invalid media ID in MXC URI",
+		},
+		{
+			name:       "path traversal in media ID - with valid prefix",
+			serverName: "matrix.org",
+			mediaID:    "validprefix../../../evil",
+			wantErr:    true,
+			errMsg:     "invalid media ID in MXC URI",
+		},
+
+		// Path traversal in both components
+		{
+			name:       "path traversal in both components",
+			serverName: "../admin",
+			mediaID:    "../../../etc/passwd",
+			wantErr:    true,
+			errMsg:     "invalid server name in MXC URI", // First error caught
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMXCComponents(tt.serverName, tt.mediaID)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestPathTraversalAttackVectors(t *testing.T) {
+	// Test comprehensive attack vectors that could bypass naive validation
+	attackVectors := []struct {
+		name      string
+		component string
+		wantErr   bool
+	}{
+		// Basic traversal patterns
+		{"dot-dot-slash", "..", true},
+		{"dot-dot-slash-trailing", "../", true},
+		{"double-dot-dot", "../..", true},
+		{"triple-dot-dot", "../../..", true},
+
+		// Mixed with valid content
+		{"traversal-prefix", "../validcontent", true},
+		{"traversal-suffix", "validcontent/..", true},
+		{"traversal-middle", "valid/../content", true},
+
+		// Case variations (should still detect)
+		{"uppercase-traversal", "VALID/../EVIL", true},
+		{"mixed-case-traversal", "Valid/../Evil", true},
+
+		// Real-world Matrix ID examples with traversal
+		{"matrix-room-traversal", "!room:../../admin.com", true},
+		{"matrix-event-traversal", "$event/../../../etc:matrix.org", true},
+		{"matrix-user-traversal", "@user:../.../../etc", true},
+
+		// Valid cases that should pass
+		{"valid-matrix-room", "!abc123:matrix.org", false},
+		{"valid-matrix-event", "$def456:matrix.org", false},
+		{"valid-matrix-user", "@alice:matrix.org", false},
+		{"valid-media-id", "GCmhgzMPRjqgpODLsNQzVuHZ", false},
+		{"valid-server-with-port", "matrix.org:8448", false},
+		{"valid-with-dots", "file.name.ext", false}, // Single dots are OK
+		{"valid-with-underscores", "valid_file_name", false},
+		{"valid-with-hyphens", "valid-file-name", false},
+	}
+
+	for _, tt := range attackVectors {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePathComponent(tt.component)
+
+			if tt.wantErr {
+				assert.Error(t, err, "Expected path traversal to be detected in: %s", tt.component)
+				assert.Contains(t, err.Error(), "path traversal detected")
+			} else {
+				assert.NoError(t, err, "Valid component should not trigger path traversal detection: %s", tt.component)
+			}
+		})
+	}
+}
+
+func TestBuildSecureURLIntegration(t *testing.T) {
+	// Test realistic Matrix API endpoint construction
+	testCases := []struct {
+		name           string
+		baseURL        string
+		pathComponents []string
+		expectedResult bool
+		description    string
+	}{
+		{
+			name:           "matrix-room-event-valid",
+			baseURL:        "https://matrix.org/_matrix/client/v3/rooms/",
+			pathComponents: []string{"!abc123:matrix.org", "event", "$def456:matrix.org"},
+			expectedResult: true,
+			description:    "Valid Matrix room event URL construction",
+		},
+		{
+			name:           "matrix-room-send-valid",
+			baseURL:        "https://matrix.org/_matrix/client/v3/rooms/",
+			pathComponents: []string{"!room:matrix.org", "send", "m.room.message", "txn123"},
+			expectedResult: true,
+			description:    "Valid Matrix room send message URL construction",
+		},
+		{
+			name:           "matrix-profile-valid",
+			baseURL:        "https://matrix.org/_matrix/client/v3/profile/",
+			pathComponents: []string{"@user:matrix.org", "displayname"},
+			expectedResult: true,
+			description:    "Valid Matrix profile URL construction",
+		},
+		{
+			name:           "matrix-media-download-valid",
+			baseURL:        "https://matrix.org/_matrix/media/v3/download/",
+			pathComponents: []string{"matrix.org", "abc123def456"},
+			expectedResult: true,
+			description:    "Valid Matrix media download URL construction",
+		},
+
+		// Attack scenarios
+		{
+			name:           "matrix-room-traversal-attack",
+			baseURL:        "https://matrix.org/_matrix/client/v3/rooms/",
+			pathComponents: []string{"../../../admin", "secret"},
+			expectedResult: false,
+			description:    "Path traversal attack in room ID should be blocked",
+		},
+		{
+			name:           "matrix-event-traversal-attack",
+			baseURL:        "https://matrix.org/_matrix/client/v3/rooms/",
+			pathComponents: []string{"!validroom:matrix.org", "event", "../../../admin/secret"},
+			expectedResult: false,
+			description:    "Path traversal attack in event ID should be blocked",
+		},
+		{
+			name:           "matrix-media-traversal-attack",
+			baseURL:        "https://matrix.org/_matrix/media/v3/download/",
+			pathComponents: []string{"../../etc/passwd", "evil"},
+			expectedResult: false,
+			description:    "Path traversal attack in media server name should be blocked",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := buildSecureURL(tt.baseURL, tt.pathComponents...)
+
+			if tt.expectedResult {
+				assert.NoError(t, err, tt.description)
+				assert.NotEmpty(t, result)
+				assert.Contains(t, result, tt.baseURL)
+				// Ensure no path traversal sequences in final URL
+				assert.NotContains(t, result, "../")
+			} else {
+				assert.Error(t, err, tt.description)
+				assert.Empty(t, result)
+				assert.Contains(t, err.Error(), "path traversal detected")
+			}
+		})
+	}
+}
+
+func TestURLEscapingBehavior(t *testing.T) {
+	// Test that our URL escaping properly handles Matrix-specific characters
+	testCases := []struct {
+		name      string
+		component string
+		expected  string
+	}{
+		{
+			name:      "matrix room ID escaping",
+			component: "!abc123:matrix.org",
+			expected:  "%21abc123:matrix.org",
+		},
+		{
+			name:      "matrix event ID escaping",
+			component: "$def456:matrix.org",
+			expected:  "$def456:matrix.org",
+		},
+		{
+			name:      "matrix user ID escaping",
+			component: "@alice:matrix.org",
+			expected:  "@alice:matrix.org",
+		},
+		{
+			name:      "server with port escaping",
+			component: "matrix.org:8448",
+			expected:  "matrix.org:8448",
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := buildSecureURL("https://example.com/", tt.component)
+			require.NoError(t, err)
+
+			// Extract the escaped component from the result
+			expectedURL := "https://example.com/" + tt.expected
+			assert.Equal(t, expectedURL, result)
+		})
+	}
+}
+
 // Test runner functions to connect the suite to Go's testing framework
 func TestMatrixClientTestSuite(t *testing.T) {
 	suite.Run(t, new(MatrixClientTestSuite))
