@@ -184,8 +184,9 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 					}
 				}
 
-				// Create a temporary event for HTML detection with the new_content
-				tempEvent := MatrixEvent{Content: newContent}
+				// Create a temporary event for HTML detection with the new_content. Shallow copy the entire event to preserve metadata (m.mentions, etc.)
+				tempEvent := event
+				tempEvent.Content = newContent
 				if s.isHTMLContent(content, tempEvent) {
 					content = s.convertHTMLToMarkdownWithMentions(content, tempEvent)
 				}
