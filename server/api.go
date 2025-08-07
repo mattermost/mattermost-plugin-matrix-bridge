@@ -2,6 +2,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -61,8 +62,8 @@ func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 			return
 		}
 
-		if authHeader != expectedToken {
-			p.logger.LogWarn("Matrix webhook authentication failed", "expected_prefix", "Bearer ...", "received", authHeader)
+		if subtle.ConstantTimeCompare([]byte(authHeader), []byte(expectedToken)) != 1 {
+			p.logger.LogWarn("Matrix webhook authentication failed - bearer token mismatch")
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}

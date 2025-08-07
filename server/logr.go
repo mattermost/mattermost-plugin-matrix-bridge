@@ -9,9 +9,9 @@ import (
 	"github.com/mattermost/logr/v2/targets"
 )
 
-// CreateLogger creates and configures a Logr instance for Matrix transaction debugging.
+// CreateTransactionLogger creates and configures a Logr instance for Matrix transaction debugging.
 // It creates a dedicated JSON file logger for Matrix events and transactions.
-func CreateLogger() (logr.Logger, error) {
+func CreateTransactionLogger() (logr.Logger, error) {
 	// Create logger instance with options
 	logger, err := logr.New(
 		logr.MaxQueueSize(1000),
