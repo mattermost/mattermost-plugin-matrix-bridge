@@ -168,10 +168,10 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 	var content string
 
 	// For edit events, extract content from m.new_content instead of top-level body/formatted_body
-	if relatesTo, exists := event.Content["m.relates_to"].(map[string]any); exists {
-		if relType, exists := relatesTo["rel_type"].(string); exists && relType == "m.replace" {
+	if relatesTo, ok := event.Content["m.relates_to"].(map[string]any); ok {
+		if relType, ok := relatesTo["rel_type"].(string); ok && relType == "m.replace" {
 			// This is an edit event - get content from m.new_content
-			if newContent, exists := event.Content["m.new_content"].(map[string]any); exists {
+			if newContent, ok := event.Content["m.new_content"].(map[string]any); ok {
 				// Extract from m.new_content using same logic
 				if body, ok := newContent["body"].(string); ok {
 					content = body
