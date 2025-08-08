@@ -167,6 +167,36 @@ func (s *BridgeUtils) extractMatrixMessageContent(event MatrixEvent) string {
 
 	var content string
 
+	// For edit events, extract content from m.new_content instead of top-level body/formatted_body
+	if relatesTo, ok := event.Content["m.relates_to"].(map[string]any); ok {
+		if relType, ok := relatesTo["rel_type"].(string); ok && relType == "m.replace" {
+			// This is an edit event - get content from m.new_content
+			if newContent, ok := event.Content["m.new_content"].(map[string]any); ok {
+				// Extract from m.new_content using same logic
+				if body, ok := newContent["body"].(string); ok {
+					content = body
+				}
+
+				if formattedBody, ok := newContent["formatted_body"].(string); ok {
+					// Only use formatted_body if it's different from body (indicating actual formatting)
+					if formattedBody != content {
+						content = formattedBody
+					}
+				}
+
+				// Create a temporary event for HTML detection with the new_content. Shallow copy the entire event to preserve metadata (m.mentions, etc.)
+				tempEvent := event
+				tempEvent.Content = newContent
+				if s.isHTMLContent(content, tempEvent) {
+					content = s.convertHTMLToMarkdownWithMentions(content, tempEvent)
+				}
+
+				return content
+			}
+		}
+	}
+
+	// For non-edit events, use the existing logic
 	// Start with body as the default content
 	if body, ok := event.Content["body"].(string); ok {
 		content = body
