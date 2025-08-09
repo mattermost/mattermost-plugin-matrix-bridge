@@ -471,6 +471,205 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	return nil
 }
 
+// InviteUserToRoom invites a user to a Matrix room
+func (c *Client) InviteUserToRoom(roomID, userID string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	c.logger.LogDebug("Inviting user to Matrix room", "room_id", roomID, "user_id", userID)
+
+	// Prepare invite request body
+	inviteData := map[string]string{
+		"user_id": userID,
+	}
+
+	jsonData, err := json.Marshal(inviteData)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal invite data")
+	}
+
+	// Use room invite endpoint
+	encodedRoomID := url.PathEscape(roomID)
+	requestURL := c.serverURL + "/_matrix/client/v3/rooms/" + encodedRoomID + "/invite"
+
+	req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return errors.Wrap(err, "failed to create invite request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send invite request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read invite response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		// Check for common "already joined" error cases to make this idempotent
+		bodyStr := string(body)
+		if strings.Contains(bodyStr, "M_BAD_STATE") ||
+			strings.Contains(bodyStr, "already joined") ||
+			strings.Contains(bodyStr, "ALREADY_JOINED") ||
+			(resp.StatusCode == http.StatusForbidden && strings.Contains(bodyStr, "joined")) {
+			c.logger.LogDebug("User already joined or invited to Matrix room, skipping", "room_id", roomID, "user_id", userID, "response", bodyStr)
+			return nil // Not an error - user is already in the room
+		}
+
+		c.logger.LogWarn("Failed to invite user to Matrix room", "status_code", resp.StatusCode, "response", bodyStr, "room_id", roomID, "user_id", userID)
+		return fmt.Errorf("failed to invite user to room: %d %s", resp.StatusCode, bodyStr)
+	}
+
+	c.logger.LogDebug("Successfully invited user to Matrix room", "room_id", roomID, "user_id", userID)
+	return nil
+}
+
+// getRoomJoinRule fetches the join rule for a Matrix room
+func (c *Client) getRoomJoinRule(roomID string) (string, error) {
+	if c.serverURL == "" || c.asToken == "" {
+		return "", errors.New("matrix client not configured")
+	}
+
+	// Use the room state endpoint to get join rules
+	encodedRoomID := url.PathEscape(roomID)
+	requestURL := c.serverURL + "/_matrix/client/v3/rooms/" + encodedRoomID + "/state/m.room.join_rules/"
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create join rules request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send join rules request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read join rules response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to get join rules: %d %s", resp.StatusCode, string(body))
+	}
+
+	var joinRuleEvent struct {
+		JoinRule string `json:"join_rule"`
+	}
+	if err := json.Unmarshal(body, &joinRuleEvent); err != nil {
+		return "", errors.Wrap(err, "failed to unmarshal join rules response")
+	}
+
+	return joinRuleEvent.JoinRule, nil
+}
+
+// InviteAndJoinGhostUser invites a ghost user to a room (via application service) and then joins them
+// This checks the room's join rules first to determine if invitation is required
+func (c *Client) InviteAndJoinGhostUser(roomIdentifier, ghostUserID string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	c.logger.LogDebug("Attempting to join ghost user to Matrix room", "room_identifier", roomIdentifier, "ghost_user_id", ghostUserID)
+
+	// Always resolve room alias to room ID for consistency
+	roomID, err := c.ResolveRoomAlias(roomIdentifier)
+	if err != nil {
+		return errors.Wrap(err, "failed to resolve room identifier")
+	}
+
+	c.logger.LogDebug("Resolved room identifier to room ID", "room_identifier", roomIdentifier, "room_id", roomID, "ghost_user_id", ghostUserID)
+
+	// Check the room's join rules first
+	joinRule, err := c.getRoomJoinRule(roomID)
+	if err != nil {
+		c.logger.LogWarn("Failed to get room join rules, falling back to try-join approach", "room_id", roomID, "error", err)
+		// Fall back to the old approach if we can't determine join rules
+		return c.joinGhostUserWithFallback(roomID, ghostUserID)
+	}
+
+	c.logger.LogDebug("Determined room join rule", "room_id", roomID, "join_rule", joinRule)
+
+	// Handle based on join rule
+	switch joinRule {
+	case "public":
+		// Public room - can join directly
+		err := c.JoinRoomAsUser(roomID, ghostUserID)
+		if err != nil {
+			return errors.Wrap(err, "failed to join ghost user to public room")
+		}
+		c.logger.LogDebug("Successfully joined ghost user to public room", "room_id", roomID, "ghost_user_id", ghostUserID)
+		return nil
+
+	case "invite":
+		// Private/invite-only room - need to invite first
+		c.logger.LogDebug("Room requires invitation, inviting ghost user first", "room_id", roomID, "ghost_user_id", ghostUserID)
+
+		// Invite the ghost user to the room using application service bot
+		inviteErr := c.InviteUserToRoom(roomID, ghostUserID)
+		if inviteErr != nil {
+			return errors.Wrap(inviteErr, "failed to invite ghost user to private room")
+		}
+
+		// Now join after invitation
+		joinErr := c.JoinRoomAsUser(roomID, ghostUserID)
+		if joinErr != nil {
+			return errors.Wrap(joinErr, "failed to join ghost user to room after invitation")
+		}
+
+		c.logger.LogDebug("Successfully invited and joined ghost user to private room", "room_id", roomID, "ghost_user_id", ghostUserID)
+		return nil
+
+	default:
+		// Unknown or unsupported join rule (e.g., "knock", "restricted")
+		c.logger.LogWarn("Unknown join rule, falling back to try-join approach", "room_id", roomID, "join_rule", joinRule)
+		return c.joinGhostUserWithFallback(roomID, ghostUserID)
+	}
+}
+
+// joinGhostUserWithFallback is the fallback method that tries join first, then invite+join
+func (c *Client) joinGhostUserWithFallback(roomID, ghostUserID string) error {
+	// First try to join directly
+	err := c.JoinRoomAsUser(roomID, ghostUserID)
+	if err == nil {
+		c.logger.LogDebug("Successfully joined ghost user to room directly", "room_id", roomID, "ghost_user_id", ghostUserID)
+		return nil
+	}
+
+	// If join failed with a 403 Forbidden error, try invitation first
+	if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "M_FORBIDDEN") || strings.Contains(err.Error(), "not invited") {
+		c.logger.LogDebug("Direct join failed with forbidden error, attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "error", err.Error())
+
+		// Invite the ghost user to the room using application service bot
+		inviteErr := c.InviteUserToRoom(roomID, ghostUserID)
+		if inviteErr != nil {
+			return errors.Wrap(inviteErr, "failed to invite ghost user to private room")
+		}
+
+		// Now try to join again after invitation
+		joinErr := c.JoinRoomAsUser(roomID, ghostUserID)
+		if joinErr != nil {
+			return errors.Wrap(joinErr, "failed to join ghost user to room after invitation")
+		}
+
+		c.logger.LogDebug("Successfully invited and joined ghost user to private room via fallback", "room_id", roomID, "ghost_user_id", ghostUserID)
+		return nil
+	}
+
+	// For other errors, return the original join error
+	return errors.Wrap(err, "failed to join ghost user to room")
+}
+
 // CreateRoom creates a new Matrix room with the specified name, topic, and settings.
 // Returns the room ID or alias on success.
 func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, mattermostChannelID string) (string, error) {
@@ -489,11 +688,27 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 		roomAlias = "#_mattermost_" + alias + ":" + serverDomain
 	}
 
+	// Set room visibility and rules based on publish parameter
+	var preset, visibility, joinRule, historyVisibility, guestAccess string
+	if publish {
+		preset = "public_chat"
+		visibility = "public"
+		joinRule = "public"
+		historyVisibility = "world_readable"
+		guestAccess = "can_join"
+	} else {
+		preset = "private_chat"
+		visibility = "private"
+		joinRule = "invite"
+		historyVisibility = "invited"
+		guestAccess = "forbidden"
+	}
+
 	roomData := map[string]any{
 		"name":         name,
 		"topic":        topic,
-		"preset":       "public_chat",
-		"visibility":   "public",
+		"preset":       preset,
+		"visibility":   visibility,
 		"is_direct":    false, // Explicitly mark as not a direct message room
 		"room_version": "10",  // Explicitly set room version and directory visibility
 		"initial_state": []map[string]any{
@@ -501,21 +716,21 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 				"type":      "m.room.guest_access",
 				"state_key": "",
 				"content": map[string]any{
-					"guest_access": "can_join",
+					"guest_access": guestAccess,
 				},
 			},
 			{
 				"type":      "m.room.history_visibility",
 				"state_key": "",
 				"content": map[string]any{
-					"history_visibility": "world_readable",
+					"history_visibility": historyVisibility,
 				},
 			},
 			{
 				"type":      "m.room.join_rules",
 				"state_key": "",
 				"content": map[string]any{
-					"join_rule": "public",
+					"join_rule": joinRule,
 				},
 			},
 			{
@@ -573,6 +788,15 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", errors.Wrap(err, "failed to unmarshal room creation response")
+	}
+
+	// Join the application service bot to the room immediately after creation
+	// This is required for the bot to query room state, invite users, etc.
+	if err := c.JoinRoom(response.RoomID); err != nil {
+		c.logger.LogWarn("Failed to join application service bot to created room", "room_id", response.RoomID, "error", err)
+		// Continue - the room was created successfully, but bot operations may fail
+	} else {
+		c.logger.LogDebug("Application service bot joined room", "room_id", response.RoomID)
 	}
 
 	// Publish to directory based on the publish parameter

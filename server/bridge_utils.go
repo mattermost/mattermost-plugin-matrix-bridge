@@ -84,16 +84,11 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	var roomID string
 	var err error
 
-	if strings.HasPrefix(matrixRoomIdentifier, "#") {
-		// Resolve alias to room ID
-		roomID, err = s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
-		if err != nil {
-			s.logger.LogWarn("Failed to resolve room alias during mapping creation", "room_alias", matrixRoomIdentifier, "error", err)
-			// Fallback: store the alias (better than failing completely)
-			roomID = matrixRoomIdentifier
-		}
-	} else {
-		// Already a room ID
+	// Resolve room identifier to room ID (handles both aliases and room IDs)
+	roomID, err = s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		s.logger.LogWarn("Failed to resolve room identifier during mapping creation", "room_identifier", matrixRoomIdentifier, "error", err)
+		// Fallback: store the original identifier (better than failing completely)
 		roomID = matrixRoomIdentifier
 	}
 
