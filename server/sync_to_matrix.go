@@ -114,8 +114,8 @@ func (b *MattermostToMatrixBridge) ensureGhostUserInRoom(ghostUserID, roomID, us
 		return nil
 	}
 
-	// Try to join the ghost user to the room
-	err = b.matrixClient.JoinRoomAsUser(roomID, ghostUserID)
+	// Try to join the ghost user to the room (handles both public and private rooms)
+	err = b.matrixClient.InviteAndJoinGhostUser(roomID, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to join ghost user to room")
 	}
@@ -929,7 +929,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 			b.logger.LogDebug("Found existing Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
 		} else {
 			// Check if this is a Matrix user represented in Mattermost (Matrix user → Mattermost user)
-			originalMatrixUserID, err := b.getMatrixUserIDFromMattermostUser(user.Id)
+			originalMatrixUserID, err := b.GetMatrixUserIDFromMattermostUser(user.Id)
 			if err == nil && originalMatrixUserID != "" {
 				matrixUserID = originalMatrixUserID
 				displayName = user.GetDisplayName(model.ShowFullName)
@@ -1233,7 +1233,7 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 		if user.IsRemote() {
 			// This is a Matrix user that appears as remote in Mattermost
 			// Look up their original Matrix user ID via reverse mapping
-			matrixUserID, err := b.getMatrixUserIDFromMattermostUser(userID)
+			matrixUserID, err := b.GetMatrixUserIDFromMattermostUser(userID)
 			if err == nil && matrixUserID != "" {
 				b.logger.LogDebug("Using existing Matrix user ID for DM", "mattermost_user_id", userID, "matrix_user_id", matrixUserID)
 				matrixUserIDs = append(matrixUserIDs, matrixUserID)
@@ -1279,8 +1279,8 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 	return matrixRoomID, nil
 }
 
-// getMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
-func (b *MattermostToMatrixBridge) getMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
+// GetMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
+func (b *MattermostToMatrixBridge) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Use Mattermost user ID as key: mattermost_user_<mattermostUserID> -> matrixUserID
 	mattermostUserKey := kvstore.BuildMattermostUserKey(mattermostUserID)
 	matrixUserIDBytes, err := b.kvstore.Get(mattermostUserKey)
