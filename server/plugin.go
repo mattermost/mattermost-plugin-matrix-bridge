@@ -280,7 +280,7 @@ func (p *Plugin) UserHasJoinedChannel(c *plugin.Context, channelMember *model.Ch
 	}
 
 	// First check if this channel is bridged to Matrix
-	matrixRoomID, err := p.mattermostToMatrixBridge.getMatrixRoomID(channelMember.ChannelId)
+	matrixRoomID, err := p.mattermostToMatrixBridge.GetMatrixRoomID(channelMember.ChannelId)
 	if err != nil || matrixRoomID == "" {
 		// Channel is not bridged to Matrix, nothing to do
 		p.logger.LogDebug("Channel not bridged to Matrix, skipping user join sync", "channel_id", channelMember.ChannelId)

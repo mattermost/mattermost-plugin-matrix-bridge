@@ -117,7 +117,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 
 	// Get the Matrix room identifier for this channel
-	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.getMatrixRoomID(post.ChannelId)
+	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.GetMatrixRoomID(post.ChannelId)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for attachment")
 	}
@@ -165,7 +165,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 
 	// If not in pending files, the file was already posted to Matrix - need to delete from Matrix
 	// Get the Matrix room identifier for this channel
-	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.getMatrixRoomID(post.ChannelId)
+	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.GetMatrixRoomID(post.ChannelId)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for file deletion")
 	}
@@ -224,7 +224,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 // inviteRemoteUserToMatrixRoom invites a Matrix user to their corresponding Matrix room when added to a shared channel
 func (p *Plugin) inviteRemoteUserToMatrixRoom(user *model.User, channelID string) error {
 	// Check if this channel is mapped to a Matrix room
-	matrixRoomID, err := p.mattermostToMatrixBridge.getMatrixRoomID(channelID)
+	matrixRoomID, err := p.mattermostToMatrixBridge.GetMatrixRoomID(channelID)
 	if err != nil {
 		p.logger.LogDebug("Channel not mapped to Matrix room, skipping remote user invite", "channel_id", channelID, "user_id", user.Id)
 		return nil // Not an error - channel might not be bridged

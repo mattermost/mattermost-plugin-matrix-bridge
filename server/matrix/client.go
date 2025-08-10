@@ -16,6 +16,40 @@ import (
 	"github.com/pkg/errors"
 )
 
+// MatrixError represents a Matrix API error response
+type MatrixError struct {
+	ErrCode    string `json:"errcode"`
+	ErrMsg     string `json:"error"`
+	StatusCode int    `json:"-"`
+}
+
+// Error implements the error interface
+func (e *MatrixError) Error() string {
+	return fmt.Sprintf("Matrix API error: %d %s - %s", e.StatusCode, e.ErrCode, e.ErrMsg)
+}
+
+// IsAlreadyJoined checks if the error indicates the user is already in the room
+func (e *MatrixError) IsAlreadyJoined() bool {
+	return e.ErrCode == "M_BAD_STATE" ||
+		strings.Contains(strings.ToLower(e.ErrMsg), "already joined") ||
+		strings.Contains(strings.ToLower(e.ErrMsg), "already in the room") ||
+		strings.Contains(e.ErrCode, "ALREADY_JOINED")
+}
+
+// parseMatrixError attempts to parse a Matrix error from response body
+func parseMatrixError(statusCode int, body []byte) *MatrixError {
+	var mErr MatrixError
+	mErr.StatusCode = statusCode
+
+	if err := json.Unmarshal(body, &mErr); err != nil {
+		// Fallback for non-JSON responses
+		mErr.ErrCode = "UNKNOWN"
+		mErr.ErrMsg = string(body)
+	}
+
+	return &mErr
+}
+
 // Path traversal validation functions
 
 // validatePathComponent checks for path traversal sequences in URL path components
@@ -513,19 +547,17 @@ func (c *Client) InviteUserToRoom(roomID, userID string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		// Parse Matrix error response for better error handling
+		matrixErr := parseMatrixError(resp.StatusCode, body)
+
 		// Check for common "already joined" error cases to make this idempotent
-		bodyStr := string(body)
-		if strings.Contains(bodyStr, "M_BAD_STATE") ||
-			strings.Contains(bodyStr, "already joined") ||
-			strings.Contains(bodyStr, "ALREADY_JOINED") ||
-			strings.Contains(bodyStr, "is already in the room") ||
-			(resp.StatusCode == http.StatusForbidden && strings.Contains(bodyStr, "joined")) {
-			c.logger.LogDebug("User already joined or invited to Matrix room, skipping", "room_id", roomID, "user_id", userID, "response", bodyStr)
+		if matrixErr.IsAlreadyJoined() {
+			c.logger.LogDebug("User already joined or invited to Matrix room, skipping", "room_id", roomID, "user_id", userID, "matrix_error", matrixErr.ErrCode)
 			return nil // Not an error - user is already in the room
 		}
 
-		c.logger.LogWarn("Failed to invite user to Matrix room", "status_code", resp.StatusCode, "response", bodyStr, "room_id", roomID, "user_id", userID)
-		return fmt.Errorf("failed to invite user to room: %d %s", resp.StatusCode, bodyStr)
+		c.logger.LogWarn("Failed to invite user to Matrix room", "status_code", resp.StatusCode, "matrix_error", matrixErr.ErrCode, "error_message", matrixErr.ErrMsg, "room_id", roomID, "user_id", userID)
+		return matrixErr
 	}
 
 	c.logger.LogDebug("Successfully invited user to Matrix room", "room_id", roomID, "user_id", userID)
@@ -648,27 +680,32 @@ func (c *Client) joinGhostUserWithFallback(roomID, ghostUserID string) error {
 	}
 
 	// If join failed with a 403 Forbidden error, try invitation first
-	if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "M_FORBIDDEN") || strings.Contains(err.Error(), "not invited") {
-		c.logger.LogDebug("Direct join failed with forbidden error, attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "error", err.Error())
-
-		// Invite the ghost user to the room using application service bot
-		inviteErr := c.InviteUserToRoom(roomID, ghostUserID)
-		if inviteErr != nil {
-			return errors.Wrap(inviteErr, "failed to invite ghost user to private room")
-		}
-
-		// Now try to join again after invitation
-		joinErr := c.JoinRoomAsUser(roomID, ghostUserID)
-		if joinErr != nil {
-			return errors.Wrap(joinErr, "failed to join ghost user to room after invitation")
-		}
-
-		c.logger.LogDebug("Successfully invited and joined ghost user to private room via fallback", "room_id", roomID, "ghost_user_id", ghostUserID)
-		return nil
+	var matrixErr *MatrixError
+	if errors.As(err, &matrixErr) && (matrixErr.StatusCode == http.StatusForbidden || matrixErr.ErrCode == "M_FORBIDDEN" || strings.Contains(strings.ToLower(matrixErr.ErrMsg), "not invited")) {
+		c.logger.LogDebug("Direct join failed with forbidden error, attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "matrix_error", matrixErr.ErrCode)
+	} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "M_FORBIDDEN") || strings.Contains(err.Error(), "not invited") {
+		// Fallback for legacy error types that aren't structured
+		c.logger.LogDebug("Direct join failed with forbidden error (legacy error), attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "error", err.Error())
+	} else {
+		// For other errors, return the original join error
+		return errors.Wrap(err, "failed to join ghost user to room")
 	}
 
-	// For other errors, return the original join error
-	return errors.Wrap(err, "failed to join ghost user to room")
+	// Common invitation and join logic for both structured and legacy errors
+	// Invite the ghost user to the room using application service bot
+	inviteErr := c.InviteUserToRoom(roomID, ghostUserID)
+	if inviteErr != nil {
+		return errors.Wrap(inviteErr, "failed to invite ghost user to private room")
+	}
+
+	// Now try to join again after invitation
+	joinErr := c.JoinRoomAsUser(roomID, ghostUserID)
+	if joinErr != nil {
+		return errors.Wrap(joinErr, "failed to join ghost user to room after invitation")
+	}
+
+	c.logger.LogDebug("Successfully invited and joined ghost user to private room via fallback", "room_id", roomID, "ghost_user_id", ghostUserID)
+	return nil
 }
 
 // CreateRoom creates a new Matrix room with the specified name, topic, and settings.

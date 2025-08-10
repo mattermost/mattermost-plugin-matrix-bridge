@@ -265,7 +265,7 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 	}
 
 	// First check if this is a regular channel with existing mapping
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier")
 	}
@@ -591,7 +591,7 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 // deletePostFromMatrix handles deleting a post from Matrix by redacting the Matrix message
 func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channelID string) error {
 	// Get Matrix room identifier
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for post deletion")
 	}
@@ -668,7 +668,7 @@ func (b *MattermostToMatrixBridge) SyncReactionToMatrix(reaction *model.Reaction
 // addReactionToMatrix adds a new reaction to Matrix
 func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction, channelID string) error {
 	// Get Matrix room identifier
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier")
 	}
@@ -747,7 +747,7 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 // removeReactionFromMatrix removes a reaction from Matrix by finding and redacting the matching reaction event
 func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reaction, channelID string) error {
 	// Get Matrix room identifier
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for reaction removal")
 	}
@@ -1213,7 +1213,7 @@ func (b *MattermostToMatrixBridge) getCurrentMatrixFileAttachments(matrixRoomID,
 // getOrCreateDMRoom gets an existing DM room mapping or creates a new Matrix DM room
 func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs []string, initiatingUserID string) (string, error) {
 	// First check if we already have a room mapping (unified for all channels)
-	existingRoomID, err := b.getMatrixRoomID(channelID)
+	existingRoomID, err := b.GetMatrixRoomID(channelID)
 	if err == nil && existingRoomID != "" {
 		b.logger.LogDebug("Found existing DM room mapping", "channel_id", channelID, "matrix_room_id", existingRoomID)
 		return existingRoomID, nil

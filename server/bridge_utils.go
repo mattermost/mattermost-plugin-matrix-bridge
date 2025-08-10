@@ -70,7 +70,7 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 
 // Shared utility methods that both bridge types need
 
-func (s *BridgeUtils) getMatrixRoomID(channelID string) (string, error) {
+func (s *BridgeUtils) GetMatrixRoomID(channelID string) (string, error) {
 	roomID, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
 	if err != nil {
 		// KV store error (typically key not found) - unmapped channels are expected

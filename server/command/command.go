@@ -215,6 +215,7 @@ const (
 	// Room creation status messages
 	roomCreatorJoined        = "\n\nMatrix room created and configured for bridging."
 	roomCreatorWithUserReady = "\n\nMatrix room created and you are connected to it."
+	roomMemberSyncFailed     = "\n\n⚠️ **Matrix room created, but failed to sync channel members.** Check plugin logs for details. You may need to manually invite users to the Matrix room."
 
 	// Sharing status messages
 	channelSharingEnabled = "\n\n✅ **Channel sharing enabled** - Messages will now sync to Matrix!"
@@ -517,7 +518,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(args.ChannelId, roomID, args.UserId)
 	if syncErr != nil {
 		c.client.Log.Error("Failed to sync channel members to Matrix room", "error", syncErr, "room_id", roomID, "channel_id", args.ChannelId)
-		joinStatus = roomCreatorJoined
+		joinStatus = roomMemberSyncFailed
 	} else {
 		// Generate appropriate status message based on sync results
 		if joinedCount == 0 {
