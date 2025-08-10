@@ -518,6 +518,7 @@ func (c *Client) InviteUserToRoom(roomID, userID string) error {
 		if strings.Contains(bodyStr, "M_BAD_STATE") ||
 			strings.Contains(bodyStr, "already joined") ||
 			strings.Contains(bodyStr, "ALREADY_JOINED") ||
+			strings.Contains(bodyStr, "is already in the room") ||
 			(resp.StatusCode == http.StatusForbidden && strings.Contains(bodyStr, "joined")) {
 			c.logger.LogDebug("User already joined or invited to Matrix room, skipping", "room_id", roomID, "user_id", userID, "response", bodyStr)
 			return nil // Not an error - user is already in the room

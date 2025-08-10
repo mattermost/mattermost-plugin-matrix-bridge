@@ -88,6 +88,11 @@ func (suite *MatrixClientTestSuite) TestMatrixClientOperations() {
 	suite.Run("MediaOperations", func() {
 		suite.testMediaOperations()
 	})
+
+	// Run advanced room operation tests
+	suite.Run("AdvancedRoomOperations", func() {
+		suite.testAdvancedRoomOperations()
+	})
 }
 
 // testRoomOperations tests room creation, joining, and management operations
@@ -213,8 +218,8 @@ func (suite *MatrixClientTestSuite) testMessageOperations() {
 	ghostUser, err := suite.client.CreateGhostUser(mattermostUserID, "Message Test User", nil, "")
 	require.NoError(suite.T(), err, "Should create ghost user for messages")
 
-	// Join the ghost user to the room
-	err = suite.client.JoinRoomAsUser(roomID, ghostUser.UserID)
+	// Join the ghost user to the room using proper invite/join flow
+	err = suite.client.InviteAndJoinGhostUser(roomID, ghostUser.UserID)
 	require.NoError(suite.T(), err, "Should join ghost user to room")
 
 	suite.Run("SendMessage", func() {
@@ -597,7 +602,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientWithFiles() {
 	ghostUser, err := suite.client.CreateGhostUser("test-file-user", "File Test User", nil, "")
 	require.NoError(suite.T(), err, "Should create ghost user for file tests")
 
-	err = suite.client.JoinRoomAsUser(roomID, ghostUser.UserID)
+	err = suite.client.InviteAndJoinGhostUser(roomID, ghostUser.UserID)
 	require.NoError(suite.T(), err, "Should join ghost user to room")
 
 	suite.Run("SendMessageWithFiles", func() {
@@ -1214,6 +1219,228 @@ func TestMXCURIValidationErrorReportingWithBetterErrorMessages(t *testing.T) {
 
 	// Should NOT contain the fallback generic message since validation catches it early
 	assert.NotContains(t, err.Error(), "failed to construct any valid download URLs")
+}
+
+// testAdvancedRoomOperations tests advanced room management operations
+func (suite *MatrixClientTestSuite) testAdvancedRoomOperations() {
+	suite.Run("GetRoomJoinRule", func() {
+		// Create a public room
+		publicRoomIdentifier, err := suite.client.CreateRoom("Public Test Room", "Testing public room join rules", suite.matrixContainer.ServerDomain, true, "test-public-channel")
+		require.NoError(suite.T(), err, "Should create public room")
+
+		publicRoomID, err := suite.client.ResolveRoomAlias(publicRoomIdentifier)
+		require.NoError(suite.T(), err, "Should resolve public room alias")
+
+		// Test getting join rule for public room
+		joinRule, err := suite.client.getRoomJoinRule(publicRoomID)
+		require.NoError(suite.T(), err, "Should get join rule for public room")
+		assert.Equal(suite.T(), "public", joinRule, "Public room should have 'public' join rule")
+		suite.T().Logf("Public room %s has join rule: %s", publicRoomID, joinRule)
+
+		// Create a private room
+		privateRoomIdentifier, err := suite.client.CreateRoom("Private Test Room", "Testing private room join rules", suite.matrixContainer.ServerDomain, false, "test-private-channel")
+		require.NoError(suite.T(), err, "Should create private room")
+
+		privateRoomID, err := suite.client.ResolveRoomAlias(privateRoomIdentifier)
+		require.NoError(suite.T(), err, "Should resolve private room alias")
+
+		// Test getting join rule for private room
+		joinRule, err = suite.client.getRoomJoinRule(privateRoomID)
+		require.NoError(suite.T(), err, "Should get join rule for private room")
+		assert.Equal(suite.T(), "invite", joinRule, "Private room should have 'invite' join rule")
+		suite.T().Logf("Private room %s has join rule: %s", privateRoomID, joinRule)
+
+		// Test with non-existent room
+		_, err = suite.client.getRoomJoinRule("!nonexistent:test.matrix.local")
+		assert.Error(suite.T(), err, "Should fail to get join rule for non-existent room")
+	})
+
+	suite.Run("CreateRoomWithAppBotVerification", func() {
+		// Create a test room and verify the application service bot joins it
+		roomName := "App Bot Test Room"
+		roomTopic := "Testing application service bot auto-join"
+		channelID := "test-appbot-channel"
+
+		roomIdentifier, err := suite.client.CreateRoom(roomName, roomTopic, suite.matrixContainer.ServerDomain, false, channelID)
+		require.NoError(suite.T(), err, "Should create room successfully")
+
+		roomID, err := suite.client.ResolveRoomAlias(roomIdentifier)
+		require.NoError(suite.T(), err, "Should resolve room identifier to room ID")
+
+		// Verify the application service bot is in the room
+		// The AS bot should have joined automatically during room creation
+		members := suite.matrixContainer.GetRoomMembers(suite.T(), roomID)
+
+		// Find the application service bot in the members list
+		asBotUserID := suite.matrixContainer.GetApplicationServiceBotUserID()
+		botFound := false
+		for _, member := range members {
+			if member.UserID == asBotUserID {
+				botFound = true
+				assert.Equal(suite.T(), "join", member.Membership, "AS bot should have 'join' membership")
+				break
+			}
+		}
+
+		assert.True(suite.T(), botFound, "Application service bot should be in the room members")
+		suite.T().Logf("Verified AS bot %s is in room %s", asBotUserID, roomID)
+
+		// Verify room properties are set correctly
+		roomInfo := suite.matrixContainer.GetRoomInfo(suite.T(), roomID)
+		assert.Equal(suite.T(), roomName, roomInfo.Name, "Room name should match")
+		assert.Equal(suite.T(), roomTopic, roomInfo.Topic, "Room topic should match")
+
+		// Verify the room is private (not published to directory)
+		assert.Equal(suite.T(), "invite", roomInfo.JoinRule, "Room should be private by default")
+		assert.False(suite.T(), roomInfo.GuestAccess, "Room should not allow guest access")
+	})
+
+	suite.Run("InviteAndJoinGhostUser", func() {
+		// Create a ghost user for testing
+		testMattermostUserID := "test-ghost-user-123"
+		ghostUser, err := suite.client.CreateGhostUser(testMattermostUserID, "Ghost Test User", nil, "")
+		require.NoError(suite.T(), err, "Should create ghost user")
+
+		// Test with public room - should join directly
+		suite.Run("PublicRoom", func() {
+			publicRoomIdentifier, err := suite.client.CreateRoom("Public Ghost Test Room", "Testing ghost user in public room", suite.matrixContainer.ServerDomain, true, "test-ghost-public-channel")
+			require.NoError(suite.T(), err, "Should create public room")
+
+			publicRoomID, err := suite.client.ResolveRoomAlias(publicRoomIdentifier)
+			require.NoError(suite.T(), err, "Should resolve public room alias")
+
+			// Join ghost user to public room
+			err = suite.client.InviteAndJoinGhostUser(publicRoomID, ghostUser.UserID)
+			require.NoError(suite.T(), err, "Should join ghost user to public room")
+
+			// Verify ghost user is in the room
+			members := suite.matrixContainer.GetRoomMembers(suite.T(), publicRoomID)
+
+			ghostFound := false
+			for _, member := range members {
+				if member.UserID == ghostUser.UserID {
+					ghostFound = true
+					assert.Equal(suite.T(), "join", member.Membership, "Ghost user should have 'join' membership")
+					break
+				}
+			}
+			assert.True(suite.T(), ghostFound, "Ghost user should be in public room")
+			suite.T().Logf("Successfully joined ghost user %s to public room %s", ghostUser.UserID, publicRoomID)
+		})
+
+		// Test with private room - should invite then join
+		suite.Run("PrivateRoom", func() {
+			privateRoomIdentifier, err := suite.client.CreateRoom("Private Ghost Test Room", "Testing ghost user in private room", suite.matrixContainer.ServerDomain, false, "test-ghost-private-channel")
+			require.NoError(suite.T(), err, "Should create private room")
+
+			privateRoomID, err := suite.client.ResolveRoomAlias(privateRoomIdentifier)
+			require.NoError(suite.T(), err, "Should resolve private room alias")
+
+			// Join ghost user to private room
+			err = suite.client.InviteAndJoinGhostUser(privateRoomID, ghostUser.UserID)
+			require.NoError(suite.T(), err, "Should invite and join ghost user to private room")
+
+			// Verify ghost user is in the room
+			members := suite.matrixContainer.GetRoomMembers(suite.T(), privateRoomID)
+
+			ghostFound := false
+			for _, member := range members {
+				if member.UserID == ghostUser.UserID {
+					ghostFound = true
+					assert.Equal(suite.T(), "join", member.Membership, "Ghost user should have 'join' membership")
+					break
+				}
+			}
+			assert.True(suite.T(), ghostFound, "Ghost user should be in private room")
+			suite.T().Logf("Successfully invited and joined ghost user %s to private room %s", ghostUser.UserID, privateRoomID)
+		})
+
+		// Test idempotency - joining user already in room
+		suite.Run("IdempotentJoin", func() {
+			roomIdentifier, err := suite.client.CreateRoom("Idempotent Test Room", "Testing idempotent join", suite.matrixContainer.ServerDomain, false, "test-idempotent-channel")
+			require.NoError(suite.T(), err, "Should create room")
+
+			roomID, err := suite.client.ResolveRoomAlias(roomIdentifier)
+			require.NoError(suite.T(), err, "Should resolve room alias")
+
+			// Join user first time
+			err = suite.client.InviteAndJoinGhostUser(roomID, ghostUser.UserID)
+			require.NoError(suite.T(), err, "Should join ghost user first time")
+
+			// Join user second time - should be idempotent
+			err = suite.client.InviteAndJoinGhostUser(roomID, ghostUser.UserID)
+			require.NoError(suite.T(), err, "Should handle joining ghost user already in room")
+
+			// Verify user is still in room
+			members := suite.matrixContainer.GetRoomMembers(suite.T(), roomID)
+
+			ghostFound := false
+			for _, member := range members {
+				if member.UserID == ghostUser.UserID {
+					ghostFound = true
+					break
+				}
+			}
+			assert.True(suite.T(), ghostFound, "Ghost user should still be in room after idempotent join")
+		})
+
+		// Test error handling with non-existent room
+		suite.Run("NonExistentRoom", func() {
+			err := suite.client.InviteAndJoinGhostUser("!nonexistent:test.matrix.local", ghostUser.UserID)
+			assert.Error(suite.T(), err, "Should fail to join ghost user to non-existent room")
+		})
+	})
+
+	suite.Run("InviteUserToRoom", func() {
+		// Create test room and users
+		roomIdentifier, err := suite.client.CreateRoom("Invite Test Room", "Testing user invitations", suite.matrixContainer.ServerDomain, false, "test-invite-channel")
+		require.NoError(suite.T(), err, "Should create room")
+
+		roomID, err := suite.client.ResolveRoomAlias(roomIdentifier)
+		require.NoError(suite.T(), err, "Should resolve room alias")
+
+		// Create a regular Matrix user (not ghost user)
+		testUser := suite.matrixContainer.CreateUser(suite.T(), "invitetest", "password123")
+
+		// Invite user to room
+		err = suite.client.InviteUserToRoom(roomID, testUser.UserID)
+		require.NoError(suite.T(), err, "Should invite user to room")
+
+		// Verify user has been invited
+		members := suite.matrixContainer.GetRoomMembers(suite.T(), roomID)
+
+		userFound := false
+		for _, member := range members {
+			if member.UserID == testUser.UserID {
+				userFound = true
+				assert.Equal(suite.T(), "invite", member.Membership, "User should have 'invite' membership")
+				break
+			}
+		}
+		assert.True(suite.T(), userFound, "User should be invited to room")
+		suite.T().Logf("Successfully invited user %s to room %s", testUser.UserID, roomID)
+
+		// Test idempotency - invite user already invited
+		err = suite.client.InviteUserToRoom(roomID, testUser.UserID)
+		require.NoError(suite.T(), err, "Should handle inviting user already invited")
+
+		// Accept the invitation to test inviting already joined user
+		err = suite.matrixContainer.JoinRoomAsUser(suite.T(), testUser.UserID, roomID)
+		require.NoError(suite.T(), err, "Should accept room invitation")
+
+		// Try to invite user who is already in room
+		err = suite.client.InviteUserToRoom(roomID, testUser.UserID)
+		require.NoError(suite.T(), err, "Should handle inviting user already in room")
+
+		// Test error handling
+		err = suite.client.InviteUserToRoom("!nonexistent:test.matrix.local", testUser.UserID)
+		assert.Error(suite.T(), err, "Should fail to invite user to non-existent room")
+
+		// Note: Matrix doesn't actually fail for non-existent users, it just succeeds
+		// This is a known Matrix behavior - the invitation is sent and the user can join if they exist
+		err = suite.client.InviteUserToRoom(roomID, "@nonexistent:test.matrix.local")
+		assert.NoError(suite.T(), err, "Matrix allows inviting non-existent users (they can join if user exists later)")
+	})
 }
 
 // Test runner functions to connect the suite to Go's testing framework

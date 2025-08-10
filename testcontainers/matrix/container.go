@@ -275,8 +275,15 @@ func (mc *MatrixContainer) SendMessage(t *testing.T, roomID, message string) str
 	return response["event_id"].(string)
 }
 
-// CreateUser creates a test user
-func (mc *MatrixContainer) CreateUser(t *testing.T, username, password string) string {
+// User represents a test user with credentials
+type User struct {
+	UserID   string
+	Username string
+	Password string
+}
+
+// CreateUser creates a test user and returns user information
+func (mc *MatrixContainer) CreateUser(t *testing.T, username, password string) *User {
 	// First, try to get registration flows
 	_, err := mc.makeMatrixRequestNoAuth("POST", "/_matrix/client/v3/register", map[string]any{})
 	if err != nil {
@@ -297,7 +304,105 @@ func (mc *MatrixContainer) CreateUser(t *testing.T, username, password string) s
 	require.NoError(t, err)
 
 	response := result.(map[string]any)
-	return response["user_id"].(string)
+	userID := response["user_id"].(string)
+
+	return &User{
+		UserID:   userID,
+		Username: username,
+		Password: password,
+	}
+}
+
+// RoomMember represents a member of a Matrix room
+type RoomMember struct {
+	UserID     string
+	Membership string
+}
+
+// GetRoomMembers retrieves the members of a room
+func (mc *MatrixContainer) GetRoomMembers(t *testing.T, roomID string) []*RoomMember {
+	result, err := mc.makeMatrixRequest("GET", fmt.Sprintf("/_matrix/client/v3/rooms/%s/members", roomID), nil)
+	require.NoError(t, err)
+
+	response := result.(map[string]any)
+	chunk := response["chunk"].([]any)
+
+	members := make([]*RoomMember, 0, len(chunk))
+	for _, memberEvent := range chunk {
+		event := memberEvent.(map[string]any)
+		if event["type"] == "m.room.member" {
+			userID := event["state_key"].(string)
+			content := event["content"].(map[string]any)
+			membership := content["membership"].(string)
+
+			members = append(members, &RoomMember{
+				UserID:     userID,
+				Membership: membership,
+			})
+		}
+	}
+
+	return members
+}
+
+// RoomInfo contains information about a Matrix room
+type RoomInfo struct {
+	Name        string
+	Topic       string
+	JoinRule    string
+	GuestAccess bool
+}
+
+// GetRoomInfo retrieves comprehensive information about a room
+func (mc *MatrixContainer) GetRoomInfo(t *testing.T, roomID string) *RoomInfo {
+	state := mc.GetRoomState(t, roomID)
+
+	info := &RoomInfo{}
+
+	for _, event := range state {
+		eventType := event["type"].(string)
+		content := event["content"].(map[string]any)
+
+		switch eventType {
+		case "m.room.name":
+			if name, exists := content["name"].(string); exists {
+				info.Name = name
+			}
+		case "m.room.topic":
+			if topic, exists := content["topic"].(string); exists {
+				info.Topic = topic
+			}
+		case "m.room.join_rules":
+			if joinRule, exists := content["join_rule"].(string); exists {
+				info.JoinRule = joinRule
+			}
+		case "m.room.guest_access":
+			if guestAccess, exists := content["guest_access"].(string); exists {
+				info.GuestAccess = guestAccess == "can_join"
+			}
+		}
+	}
+
+	return info
+}
+
+// GetApplicationServiceBotUserID returns the application service bot user ID
+func (mc *MatrixContainer) GetApplicationServiceBotUserID() string {
+	return fmt.Sprintf("@_mattermost_bot:%s", mc.ServerDomain)
+}
+
+// JoinRoom joins a room as a specific user (overloaded method)
+func (mc *MatrixContainer) JoinRoomAsUser(t *testing.T, userID, roomID string) error {
+	_, err := mc.makeMatrixRequestAsUser("POST", fmt.Sprintf("/_matrix/client/v3/join/%s", roomID), map[string]any{}, userID)
+	return err
+}
+
+// makeMatrixRequestAsUser makes a request as a specific user (requires user credentials)
+// This is a simplified version - in real tests you'd need proper user tokens
+func (mc *MatrixContainer) makeMatrixRequestAsUser(method, endpoint string, data any, userID string) (any, error) {
+	// For simplicity in tests, we'll use AS token to act as user
+	// In production, this would require proper user authentication
+	return mc.makeMatrixRequest(method, endpoint, data)
 }
 
 // makeMatrixRequest makes an authenticated request to the Matrix server

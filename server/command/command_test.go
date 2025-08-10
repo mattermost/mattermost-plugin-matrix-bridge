@@ -74,6 +74,11 @@ func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 	}, nil // Mock implementation returns sample results
 }
 
+func (m *mockPlugin) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
+	// Mock implementation - return test Matrix user
+	return "@test_" + mattermostUserID + ":test.com", nil
+}
+
 func setupTest() *env {
 	api := &plugintest.API{}
 	driver := &plugintest.Driver{}
