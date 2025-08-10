@@ -268,7 +268,7 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 }
 
 // UserHasJoinedChannel is called when a user joins or is added to a channel
-func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.ChannelMember, _ *model.User) {
+func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.ChannelMember, actor *model.User) {
 	config := p.getConfiguration()
 	if !config.EnableSync {
 		return
@@ -288,10 +288,17 @@ func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.Ch
 	}
 
 	// Get the user who joined the channel
-	user, appErr := p.API.GetUser(channelMember.UserId)
-	if appErr != nil {
-		p.logger.LogError("Failed to get user who joined channel", "error", appErr, "user_id", channelMember.UserId)
-		return
+	// If the actor is the same as the user who joined, use the provided actor to avoid API call
+	var user *model.User
+	if actor != nil && actor.Id == channelMember.UserId {
+		user = actor
+	} else {
+		var appErr *model.AppError
+		user, appErr = p.API.GetUser(channelMember.UserId)
+		if appErr != nil {
+			p.logger.LogError("Failed to get user who joined channel", "error", appErr, "user_id", channelMember.UserId)
+			return
+		}
 	}
 
 	p.logger.LogDebug("User joined bridged channel",

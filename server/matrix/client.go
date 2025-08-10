@@ -50,6 +50,21 @@ func parseMatrixError(statusCode int, body []byte) *Error {
 	return &mErr
 }
 
+// isForbiddenJoinError checks if an error indicates a forbidden join attempt
+func isForbiddenJoinError(err error) bool {
+	var matrixErr *Error
+	if errors.As(err, &matrixErr) {
+		return matrixErr.StatusCode == http.StatusForbidden ||
+			matrixErr.ErrCode == "M_FORBIDDEN" ||
+			strings.Contains(strings.ToLower(matrixErr.ErrMsg), "not invited")
+	}
+
+	// Fallback for legacy error types that aren't structured
+	return strings.Contains(err.Error(), "403") ||
+		strings.Contains(err.Error(), "M_FORBIDDEN") ||
+		strings.Contains(err.Error(), "not invited")
+}
+
 // Path traversal validation functions
 
 // validatePathComponent checks for path traversal sequences in URL path components
@@ -679,13 +694,15 @@ func (c *Client) joinGhostUserWithFallback(roomID, ghostUserID string) error {
 		return nil
 	}
 
-	// If join failed with a 403 Forbidden error, try invitation first
-	var matrixErr *Error
-	if errors.As(err, &matrixErr) && (matrixErr.StatusCode == http.StatusForbidden || matrixErr.ErrCode == "M_FORBIDDEN" || strings.Contains(strings.ToLower(matrixErr.ErrMsg), "not invited")) {
-		c.logger.LogDebug("Direct join failed with forbidden error, attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "matrix_error", matrixErr.ErrCode)
-	} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "M_FORBIDDEN") || strings.Contains(err.Error(), "not invited") {
-		// Fallback for legacy error types that aren't structured
-		c.logger.LogDebug("Direct join failed with forbidden error (legacy error), attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "error", err.Error())
+	// If join failed with a forbidden error, try invitation first
+	if isForbiddenJoinError(err) {
+		var matrixErr *Error
+		if errors.As(err, &matrixErr) {
+			c.logger.LogDebug("Direct join failed with forbidden error, attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "matrix_error", matrixErr.ErrCode)
+		} else {
+			// Fallback for legacy error types that aren't structured
+			c.logger.LogDebug("Direct join failed with forbidden error (legacy error), attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "error", err.Error())
+		}
 	} else {
 		// For other errors, return the original join error
 		return errors.Wrap(err, "failed to join ghost user to room")
