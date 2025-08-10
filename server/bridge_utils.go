@@ -70,6 +70,7 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 
 // Shared utility methods that both bridge types need
 
+// GetMatrixRoomID retrieves the Matrix room ID for a given Mattermost channel ID
 func (s *BridgeUtils) GetMatrixRoomID(channelID string) (string, error) {
 	roomID, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
 	if err != nil {

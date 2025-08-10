@@ -268,7 +268,7 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 }
 
 // UserHasJoinedChannel is called when a user joins or is added to a channel
-func (p *Plugin) UserHasJoinedChannel(c *plugin.Context, channelMember *model.ChannelMember, actor *model.User) {
+func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.ChannelMember, _ *model.User) {
 	config := p.getConfiguration()
 	if !config.EnableSync {
 		return

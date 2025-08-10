@@ -391,15 +391,15 @@ func (mc *MatrixContainer) GetApplicationServiceBotUserID() string {
 	return fmt.Sprintf("@_mattermost_bot:%s", mc.ServerDomain)
 }
 
-// JoinRoom joins a room as a specific user (overloaded method)
-func (mc *MatrixContainer) JoinRoomAsUser(t *testing.T, userID, roomID string) error {
+// JoinRoomAsUser joins a room as a specific user
+func (mc *MatrixContainer) JoinRoomAsUser(_ *testing.T, userID, roomID string) error {
 	_, err := mc.makeMatrixRequestAsUser("POST", fmt.Sprintf("/_matrix/client/v3/join/%s", roomID), map[string]any{}, userID)
 	return err
 }
 
 // makeMatrixRequestAsUser makes a request as a specific user (requires user credentials)
 // This is a simplified version - in real tests you'd need proper user tokens
-func (mc *MatrixContainer) makeMatrixRequestAsUser(method, endpoint string, data any, userID string) (any, error) {
+func (mc *MatrixContainer) makeMatrixRequestAsUser(method, endpoint string, data any, _ string) (any, error) {
 	// For simplicity in tests, we'll use AS token to act as user
 	// In production, this would require proper user authentication
 	return mc.makeMatrixRequest(method, endpoint, data)

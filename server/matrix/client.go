@@ -16,20 +16,20 @@ import (
 	"github.com/pkg/errors"
 )
 
-// MatrixError represents a Matrix API error response
-type MatrixError struct {
+// Error represents a Matrix API error response
+type Error struct {
 	ErrCode    string `json:"errcode"`
 	ErrMsg     string `json:"error"`
 	StatusCode int    `json:"-"`
 }
 
 // Error implements the error interface
-func (e *MatrixError) Error() string {
+func (e *Error) Error() string {
 	return fmt.Sprintf("Matrix API error: %d %s - %s", e.StatusCode, e.ErrCode, e.ErrMsg)
 }
 
 // IsAlreadyJoined checks if the error indicates the user is already in the room
-func (e *MatrixError) IsAlreadyJoined() bool {
+func (e *Error) IsAlreadyJoined() bool {
 	return e.ErrCode == "M_BAD_STATE" ||
 		strings.Contains(strings.ToLower(e.ErrMsg), "already joined") ||
 		strings.Contains(strings.ToLower(e.ErrMsg), "already in the room") ||
@@ -37,8 +37,8 @@ func (e *MatrixError) IsAlreadyJoined() bool {
 }
 
 // parseMatrixError attempts to parse a Matrix error from response body
-func parseMatrixError(statusCode int, body []byte) *MatrixError {
-	var mErr MatrixError
+func parseMatrixError(statusCode int, body []byte) *Error {
+	var mErr Error
 	mErr.StatusCode = statusCode
 
 	if err := json.Unmarshal(body, &mErr); err != nil {
@@ -680,7 +680,7 @@ func (c *Client) joinGhostUserWithFallback(roomID, ghostUserID string) error {
 	}
 
 	// If join failed with a 403 Forbidden error, try invitation first
-	var matrixErr *MatrixError
+	var matrixErr *Error
 	if errors.As(err, &matrixErr) && (matrixErr.StatusCode == http.StatusForbidden || matrixErr.ErrCode == "M_FORBIDDEN" || strings.Contains(strings.ToLower(matrixErr.ErrMsg), "not invited")) {
 		c.logger.LogDebug("Direct join failed with forbidden error, attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "matrix_error", matrixErr.ErrCode)
 	} else if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "M_FORBIDDEN") || strings.Contains(err.Error(), "not invited") {

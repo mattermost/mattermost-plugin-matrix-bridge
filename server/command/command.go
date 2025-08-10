@@ -92,7 +92,7 @@ func sanitizeShareName(name string) string {
 }
 
 // syncChannelMembersToMatrixRoom creates ghost users for all channel members and joins them to the Matrix room
-func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID, commandIssuerID string) (int, int, error) {
+func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID string) (int, int, error) {
 	matrixClient := c.plugin.GetMatrixClient()
 	if matrixClient == nil {
 		return 0, 0, errors.New("matrix client not available")
@@ -515,7 +515,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 
 	// Sync all channel members to the newly created Matrix room
 	var joinStatus string
-	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(args.ChannelId, roomID, args.UserId)
+	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(args.ChannelId, roomID)
 	if syncErr != nil {
 		c.client.Log.Error("Failed to sync channel members to Matrix room", "error", syncErr, "room_id", roomID, "channel_id", args.ChannelId)
 		joinStatus = roomMemberSyncFailed
