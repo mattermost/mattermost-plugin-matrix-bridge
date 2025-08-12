@@ -245,6 +245,11 @@ func (p *Plugin) GetPluginAPIClient() *pluginapi.Client {
 	return p.client
 }
 
+// GetRemoteID returns the plugin's remote ID for shared channel operations
+func (p *Plugin) GetRemoteID() string {
+	return p.remoteID
+}
+
 // RunKVStoreMigrations exposes migration functionality to command handlers
 func (p *Plugin) RunKVStoreMigrations() error {
 	return p.runKVStoreMigrations()

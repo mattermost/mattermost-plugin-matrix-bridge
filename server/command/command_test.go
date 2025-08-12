@@ -26,6 +26,10 @@ func (m *mockConfiguration) GetMatrixServerURL() string {
 	return m.serverURL
 }
 
+func (m *mockConfiguration) GetMatrixUsernamePrefixForServer(_ string) string {
+	return "matrix" // Use default prefix for tests
+}
+
 // mockPlugin implements the PluginAccessor interface for testing
 type mockPlugin struct {
 	client       *pluginapi.Client
@@ -77,6 +81,11 @@ func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 func (m *mockPlugin) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Mock implementation - return test Matrix user
 	return "@test_" + mattermostUserID + ":test.com", nil
+}
+
+func (m *mockPlugin) GetRemoteID() string {
+	// Mock implementation - return test remote ID
+	return "test-remote-id"
 }
 
 func setupTest() *env {
