@@ -117,7 +117,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			require.NoError(t, err)
 
 			// Wait for Matrix to process with polling
-			var messageEvent map[string]any
+			var messageEvent *matrixtest.Event
 			require.Eventually(t, func() bool {
 				events := matrixContainer.GetRoomEvents(t, freshRoomID)
 				messageEvent = matrixtest.FindEventByPostID(events, post.Id)
@@ -125,22 +125,19 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			}, 10*time.Second, 500*time.Millisecond, "Should find message event within timeout")
 
 			// Debug: Print the actual message content
-			if content, ok := messageEvent["content"].(map[string]any); ok {
-				t.Logf("Message content: %+v", content)
-				if mentions, hasMentions := content["m.mentions"]; hasMentions {
-					t.Logf("Found mentions: %+v", mentions)
-				} else {
-					t.Logf("No m.mentions field found")
-				}
+			t.Logf("Message content: %+v", messageEvent.Content)
+			if mentions, hasMentions := messageEvent.Content["m.mentions"]; hasMentions {
+				t.Logf("Found mentions: %+v", mentions)
+			} else {
+				t.Logf("No m.mentions field found")
 			}
 
 			// Validate mention structure
-			validator := matrixtest.NewMatrixEventValidation(t, matrixContainer.ServerDomain, setup.Plugin.remoteID)
-			validator.ValidateMessageWithMentions(messageEvent, post, tc.expectedMentions)
+			validator := matrixtest.NewEventValidation(t, matrixContainer.ServerDomain, setup.Plugin.remoteID)
+			validator.ValidateMessageWithMentions(*messageEvent, post, tc.expectedMentions)
 
 			// Verify specific mention details
-			content := messageEvent["content"].(map[string]any)
-			mentions := content["m.mentions"].(map[string]any)
+			mentions := messageEvent.Content["m.mentions"].(map[string]any)
 			userIDs := mentions["user_ids"].([]any)
 
 			// Check mentioned user IDs
@@ -150,7 +147,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			}
 
 			// Check HTML formatting
-			formattedBody := content["formatted_body"].(string)
+			formattedBody := messageEvent.Content["formatted_body"].(string)
 			for _, snippet := range tc.expectedHTMLSnippets {
 				assert.Contains(t, formattedBody, snippet, "Should contain expected HTML snippet")
 			}
@@ -318,36 +315,34 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			require.NoError(t, err)
 
 			// Wait for processing with polling
-			var messageEvent map[string]any
+			var messageEvent *matrixtest.Event
 			require.Eventually(t, func() bool {
 				events := matrixContainer.GetRoomEvents(t, freshRoomID)
 				messageEvent = matrixtest.FindEventByPostID(events, post.Id)
 				return messageEvent != nil
 			}, 10*time.Second, 500*time.Millisecond, "Should find message event within timeout")
 
-			content := messageEvent["content"].(map[string]any)
-
 			if tc.expectedMentions > 0 {
 				// Should have mentions
-				mentions, hasMentions := content["m.mentions"].(map[string]any)
+				mentions, hasMentions := messageEvent.Content["m.mentions"].(map[string]any)
 				require.True(t, hasMentions, "Should have m.mentions field")
 
 				userIDs := mentions["user_ids"].([]any)
 				assert.Len(t, userIDs, tc.expectedMentions, "Should have expected mention count")
 			} else {
 				// Should not have mentions
-				_, hasMentions := content["m.mentions"]
+				_, hasMentions := messageEvent.Content["m.mentions"]
 				assert.False(t, hasMentions, "Should not have m.mentions field")
 			}
 
 			if tc.shouldHaveHTML {
-				_, hasHTML := content["formatted_body"]
+				_, hasHTML := messageEvent.Content["formatted_body"]
 				assert.True(t, hasHTML, "Should have HTML formatted body")
 			}
 
 			// Special validation for email corruption test
 			if tc.name == "email_corruption_test" {
-				formattedBody, hasFormatted := content["formatted_body"].(string)
+				formattedBody, hasFormatted := messageEvent.Content["formatted_body"].(string)
 				require.True(t, hasFormatted, "Should have formatted_body for email corruption test")
 
 				// Debug: Print the actual formatted body
@@ -363,7 +358,7 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 
 			// Special validation for edge case with real user matching email domain
 			if tc.name == "user_with_existing_name_edge_case" {
-				formattedBody, hasFormatted := content["formatted_body"].(string)
+				formattedBody, hasFormatted := messageEvent.Content["formatted_body"].(string)
 				require.True(t, hasFormatted, "Should have formatted_body for edge case test")
 
 				// Debug: Print the actual formatted body

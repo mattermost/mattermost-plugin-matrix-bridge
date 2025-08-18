@@ -114,7 +114,7 @@ type ThreadMappingIntegrationTestSuite struct {
 	testChannelID   string
 	testUserID      string
 	testRoomID      string
-	validator       *matrixtest.MatrixEventValidation
+	validator       *matrixtest.EventValidation
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -177,7 +177,7 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
-	suite.validator = matrixtest.NewMatrixEventValidation(
+	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
 		suite.plugin.remoteID,

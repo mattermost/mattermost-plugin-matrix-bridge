@@ -98,68 +98,69 @@ func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID string) (int,
 		return 0, 0, errors.New("matrix client not available")
 	}
 
-	// Get all channel members with pagination
-	var allMembers []model.ChannelMember
 	offset := 0
 	limit := 100
+	totalMembers := 0
+	joinedCount := 0
 
+	c.client.Log.Info("Starting to sync channel members to Matrix room", "channel_id", channelID, "room_id", roomID)
+
+	// Process channel members with pagination - combine fetching and processing for memory efficiency
 	for {
 		pageMembers, appErr := c.pluginAPI.GetChannelMembers(channelID, offset, limit)
 		if appErr != nil {
 			c.client.Log.Warn("Failed to get channel members for ghost user creation", "error", appErr, "channel_id", channelID, "offset", offset)
-			return 0, 0, errors.Wrap(appErr, "failed to get channel members")
+			return joinedCount, totalMembers, errors.Wrap(appErr, "failed to get channel members")
 		}
 		if len(pageMembers) == 0 {
 			break
 		}
-		allMembers = append(allMembers, pageMembers...)
+
+		totalMembers += len(pageMembers)
+
+		// Process each member in this page immediately
+		for _, member := range pageMembers {
+			user, appErr := c.client.User.Get(member.UserId)
+			if appErr != nil {
+				c.client.Log.Warn("Failed to get user for processing", "error", appErr, "user_id", member.UserId)
+				continue
+			}
+
+			if user.IsRemote() {
+				// This is a Matrix-originated user - invite the original Matrix user to the room
+				originalMatrixUserID, err := c.plugin.GetMatrixUserIDFromMattermostUser(user.Id)
+				if err != nil {
+					c.client.Log.Warn("Failed to get original Matrix user ID for remote user", "error", err, "user_id", user.Id, "username", user.Username)
+					continue
+				}
+
+				// Invite the original Matrix user to the room
+				if err := matrixClient.InviteUserToRoom(roomID, originalMatrixUserID); err != nil {
+					c.client.Log.Warn("Failed to invite Matrix user to room", "error", err, "matrix_user_id", originalMatrixUserID, "mattermost_user_id", user.Id, "room_id", roomID)
+				} else {
+					c.client.Log.Debug("Successfully invited Matrix user to room", "matrix_user_id", originalMatrixUserID, "mattermost_user_id", user.Id, "username", user.Username, "room_id", roomID)
+					joinedCount++
+				}
+			} else {
+				// This is a local Mattermost user - create ghost user and join to room
+				ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
+				if err != nil {
+					c.client.Log.Warn("Failed to create or get ghost user", "error", err, "user_id", user.Id, "username", user.Username)
+					continue
+				}
+
+				// Join the ghost user to the room (handles both public and private rooms)
+				if err := matrixClient.InviteAndJoinGhostUser(roomID, ghostUserID); err != nil {
+					c.client.Log.Warn("Failed to join ghost user to Matrix room", "error", err, "ghost_user_id", ghostUserID, "user_id", user.Id, "room_id", roomID)
+				} else {
+					c.client.Log.Debug("Successfully joined ghost user to Matrix room", "ghost_user_id", ghostUserID, "user_id", user.Id, "username", user.Username, "room_id", roomID)
+					joinedCount++
+				}
+			}
+		}
+
 		offset += limit
-	}
-
-	totalMembers := len(allMembers)
-	joinedCount := 0
-
-	c.client.Log.Info("Syncing channel members to Matrix room", "member_count", totalMembers, "channel_id", channelID, "room_id", roomID)
-
-	// Process all channel members - create ghost users for local users, invite remote Matrix users
-	for _, member := range allMembers {
-		user, appErr := c.client.User.Get(member.UserId)
-		if appErr != nil {
-			c.client.Log.Warn("Failed to get user for processing", "error", appErr, "user_id", member.UserId)
-			continue
-		}
-
-		if user.IsRemote() {
-			// This is a Matrix-originated user - invite the original Matrix user to the room
-			originalMatrixUserID, err := c.plugin.GetMatrixUserIDFromMattermostUser(user.Id)
-			if err != nil {
-				c.client.Log.Warn("Failed to get original Matrix user ID for remote user", "error", err, "user_id", user.Id, "username", user.Username)
-				continue
-			}
-
-			// Invite the original Matrix user to the room
-			if err := matrixClient.InviteUserToRoom(roomID, originalMatrixUserID); err != nil {
-				c.client.Log.Warn("Failed to invite Matrix user to room", "error", err, "matrix_user_id", originalMatrixUserID, "mattermost_user_id", user.Id, "room_id", roomID)
-			} else {
-				c.client.Log.Debug("Successfully invited Matrix user to room", "matrix_user_id", originalMatrixUserID, "mattermost_user_id", user.Id, "username", user.Username, "room_id", roomID)
-				joinedCount++
-			}
-		} else {
-			// This is a local Mattermost user - create ghost user and join to room
-			ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
-			if err != nil {
-				c.client.Log.Warn("Failed to create or get ghost user", "error", err, "user_id", user.Id, "username", user.Username)
-				continue
-			}
-
-			// Join the ghost user to the room (handles both public and private rooms)
-			if err := matrixClient.InviteAndJoinGhostUser(roomID, ghostUserID); err != nil {
-				c.client.Log.Warn("Failed to join ghost user to Matrix room", "error", err, "ghost_user_id", ghostUserID, "user_id", user.Id, "room_id", roomID)
-			} else {
-				c.client.Log.Debug("Successfully joined ghost user to Matrix room", "ghost_user_id", ghostUserID, "user_id", user.Id, "username", user.Username, "room_id", roomID)
-				joinedCount++
-			}
-		}
+		c.client.Log.Debug("Processed page of channel members", "processed_in_page", len(pageMembers), "total_processed", totalMembers, "total_joined", joinedCount)
 	}
 
 	c.client.Log.Info("Completed syncing channel members to Matrix room", "joined_count", joinedCount, "total_members", totalMembers, "room_id", roomID)
