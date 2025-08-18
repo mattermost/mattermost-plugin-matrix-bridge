@@ -1,13 +1,11 @@
 package matrix
 
 // FindEventByPostID finds a Matrix event by its Mattermost post ID
-func FindEventByPostID(events []map[string]any, postID string) map[string]any {
+func FindEventByPostID(events []Event, postID string) *Event {
 	for _, event := range events {
-		if content, ok := event["content"].(map[string]any); ok {
-			if mattermostPostID, exists := content["mattermost_post_id"].(string); exists {
-				if mattermostPostID == postID {
-					return event
-				}
+		if mattermostPostID, exists := event.Content["mattermost_post_id"].(string); exists {
+			if mattermostPostID == postID {
+				return &event
 			}
 		}
 	}
@@ -15,17 +13,15 @@ func FindEventByPostID(events []map[string]any, postID string) map[string]any {
 }
 
 // FindLatestMessageEvent finds the most recent m.room.message event
-func FindLatestMessageEvent(events []map[string]any) map[string]any {
-	var latestEvent map[string]any
-	var latestTimestamp float64
+func FindLatestMessageEvent(events []Event) *Event {
+	var latestEvent *Event
+	var latestTimestamp int64
 
 	for _, event := range events {
-		if event["type"] == "m.room.message" {
-			if timestamp, ok := event["origin_server_ts"].(float64); ok {
-				if timestamp > latestTimestamp {
-					latestTimestamp = timestamp
-					latestEvent = event
-				}
+		if event.Type == "m.room.message" {
+			if event.Timestamp > latestTimestamp {
+				latestTimestamp = event.Timestamp
+				latestEvent = &event
 			}
 		}
 	}
@@ -34,46 +30,42 @@ func FindLatestMessageEvent(events []map[string]any) map[string]any {
 }
 
 // FindEventByType finds the first event of a specific type
-func FindEventByType(events []map[string]any, eventType string) map[string]any {
+func FindEventByType(events []Event, eventType string) *Event {
 	for _, event := range events {
-		if event["type"] == eventType {
-			return event
+		if event.Type == eventType {
+			return &event
 		}
 	}
 	return nil
 }
 
 // FindEventsByType finds all events of a specific type
-func FindEventsByType(events []map[string]any, eventType string) []map[string]any {
-	var result []map[string]any
+func FindEventsByType(events []Event, eventType string) []Event {
+	var result []Event
 	for _, event := range events {
-		if event["type"] == eventType {
+		if event.Type == eventType {
 			result = append(result, event)
 		}
 	}
 	return result
 }
 
-// GetEventContent extracts and validates content from a Matrix event
-func GetEventContent(event map[string]any) (map[string]any, bool) {
-	content, ok := event["content"].(map[string]any)
-	return content, ok
+// GetEventContent extracts content from a Matrix event
+func GetEventContent(event Event) map[string]any {
+	return event.Content
 }
 
 // GetEventSender extracts the sender from a Matrix event
-func GetEventSender(event map[string]any) (string, bool) {
-	sender, ok := event["sender"].(string)
-	return sender, ok
+func GetEventSender(event Event) string {
+	return event.Sender
 }
 
 // GetEventID extracts the event ID from a Matrix event
-func GetEventID(event map[string]any) (string, bool) {
-	eventID, ok := event["event_id"].(string)
-	return eventID, ok
+func GetEventID(event Event) string {
+	return event.EventID
 }
 
 // GetRoomID extracts the room ID from a Matrix event
-func GetRoomID(event map[string]any) (string, bool) {
-	roomID, ok := event["room_id"].(string)
-	return roomID, ok
+func GetRoomID(event Event) string {
+	return event.RoomID
 }

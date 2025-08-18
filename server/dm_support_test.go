@@ -126,7 +126,7 @@ func TestDMRoomMapping(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Test getting room mapping
-		retrievedRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(channelID)
+		retrievedRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(channelID)
 		assert.NoError(t, err)
 		assert.Equal(t, matrixRoomID, retrievedRoomID)
 
@@ -141,8 +141,8 @@ func TestDMRoomMapping(t *testing.T) {
 		nonexistentChannelID := model.NewId()
 
 		// Test getting nonexistent room mapping
-		roomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(nonexistentChannelID)
-		assert.NoError(t, err) // getMatrixRoomID returns empty string, not error for missing keys
+		roomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(nonexistentChannelID)
+		assert.NoError(t, err) // GetMatrixRoomID returns empty string, not error for missing keys
 		assert.Empty(t, roomID)
 	})
 }
