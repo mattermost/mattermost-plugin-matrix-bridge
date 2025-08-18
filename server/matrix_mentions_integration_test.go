@@ -17,7 +17,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 	matrixContainer := matrixtest.StartMatrixContainer(t, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(t)
 
-	// Create test room
+	// Create test room (this will be throttled automatically)
 	_ = matrixContainer.CreateRoom(t, "Mention Test Room")
 
 	// Set up plugin
@@ -87,8 +87,9 @@ func TestMatrixMentionProcessing(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Create fresh room for each test case to ensure isolation (like sync tests)
-			freshRoomID := matrixContainer.CreateRoom(t, "Fresh Mention Room "+tc.name)
+			// Create fresh room for each test case to ensure isolation
+			// The CreateRoom method now includes automatic throttling to prevent rate limits
+			freshRoomID := matrixContainer.CreateRoom(t, "Mention Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
 			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))
@@ -161,7 +162,7 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 	matrixContainer := matrixtest.StartMatrixContainer(t, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(t)
 
-	// Create test room
+	// Create test room (this will be throttled automatically)
 	_ = matrixContainer.CreateRoom(t, "Mention Edge Cases Room")
 
 	// Set up plugin
@@ -286,8 +287,9 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Create fresh room for each test case to ensure isolation (like sync tests)
-			freshRoomID := matrixContainer.CreateRoom(t, "Fresh Edge Case Room "+tc.name)
+			// Create fresh room for each test case to ensure isolation
+			// The CreateRoom method now includes automatic throttling to prevent rate limits
+			freshRoomID := matrixContainer.CreateRoom(t, "Edge Case Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
 			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))

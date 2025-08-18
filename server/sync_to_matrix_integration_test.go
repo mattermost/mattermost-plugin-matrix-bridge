@@ -42,9 +42,10 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	api := &plugintest.API{}
 
 	// Set up test data - create fresh room for each test to ensure isolation
+	// The CreateRoom method now includes automatic throttling to prevent rate limits
 	suite.testChannelID = model.NewId()
 	suite.testUserID = model.NewId()
-	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), "Test Room")
+	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), "Sync Test Room")
 	suite.testGhostUserID = "@_mattermost_" + suite.testUserID + ":" + suite.matrixContainer.ServerDomain
 
 	// Create plugin instance
