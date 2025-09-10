@@ -16,18 +16,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-const (
-	// MinRoomCreationInterval defines the minimum time between room creations to avoid rate limiting
-	// This prevents hitting Matrix server rate limits that cause HTTP 429 errors in CI
-	MinRoomCreationInterval = 600 * time.Millisecond
-)
-
-// Global container registry for cleanup and rate limiting
+// Global container registry for cleanup
 var (
-	activeContainers     = make(map[*MatrixContainer]bool)
-	containerMutex       sync.RWMutex
-	lastRoomCreationTime time.Time
-	roomCreationMutex    sync.Mutex
+	activeContainers = make(map[*MatrixContainer]bool)
+	containerMutex   sync.RWMutex
 )
 
 // MatrixContainer wraps a testcontainer running Synapse
@@ -195,30 +187,6 @@ func (mc *MatrixContainer) isMatrixReady() bool {
 
 // CreateRoom creates a test room and returns its room ID
 func (mc *MatrixContainer) CreateRoom(t *testing.T, roomName string) string {
-	return mc.CreateRoomWithThrottling(t, roomName)
-}
-
-// CreateRoomWithThrottling creates a test room with rate limiting protection
-// This method ensures we don't exceed Matrix server rate limits by tracking
-// the time since the last room creation and sleeping if necessary
-func (mc *MatrixContainer) CreateRoomWithThrottling(t *testing.T, roomName string) string {
-	roomCreationMutex.Lock()
-	defer roomCreationMutex.Unlock()
-
-	// Calculate time since last room creation
-	now := time.Now()
-	if !lastRoomCreationTime.IsZero() {
-		timeSinceLastCreation := now.Sub(lastRoomCreationTime)
-		if timeSinceLastCreation < MinRoomCreationInterval {
-			sleepTime := MinRoomCreationInterval - timeSinceLastCreation
-			t.Logf("Throttling room creation: sleeping %v to avoid rate limits", sleepTime)
-			time.Sleep(sleepTime)
-		}
-	}
-
-	// Update last creation time before making the request
-	lastRoomCreationTime = time.Now()
-
 	roomData := map[string]any{
 		"name":       roomName,
 		"preset":     "public_chat",

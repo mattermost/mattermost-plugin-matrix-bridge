@@ -3,6 +3,7 @@ package matrix
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -185,6 +186,12 @@ type Client struct {
 	httpClient   *http.Client
 	logger       Logger
 	serverDomain string // explicit server domain for testing
+
+	// Rate limiting
+	rateLimitConfig     RateLimitConfig
+	roomCreationLimiter *TokenBucket
+	messageLimiter      *TokenBucket
+	inviteLimiter       *TokenBucket
 }
 
 // MessageContent represents the content structure for Matrix messages.
@@ -223,28 +230,40 @@ type SendEventResponse struct {
 
 // NewClient creates a new Matrix client with the given server URL, application service token, and remote ID.
 func NewClient(serverURL, asToken, remoteID string, api plugin.API) *Client {
-	return &Client{
-		serverURL: serverURL,
-		asToken:   asToken,
-		remoteID:  remoteID,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		logger: NewAPILogger(api),
-	}
+	return NewClientWithRateLimit(serverURL, asToken, remoteID, api, DefaultRateLimitConfig())
 }
 
 // NewClientWithLogger creates a new Matrix client with a custom logger (useful for testing).
 func NewClientWithLogger(serverURL, asToken, remoteID string, logger Logger) *Client {
-	return &Client{
+	return NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, logger, DefaultRateLimitConfig())
+}
+
+// NewClientWithRateLimit creates a new Matrix client with custom rate limiting.
+func NewClientWithRateLimit(serverURL, asToken, remoteID string, api plugin.API, rateLimitConfig RateLimitConfig) *Client {
+	return NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, NewAPILogger(api), rateLimitConfig)
+}
+
+// NewClientWithLoggerAndRateLimit creates a new Matrix client with custom logger and rate limiting.
+func NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID string, logger Logger, rateLimitConfig RateLimitConfig) *Client {
+	client := &Client{
 		serverURL: serverURL,
 		asToken:   asToken,
 		remoteID:  remoteID,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		logger: logger,
+		logger:          logger,
+		rateLimitConfig: rateLimitConfig,
 	}
+
+	// Initialize rate limiters if enabled
+	if rateLimitConfig.Enabled {
+		client.roomCreationLimiter = NewTokenBucket(rateLimitConfig.RoomCreation)
+		client.messageLimiter = NewTokenBucket(rateLimitConfig.Messages)
+		client.inviteLimiter = NewTokenBucket(rateLimitConfig.Invites)
+	}
+
+	return client
 }
 
 // SetServerDomain sets an explicit server domain (used for testing)
@@ -730,6 +749,17 @@ func (c *Client) joinGhostUserWithFallback(roomID, ghostUserID string) error {
 func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, mattermostChannelID string) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
+	}
+
+	// Apply rate limiting for room creation
+	if c.rateLimitConfig.Enabled && c.roomCreationLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.roomCreationLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Room creation rate limited", "error", err)
+			return "", errors.Wrap(err, "room creation rate limited")
+		}
 	}
 
 	c.logger.LogDebug("Creating Matrix room", "name", name, "topic", topic, "server_domain", serverDomain)

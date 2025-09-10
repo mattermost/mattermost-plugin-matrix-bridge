@@ -33,15 +33,16 @@ func (suite *MatrixClientTestSuite) TearDownSuite() {
 
 // SetupTest prepares each test with fresh Matrix client and ensures AS bot is created
 func (suite *MatrixClientTestSuite) SetupTest() {
-	// Create a test room to ensure AS bot user is provisioned
+	// Create a test room to ensure AS bot user is provisioned (with throttling)
 	_ = suite.matrixContainer.CreateRoom(suite.T(), "AS Bot Provisioning Room")
 
-	// Create Matrix client
-	suite.client = NewClientWithLogger(
+	// Create Matrix client with test-specific rate limiting
+	suite.client = NewClientWithLoggerAndRateLimit(
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		"test-remote-id",
 		NewTestLogger(suite.T()),
+		TestRateLimitConfig(),
 	)
 	suite.client.SetServerDomain(suite.matrixContainer.ServerDomain)
 }
@@ -405,14 +406,15 @@ func BenchmarkMatrixClientOperations(b *testing.B) {
 	matrixContainer := matrixtest.StartMatrixContainer(&testing.T{}, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(&testing.T{})
 
-	// Create a test room to ensure AS bot user is provisioned
+	// Create a test room to ensure AS bot user is provisioned (with throttling)
 	_ = matrixContainer.CreateRoom(&testing.T{}, "AS Bot Provisioning Room")
 
-	client := NewClientWithLogger(
+	client := NewClientWithLoggerAndRateLimit(
 		matrixContainer.ServerURL,
 		matrixContainer.ASToken,
 		"bench-remote-id",
 		NewTestLogger(&testing.T{}),
+		TestRateLimitConfig(),
 	)
 	client.SetServerDomain(matrixContainer.ServerDomain)
 
