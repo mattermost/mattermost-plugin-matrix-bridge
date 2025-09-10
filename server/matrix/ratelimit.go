@@ -5,6 +5,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 // RateLimitConfig defines rate limiting configuration for Matrix operations
@@ -188,4 +190,13 @@ func TestRateLimitConfig() RateLimitConfig {
 			Interval:  0,
 		},
 	}
+}
+
+// IsRateLimitError checks if an error is a Matrix 429 rate limit error
+func IsRateLimitError(err error) bool {
+	var matrixErr *Error
+	if errors.As(err, &matrixErr) {
+		return matrixErr.StatusCode == 429 || matrixErr.ErrCode == "M_LIMIT_EXCEEDED"
+	}
+	return false
 }
