@@ -865,7 +865,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 
 	if resp.StatusCode != http.StatusOK {
 		matrixErr := parseMatrixError(resp.StatusCode, body)
-		
+
 		// Handle 429 Too Many Requests with specific logging
 		if IsRateLimitError(matrixErr) {
 			c.logger.LogWarn("Matrix room creation rate limited, server rejected request",
