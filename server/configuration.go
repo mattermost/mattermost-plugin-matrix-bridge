@@ -81,10 +81,6 @@ func (p *Plugin) setConfiguration(configuration *configuration) {
 func (p *Plugin) OnConfigurationChange() error {
 	var configuration = new(configuration)
 
-	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableRemoteClusterService != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableRemoteClusterService {
-		return fmt.Errorf("remote Cluster Service it's required and is currently not enabled")
-	}
-
 	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels {
 		return fmt.Errorf("shared Channels is required but currently not enabled")
 	}
