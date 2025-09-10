@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -34,15 +35,36 @@ type MatrixTransaction struct {
 }
 
 // processedTransactions stores transaction IDs to prevent duplicate processing
-var processedTransactions = make(map[string]time.Time)
+var (
+	processedTransactions = make(map[string]time.Time)
+	transactionsMutex     sync.RWMutex
+)
 
 // cleanupOldTransactions removes transaction IDs older than 1 hour
 func (p *Plugin) cleanupOldTransactions() {
 	cutoff := time.Now().Add(-time.Hour)
+
+	// Create a list of transaction IDs to delete to avoid holding the lock during iteration
+	var toDelete []string
+
+	transactionsMutex.RLock()
 	for txnID, timestamp := range processedTransactions {
 		if timestamp.Before(cutoff) {
-			delete(processedTransactions, txnID)
+			toDelete = append(toDelete, txnID)
 		}
+	}
+	transactionsMutex.RUnlock()
+
+	// Delete the old transactions with write lock
+	if len(toDelete) > 0 {
+		transactionsMutex.Lock()
+		for _, txnID := range toDelete {
+			// Double-check the timestamp in case it was updated between read and write lock
+			if timestamp, exists := processedTransactions[txnID]; exists && timestamp.Before(cutoff) {
+				delete(processedTransactions, txnID)
+			}
+		}
+		transactionsMutex.Unlock()
 	}
 }
 
@@ -67,7 +89,11 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	// Authentication is handled by MatrixAuthorizationRequired middleware
 
 	// Check for duplicate transaction (idempotency)
-	if timestamp, exists := processedTransactions[txnID]; exists {
+	transactionsMutex.RLock()
+	timestamp, exists := processedTransactions[txnID]
+	transactionsMutex.RUnlock()
+
+	if exists {
 		p.logger.LogDebug("Duplicate Matrix transaction ignored", "txn_id", txnID, "previous_timestamp", timestamp)
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("{}")); err != nil {
@@ -76,7 +102,16 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Read transaction body
+	// Read transaction body with size limit to prevent memory exhaustion attacks
+	// Use the server's configured MaxFileSize as the limit for webhook payloads
+	// This ensures consistency with the server's file handling limits
+	config := p.API.GetConfig()
+	maxRequestBodySize := int64(10 << 20) // Default 10MB fallback
+	if config.FileSettings.MaxFileSize != nil {
+		maxRequestBodySize = *config.FileSettings.MaxFileSize
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		p.logger.LogError("Failed to read Matrix webhook body", "error", err, "txn_id", txnID)
@@ -96,10 +131,13 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Mark transaction as processed
+	transactionsMutex.Lock()
 	processedTransactions[txnID] = time.Now()
+	shouldCleanup := len(processedTransactions)%100 == 0
+	transactionsMutex.Unlock()
 
 	// Clean up old transactions periodically
-	if len(processedTransactions)%100 == 0 {
+	if shouldCleanup {
 		go p.cleanupOldTransactions()
 	}
 

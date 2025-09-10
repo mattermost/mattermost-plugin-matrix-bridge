@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
@@ -173,93 +172,15 @@ func convertHTMLToMarkdown(logger Logger, htmlContent string) string {
 	return cleanupMarkdown(markdown)
 }
 
-// processMatrixMentions processes Matrix mentions in HTML content and converts them to Mattermost @mentions
-func (p *Plugin) processMatrixMentions(htmlContent string, event MatrixEvent) string {
-	// Get mentioned users from m.mentions field
-	mentionedUsers := p.extractMentionedUsers(event)
-	if len(mentionedUsers) == 0 {
-		return htmlContent
-	}
+// cleanupMarkdown cleans up conversion artifacts from HTML-to-markdown conversion
+func cleanupMarkdown(markdown string) string {
+	// Remove excessive newlines
+	cleaned := regexp.MustCompile(`\n{3,}`).ReplaceAllString(markdown, "\n\n")
 
-	// Process HTML content to replace mention links with @mentions
-	processed := htmlContent
-	for _, matrixUserID := range mentionedUsers {
-		// Look up Mattermost username for this Matrix user
-		mattermostUsername := p.getMattermostUsernameFromMatrix(matrixUserID)
-		if mattermostUsername != "" {
-			// Replace HTML mention links for this user
-			processed = p.replaceMatrixMentionHTML(processed, matrixUserID, mattermostUsername)
-		}
-	}
+	// Trim leading/trailing whitespace
+	cleaned = strings.TrimSpace(cleaned)
 
-	return processed
-}
-
-// extractMentionedUsers extracts Matrix user IDs from the m.mentions field
-func (p *Plugin) extractMentionedUsers(event MatrixEvent) []string {
-	mentionsField, hasMentions := event.Content["m.mentions"]
-	if !hasMentions {
-		return nil
-	}
-
-	mentions, ok := mentionsField.(map[string]any)
-	if !ok {
-		p.logger.LogDebug("m.mentions field is not a map", "event_id", event.EventID)
-		return nil
-	}
-
-	// Get user_ids array from mentions
-	userIDsField, hasUserIDs := mentions["user_ids"]
-	if !hasUserIDs {
-		return nil
-	}
-
-	userIDsArray, ok := userIDsField.([]any)
-	if !ok {
-		p.logger.LogDebug("user_ids field is not an array", "event_id", event.EventID)
-		return nil
-	}
-
-	// Convert to string array
-	var userIDs []string
-	for _, userIDInterface := range userIDsArray {
-		if userID, ok := userIDInterface.(string); ok {
-			userIDs = append(userIDs, userID)
-		}
-	}
-
-	p.logger.LogDebug("Extracted mentioned users from Matrix event", "event_id", event.EventID, "user_ids", userIDs)
-	return userIDs
-}
-
-// getMattermostUsernameFromMatrix looks up the Mattermost username for a Matrix user ID
-func (p *Plugin) getMattermostUsernameFromMatrix(matrixUserID string) string {
-	var mattermostUserID string
-
-	// Check if this is a ghost user (Mattermost user represented in Matrix)
-	if ghostMattermostUserID := p.extractMattermostUserIDFromGhost(matrixUserID); ghostMattermostUserID != "" {
-		p.logger.LogDebug("Found ghost user for mention", "matrix_user_id", matrixUserID, "mattermost_user_id", ghostMattermostUserID)
-		mattermostUserID = ghostMattermostUserID
-	} else {
-		// Check if we have a mapping for this regular Matrix user
-		userMapKey := "matrix_user_" + matrixUserID
-		userIDBytes, err := p.kvstore.Get(userMapKey)
-		if err != nil || len(userIDBytes) == 0 {
-			p.logger.LogDebug("No Mattermost user found for Matrix mention", "matrix_user_id", matrixUserID)
-			return ""
-		}
-		mattermostUserID = string(userIDBytes)
-	}
-
-	// Get the Mattermost user to retrieve username
-	user, appErr := p.API.GetUser(mattermostUserID)
-	if appErr != nil {
-		p.logger.LogWarn("Failed to get Mattermost user for mention", "error", appErr, "user_id", mattermostUserID, "matrix_user_id", matrixUserID)
-		return ""
-	}
-
-	p.logger.LogDebug("Found Mattermost username for Matrix mention", "matrix_user_id", matrixUserID, "mattermost_username", user.Username)
-	return user.Username
+	return cleaned
 }
 
 // extractMattermostUserIDFromGhost extracts the Mattermost user ID from a Matrix ghost user ID
@@ -290,49 +211,4 @@ func (p *Plugin) extractMattermostUserIDFromGhost(ghostUserID string) string {
 
 	p.logger.LogDebug("Extracted Mattermost user ID from ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
 	return mattermostUserID
-}
-
-// replaceMatrixMentionHTML replaces Matrix mention HTML links with Mattermost @mentions
-func (p *Plugin) replaceMatrixMentionHTML(htmlContent, matrixUserID, mattermostUsername string) string {
-	// Matrix mention links typically look like:
-	// <a href="https://matrix.to/#/@user:server.com">Display Name</a>
-	// We want to replace these with @username
-
-	// Create pattern to match Matrix mention links for this specific user
-	// Pattern matches: <a href="https://matrix.to/#/USERID">any text</a>
-	escapedUserID := regexp.QuoteMeta(matrixUserID)
-	pattern := fmt.Sprintf(`<a\s+href=["']https://matrix\.to/#/%s["'][^>]*>([^<]+)</a>`, escapedUserID)
-
-	regex, err := regexp.Compile(pattern)
-	if err != nil {
-		p.logger.LogWarn("Failed to compile mention regex", "error", err, "pattern", pattern)
-		return htmlContent
-	}
-
-	// Replace with @username
-	replacement := "@" + mattermostUsername
-	result := regex.ReplaceAllString(htmlContent, replacement)
-
-	p.logger.LogDebug("Replaced Matrix mention HTML", "matrix_user_id", matrixUserID, "mattermost_username", mattermostUsername, "original", htmlContent, "result", result)
-	return result
-}
-
-// convertHTMLToMarkdownWithMentions converts Matrix HTML to Mattermost markdown with mention processing
-func (p *Plugin) convertHTMLToMarkdownWithMentions(htmlContent string, event MatrixEvent) string {
-	// First, process Matrix mentions and convert HTML mention links to Mattermost @mentions
-	processedHTML := p.processMatrixMentions(htmlContent, event)
-
-	// Then convert the processed HTML to markdown
-	return convertHTMLToMarkdown(p.API, processedHTML)
-}
-
-// cleanupMarkdown cleans up conversion artifacts from HTML-to-markdown conversion
-func cleanupMarkdown(markdown string) string {
-	// Remove excessive newlines
-	cleaned := regexp.MustCompile(`\n{3,}`).ReplaceAllString(markdown, "\n\n")
-
-	// Trim leading/trailing whitespace
-	cleaned = strings.TrimSpace(cleaned)
-
-	return cleaned
 }

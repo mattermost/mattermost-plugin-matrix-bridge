@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -16,6 +15,41 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/pkg/errors"
 )
+
+// Path traversal validation functions
+
+// validatePathComponent checks for path traversal sequences in URL path components
+func validatePathComponent(component string) error {
+	if strings.Contains(component, "..") {
+		return errors.Errorf("path traversal detected in component: %s", component)
+	}
+	return nil
+}
+
+// buildSecureURL constructs URL paths with proper escaping and validation
+func buildSecureURL(baseURL string, pathComponents ...string) (string, error) {
+	var urlParts []string
+
+	for _, component := range pathComponents {
+		if err := validatePathComponent(component); err != nil {
+			return "", err
+		}
+		urlParts = append(urlParts, url.PathEscape(component))
+	}
+
+	return baseURL + strings.Join(urlParts, "/"), nil
+}
+
+// validateMXCComponents validates MXC URI components for path traversal attacks
+func validateMXCComponents(serverName, mediaID string) error {
+	if err := validatePathComponent(serverName); err != nil {
+		return errors.Wrap(err, "invalid server name in MXC URI")
+	}
+	if err := validatePathComponent(mediaID); err != nil {
+		return errors.Wrap(err, "invalid media ID in MXC URI")
+	}
+	return nil
+}
 
 // Logger interface for matrix client logging
 type Logger interface {
@@ -197,7 +231,10 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 	content := map[string]any{}
 
 	txnID := uuid.New().String()
-	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "redact", eventID, txnID)
+	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "redact", eventID, txnID)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid room or event ID")
+	}
 	reqURL := c.serverURL + endpoint
 
 	// Add user_id query parameter for impersonation
@@ -247,7 +284,10 @@ func (c *Client) GetEvent(roomID, eventID string) (map[string]any, error) {
 		return nil, errors.New("application service token not configured")
 	}
 
-	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "event", eventID)
+	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "event", eventID)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid room or event ID")
+	}
 	reqURL := c.serverURL + endpoint
 
 	req, err := http.NewRequest("GET", reqURL, nil)
@@ -1244,7 +1284,10 @@ func (c *Client) sendFileMessage(req MessageRequest, file FileAttachment, rootEv
 // sendEventAsUser sends an event as a specific user (using application service impersonation)
 func (c *Client) sendEventAsUser(roomID, eventType string, content any, userID string) (*SendEventResponse, error) {
 	txnID := uuid.New().String()
-	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "send", eventType, txnID)
+	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid room ID or event type")
+	}
 	reqURL := c.serverURL + endpoint
 
 	// Add user_id query parameter for impersonation
@@ -1405,18 +1448,69 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	serverName := parts[0]
 	mediaID := parts[1]
 
-	// Try different media download endpoints
-	downloadURLs := []string{
-		// NEW: Try client API endpoints first (newer Synapse versions use these)
-		fmt.Sprintf("%s/_matrix/client/v1/media/download/%s/%s", c.serverURL, serverName, mediaID),
-		fmt.Sprintf("%s/_matrix/client/v1/media/download/%s", c.serverURL, mediaID),
-		// Standard Matrix media repository API v3
-		fmt.Sprintf("%s/_matrix/media/v3/download/%s/%s", c.serverURL, serverName, mediaID),
-		// Fallback to v1 API (some older servers)
-		fmt.Sprintf("%s/_matrix/media/v1/download/%s/%s", c.serverURL, serverName, mediaID),
-		// Alternative endpoint without server name (some configurations)
-		fmt.Sprintf("%s/_matrix/media/v3/download/%s", c.serverURL, mediaID),
-		fmt.Sprintf("%s/_matrix/media/v1/download/%s", c.serverURL, mediaID),
+	// Validate MXC URI components for path traversal attacks
+	if err := validateMXCComponents(serverName, mediaID); err != nil {
+		return nil, errors.Wrap(err, "invalid MXC URI components")
+	}
+
+	// Build secure media download URLs with proper escaping
+	var downloadURLs []string
+	var validationErrors []error
+
+	// NEW: Try client API endpoints first (newer Synapse versions use these)
+	url1, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", serverName, mediaID)
+	if err == nil {
+		downloadURLs = append(downloadURLs, url1)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "client v1 with server"))
+	}
+
+	url2, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", mediaID)
+	if err == nil {
+		downloadURLs = append(downloadURLs, url2)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "client v1 media-only"))
+	}
+
+	// Standard Matrix media repository API v3
+	url3, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", serverName, mediaID)
+	if err == nil {
+		downloadURLs = append(downloadURLs, url3)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v3 with server"))
+	}
+
+	// Fallback to v1 API (some older servers)
+	url4, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", serverName, mediaID)
+	if err == nil {
+		downloadURLs = append(downloadURLs, url4)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v1 with server"))
+	}
+
+	// Alternative endpoint without server name (some configurations)
+	url5, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", mediaID)
+	if err == nil {
+		downloadURLs = append(downloadURLs, url5)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v3 media-only"))
+	}
+
+	url6, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", mediaID)
+	if err == nil {
+		downloadURLs = append(downloadURLs, url6)
+	} else {
+		validationErrors = append(validationErrors, errors.Wrap(err, "media v1 media-only"))
+	}
+
+	if len(downloadURLs) == 0 {
+		// Collect all validation error messages for debugging
+		var errorMsgs []string
+		for _, validationErr := range validationErrors {
+			errorMsgs = append(errorMsgs, validationErr.Error())
+		}
+		return nil, errors.Errorf("failed to construct any valid download URLs for MXC URI %s - validation errors: %s",
+			mxcURI, strings.Join(errorMsgs, "; "))
 	}
 
 	var lastErr error
@@ -1556,7 +1650,10 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 // sendCustomEventAsUser sends a custom event type as a specific user
 func (c *Client) sendCustomEventAsUser(roomID, eventType string, content any, userID string) error {
 	txnID := uuid.New().String()
-	endpoint := path.Join("/_matrix/client/v3/rooms", roomID, "send", eventType, txnID)
+	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
+	if err != nil {
+		return errors.Wrap(err, "invalid room ID or event type")
+	}
 	reqURL := c.serverURL + endpoint
 
 	// Add user_id query parameter for impersonation

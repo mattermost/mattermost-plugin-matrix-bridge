@@ -66,7 +66,7 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 		}
 	}
 
-	// Extract message content (smart format detection: prefer plain text, convert HTML to markdown)
+	// Extract message content (smart format detection: prefer formatted text, fallback to plain text)
 	content := b.extractMatrixMessageContent(event)
 
 	// For new messages (not edits), skip if content is empty
