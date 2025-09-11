@@ -17,7 +17,7 @@ import (
 // PluginIntegrationTestSuite contains integration tests for plugin-level Matrix operations
 type PluginIntegrationTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 	plugin          *Plugin
 	api             *plugintest.API
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 // MatrixSyncTestSuite contains integration tests for syncing to Matrix
 type MatrixSyncTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 	plugin          *Plugin
 	testChannelID   string
 	testUserID      string
@@ -45,7 +46,9 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	// The CreateRoom method now includes automatic throttling to prevent rate limits
 	suite.testChannelID = model.NewId()
 	suite.testUserID = model.NewId()
-	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), "Sync Test Room")
+	// Use unique room name to avoid alias conflicts between tests
+	uniqueRoomName := fmt.Sprintf("Sync Test Room %s", suite.testChannelID[:8])
+	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), uniqueRoomName)
 	suite.testGhostUserID = "@_mattermost_" + suite.testUserID + ":" + suite.matrixContainer.ServerDomain
 
 	// Create plugin instance

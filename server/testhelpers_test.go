@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -80,10 +81,10 @@ func setupPluginForTestWithLogger(t *testing.T, api plugin.API) *Plugin {
 	return plugin
 }
 
-// createMatrixClientWithTestLogger creates a matrix client with test logger for testing
+// createMatrixClientWithTestLogger creates a matrix client with test logger and rate limiting for testing
 func createMatrixClientWithTestLogger(t *testing.T, serverURL, asToken, remoteID string) *matrix.Client {
 	testLogger := matrix.NewTestLogger(t)
-	return matrix.NewClientWithLogger(serverURL, asToken, remoteID, testLogger)
+	return matrix.NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, testLogger, matrix.TestRateLimitConfig())
 }
 
 // TestMatrixClientTestLogger verifies that matrix client uses test logger correctly
@@ -103,7 +104,7 @@ func TestMatrixClientTestLogger(t *testing.T) {
 }
 
 // setupTestPlugin creates a test plugin instance with Matrix container for integration tests
-func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.MatrixContainer) *TestSetup {
+func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestSetup {
 	api := &plugintest.API{}
 
 	testChannelID := model.NewId()
@@ -401,6 +402,11 @@ func TestMemoryKVStore(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for deleted key")
 	}
+}
+
+// generateUniqueRoomName creates a unique room name to avoid alias conflicts
+func generateUniqueRoomName(baseName string) string {
+	return fmt.Sprintf("%s %s", baseName, model.NewId()[:8])
 }
 
 // TestMain provides global test setup and cleanup

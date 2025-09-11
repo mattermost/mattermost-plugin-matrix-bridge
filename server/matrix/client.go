@@ -68,20 +68,20 @@ func isForbiddenJoinError(err error) bool {
 
 // Path traversal validation functions
 
-// validatePathComponent checks for path traversal sequences in URL path components
-func validatePathComponent(component string) error {
+// ValidatePathComponent checks for path traversal sequences in URL path components
+func ValidatePathComponent(component string) error {
 	if strings.Contains(component, "..") {
 		return errors.Errorf("path traversal detected in component: %s", component)
 	}
 	return nil
 }
 
-// buildSecureURL constructs URL paths with proper escaping and validation
-func buildSecureURL(baseURL string, pathComponents ...string) (string, error) {
+// BuildSecureURL constructs URL paths with proper escaping and validation
+func BuildSecureURL(baseURL string, pathComponents ...string) (string, error) {
 	var urlParts []string
 
 	for _, component := range pathComponents {
-		if err := validatePathComponent(component); err != nil {
+		if err := ValidatePathComponent(component); err != nil {
 			return "", err
 		}
 		urlParts = append(urlParts, url.PathEscape(component))
@@ -90,12 +90,12 @@ func buildSecureURL(baseURL string, pathComponents ...string) (string, error) {
 	return baseURL + strings.Join(urlParts, "/"), nil
 }
 
-// validateMXCComponents validates MXC URI components for path traversal attacks
-func validateMXCComponents(serverName, mediaID string) error {
-	if err := validatePathComponent(serverName); err != nil {
+// ValidateMXCComponents validates MXC URI components for path traversal attacks
+func ValidateMXCComponents(serverName, mediaID string) error {
+	if err := ValidatePathComponent(serverName); err != nil {
 		return errors.Wrap(err, "invalid server name in MXC URI")
 	}
-	if err := validatePathComponent(mediaID); err != nil {
+	if err := ValidatePathComponent(mediaID); err != nil {
 		return errors.Wrap(err, "invalid media ID in MXC URI")
 	}
 	return nil
@@ -271,6 +271,11 @@ func (c *Client) SetServerDomain(domain string) {
 	c.serverDomain = domain
 }
 
+// SetServerURL updates the server URL for the client
+func (c *Client) SetServerURL(serverURL string) {
+	c.serverURL = serverURL
+}
+
 // SendReactionAsGhost sends a reaction to a message as a ghost user
 func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {
@@ -299,7 +304,7 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 	content := map[string]any{}
 
 	txnID := uuid.New().String()
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "redact", eventID, txnID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "redact", eventID, txnID)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid room or event ID")
 	}
@@ -352,7 +357,7 @@ func (c *Client) GetEvent(roomID, eventID string) (map[string]any, error) {
 		return nil, errors.New("application service token not configured")
 	}
 
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "event", eventID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "event", eventID)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid room or event ID")
 	}
@@ -598,8 +603,8 @@ func (c *Client) InviteUserToRoom(roomID, userID string) error {
 	return nil
 }
 
-// getRoomJoinRule fetches the join rule for a Matrix room
-func (c *Client) getRoomJoinRule(roomID string) (string, error) {
+// GetRoomJoinRule fetches the join rule for a Matrix room
+func (c *Client) GetRoomJoinRule(roomID string) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
 	}
@@ -658,7 +663,7 @@ func (c *Client) InviteAndJoinGhostUser(roomIdentifier, ghostUserID string) erro
 	c.logger.LogDebug("Resolved room identifier to room ID", "room_identifier", roomIdentifier, "room_id", roomID, "ghost_user_id", ghostUserID)
 
 	// Check the room's join rules first
-	joinRule, err := c.getRoomJoinRule(roomID)
+	joinRule, err := c.GetRoomJoinRule(roomID)
 	if err != nil {
 		c.logger.LogWarn("Failed to get room join rules, falling back to try-join approach", "room_id", roomID, "error", err)
 		// Fall back to the old approach if we can't determine join rules
@@ -1605,7 +1610,7 @@ func (c *Client) sendFileMessage(req MessageRequest, file FileAttachment, rootEv
 // sendEventAsUser sends an event as a specific user (using application service impersonation)
 func (c *Client) sendEventAsUser(roomID, eventType string, content any, userID string) (*SendEventResponse, error) {
 	txnID := uuid.New().String()
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid room ID or event type")
 	}
@@ -1770,7 +1775,7 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	mediaID := parts[1]
 
 	// Validate MXC URI components for path traversal attacks
-	if err := validateMXCComponents(serverName, mediaID); err != nil {
+	if err := ValidateMXCComponents(serverName, mediaID); err != nil {
 		return nil, errors.Wrap(err, "invalid MXC URI components")
 	}
 
@@ -1779,14 +1784,14 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	var validationErrors []error
 
 	// NEW: Try client API endpoints first (newer Synapse versions use these)
-	url1, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", serverName, mediaID)
+	url1, err := BuildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url1)
 	} else {
 		validationErrors = append(validationErrors, errors.Wrap(err, "client v1 with server"))
 	}
 
-	url2, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", mediaID)
+	url2, err := BuildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url2)
 	} else {
@@ -1794,7 +1799,7 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	}
 
 	// Standard Matrix media repository API v3
-	url3, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", serverName, mediaID)
+	url3, err := BuildSecureURL(c.serverURL+"/_matrix/media/v3/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url3)
 	} else {
@@ -1802,7 +1807,7 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	}
 
 	// Fallback to v1 API (some older servers)
-	url4, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", serverName, mediaID)
+	url4, err := BuildSecureURL(c.serverURL+"/_matrix/media/v1/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url4)
 	} else {
@@ -1810,14 +1815,14 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	}
 
 	// Alternative endpoint without server name (some configurations)
-	url5, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", mediaID)
+	url5, err := BuildSecureURL(c.serverURL+"/_matrix/media/v3/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url5)
 	} else {
 		validationErrors = append(validationErrors, errors.Wrap(err, "media v3 media-only"))
 	}
 
-	url6, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", mediaID)
+	url6, err := BuildSecureURL(c.serverURL+"/_matrix/media/v1/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url6)
 	} else {
@@ -1971,7 +1976,7 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 // sendCustomEventAsUser sends a custom event type as a specific user
 func (c *Client) sendCustomEventAsUser(roomID, eventType string, content any, userID string) error {
 	txnID := uuid.New().String()
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
 	if err != nil {
 		return errors.Wrap(err, "invalid room ID or event type")
 	}

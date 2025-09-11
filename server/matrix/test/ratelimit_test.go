@@ -1,8 +1,9 @@
-package matrix
+package test
 
 import (
 	"testing"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/pkg/errors"
 )
 
@@ -14,7 +15,7 @@ func TestIsRateLimitError(t *testing.T) {
 	}{
 		{
 			name: "Matrix 429 error with M_LIMIT_EXCEEDED",
-			err: &Error{
+			err: &matrix.Error{
 				StatusCode: 429,
 				ErrCode:    "M_LIMIT_EXCEEDED",
 				ErrMsg:     "Too Many Requests",
@@ -23,7 +24,7 @@ func TestIsRateLimitError(t *testing.T) {
 		},
 		{
 			name: "Matrix error with M_LIMIT_EXCEEDED code only",
-			err: &Error{
+			err: &matrix.Error{
 				StatusCode: 500,
 				ErrCode:    "M_LIMIT_EXCEEDED",
 				ErrMsg:     "Rate limit exceeded",
@@ -32,7 +33,7 @@ func TestIsRateLimitError(t *testing.T) {
 		},
 		{
 			name: "Matrix 429 error without M_LIMIT_EXCEEDED",
-			err: &Error{
+			err: &matrix.Error{
 				StatusCode: 429,
 				ErrCode:    "UNKNOWN",
 				ErrMsg:     "Too Many Requests",
@@ -41,7 +42,7 @@ func TestIsRateLimitError(t *testing.T) {
 		},
 		{
 			name: "Non-rate limit Matrix error",
-			err: &Error{
+			err: &matrix.Error{
 				StatusCode: 400,
 				ErrCode:    "M_INVALID_PARAM",
 				ErrMsg:     "Bad request",
@@ -62,7 +63,7 @@ func TestIsRateLimitError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := IsRateLimitError(tt.err)
+			result := matrix.IsRateLimitError(tt.err)
 			if result != tt.expected {
 				t.Errorf("IsRateLimitError() = %v, expected %v for error: %v", result, tt.expected, tt.err)
 			}

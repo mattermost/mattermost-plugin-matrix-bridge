@@ -16,7 +16,7 @@ import (
 // UserRemoteDetectionIntegrationTestSuite tests real loop prevention logic with a Matrix server
 type UserRemoteDetectionIntegrationTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 	plugin          *Plugin
 	testChannelID   string
 	testRoomID      string
@@ -42,7 +42,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 
 	// Set up test data
 	suite.testChannelID = model.NewId()
-	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), "Loop Prevention Test Room")
+	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Loop Prevention Test Room"))
 
 	// Create plugin instance
 	suite.plugin = &Plugin{

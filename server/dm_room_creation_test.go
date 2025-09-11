@@ -16,7 +16,7 @@ import (
 // DMRoomCreationTestSuite contains integration tests for DM room creation on Matrix
 type DMRoomCreationTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 }
 
 // SetupSuite starts the Matrix container before running tests

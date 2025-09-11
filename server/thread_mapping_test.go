@@ -109,7 +109,7 @@ func TestGetThreadRootFromPostID(t *testing.T) {
 // ThreadMappingIntegrationTestSuite tests the threading fix with real Matrix server
 type ThreadMappingIntegrationTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 	plugin          *Plugin
 	testChannelID   string
 	testUserID      string
@@ -137,7 +137,7 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	// Set up test data
 	suite.testChannelID = model.NewId()
 	suite.testUserID = model.NewId()
-	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), "Thread Test Room")
+	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Thread Test Room"))
 
 	// Create plugin instance
 	suite.plugin = &Plugin{

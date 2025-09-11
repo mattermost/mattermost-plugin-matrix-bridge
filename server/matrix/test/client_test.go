@@ -1,11 +1,12 @@
-package matrix
+package test
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,8 +16,8 @@ import (
 // MatrixClientTestSuite contains integration tests for Matrix client operations.
 type MatrixClientTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
-	client          *Client
+	matrixContainer *matrixtest.Container
+	client          *matrix.Client
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -31,20 +32,15 @@ func (suite *MatrixClientTestSuite) TearDownSuite() {
 	}
 }
 
-// SetupTest prepares each test with fresh Matrix client and ensures AS bot is created
+// SetupTest prepares each test with Matrix client and ensures AS bot is created
 func (suite *MatrixClientTestSuite) SetupTest() {
-	// Create a test room to ensure AS bot user is provisioned (with throttling)
-	_ = suite.matrixContainer.CreateRoom(suite.T(), "AS Bot Provisioning Room")
+	// Use the container's Matrix client which has rate limiting built-in
+	suite.client = suite.matrixContainer.Client
 
-	// Create Matrix client with test-specific rate limiting
-	suite.client = NewClientWithLoggerAndRateLimit(
-		suite.matrixContainer.ServerURL,
-		suite.matrixContainer.ASToken,
-		"test-remote-id",
-		NewTestLogger(suite.T()),
-		TestRateLimitConfig(),
-	)
-	suite.client.SetServerDomain(suite.matrixContainer.ServerDomain)
+	// Create a test room to ensure AS bot user is provisioned (with throttling)
+	// Use a unique name to avoid alias conflicts between test methods
+	roomName := fmt.Sprintf("AS Bot Provisioning Room %d", time.Now().UnixNano())
+	_ = suite.matrixContainer.CreateRoom(suite.T(), roomName)
 }
 
 // TestMatrixClientOperations tests core Matrix client operations that affect change
@@ -225,7 +221,7 @@ func (suite *MatrixClientTestSuite) testMessageOperations() {
 
 	suite.Run("SendMessage", func() {
 		// Send a text message
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			RoomID:      roomID,
 			GhostUserID: ghostUser.UserID,
 			Message:     "Hello, this is a test message!",
@@ -252,7 +248,7 @@ func (suite *MatrixClientTestSuite) testMessageOperations() {
 
 	suite.Run("EditMessage", func() {
 		// Send original message
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			RoomID:      roomID,
 			GhostUserID: ghostUser.UserID,
 			Message:     "Original message",
@@ -284,7 +280,7 @@ func (suite *MatrixClientTestSuite) testMessageOperations() {
 
 	suite.Run("SendReaction", func() {
 		// Send a message to react to
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			RoomID:      roomID,
 			GhostUserID: ghostUser.UserID,
 			Message:     "React to this message!",
@@ -324,7 +320,7 @@ func (suite *MatrixClientTestSuite) testMessageOperations() {
 
 	suite.Run("RedactEvent", func() {
 		// Send a message to redact
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			RoomID:      roomID,
 			GhostUserID: ghostUser.UserID,
 			Message:     "This message will be deleted",
@@ -406,17 +402,11 @@ func BenchmarkMatrixClientOperations(b *testing.B) {
 	matrixContainer := matrixtest.StartMatrixContainer(&testing.T{}, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(&testing.T{})
 
+	// Use the container's own client for benchmarking
+	client := matrixContainer.Client
+
 	// Create a test room to ensure AS bot user is provisioned (with throttling)
 	_ = matrixContainer.CreateRoom(&testing.T{}, "AS Bot Provisioning Room")
-
-	client := NewClientWithLoggerAndRateLimit(
-		matrixContainer.ServerURL,
-		matrixContainer.ASToken,
-		"bench-remote-id",
-		NewTestLogger(&testing.T{}),
-		TestRateLimitConfig(),
-	)
-	client.SetServerDomain(matrixContainer.ServerDomain)
 
 	b.Run("CreateRoom", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
@@ -438,7 +428,7 @@ func BenchmarkMatrixClientOperations(b *testing.B) {
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			messageReq := MessageRequest{
+			messageReq := matrix.MessageRequest{
 				RoomID:      resolvedRoomID,
 				GhostUserID: ghostUser.UserID,
 				Message:     fmt.Sprintf("Benchmark message %d", i),
@@ -456,11 +446,11 @@ func BenchmarkMatrixClientOperations(b *testing.B) {
 func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 	suite.Run("EmptyTokenClient", func() {
 		// Test client with empty token
-		emptyTokenClient := NewClientWithLogger(
+		emptyTokenClient := matrix.NewClientWithLogger(
 			suite.matrixContainer.ServerURL,
 			"", // Empty token
 			"test-remote-id",
-			NewTestLogger(suite.T()),
+			matrix.NewTestLogger(suite.T()),
 		)
 
 		// Should fail operations that require authentication
@@ -471,11 +461,11 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 
 	suite.Run("InvalidServerURL", func() {
 		// Test client with invalid server URL
-		invalidURLClient := NewClientWithLogger(
+		invalidURLClient := matrix.NewClientWithLogger(
 			"http://nonexistent.invalid:1234",
 			suite.matrixContainer.ASToken,
 			"test-remote-id",
-			NewTestLogger(suite.T()),
+			matrix.NewTestLogger(suite.T()),
 		)
 
 		err := invalidURLClient.TestConnection()
@@ -510,7 +500,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 
 	suite.Run("InvalidMessageOperations", func() {
 		// Test sending message to non-existent room
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			RoomID:      "!nonexistent:test.matrix.local",
 			GhostUserID: "@_mattermost_test:test.matrix.local",
 			Message:     "Test message",
@@ -524,7 +514,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 		assert.Error(suite.T(), err, "Should fail to get non-existent event")
 
 		// Test empty message request
-		emptyReq := MessageRequest{
+		emptyReq := matrix.MessageRequest{
 			RoomID:      "!test:test.matrix.local",
 			GhostUserID: "@_mattermost_test:test.matrix.local",
 			// No message content
@@ -553,7 +543,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 
 	suite.Run("ParameterValidation", func() {
 		// Test required parameter validation
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			// Missing RoomID
 			GhostUserID: "@_mattermost_test:test.matrix.local",
 			Message:     "Test",
@@ -573,11 +563,11 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 
 	suite.Run("NetworkErrorHandling", func() {
 		// Test with client pointing to a port that definitely doesn't exist
-		networkFailClient := NewClientWithLogger(
+		networkFailClient := matrix.NewClientWithLogger(
 			"http://localhost:99999", // Port that should be unused
 			suite.matrixContainer.ASToken,
 			"test-remote-id",
-			NewTestLogger(suite.T()),
+			matrix.NewTestLogger(suite.T()),
 		)
 
 		// All operations should fail with network errors
@@ -619,12 +609,12 @@ func (suite *MatrixClientTestSuite) TestMatrixClientWithFiles() {
 		require.NoError(suite.T(), err, "Should upload test image")
 
 		// Send message with file attachments
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			RoomID:      roomID,
 			GhostUserID: ghostUser.UserID,
 			Message:     "Here are some file attachments",
 			PostID:      "test-file-post-123",
-			Files: []FileAttachment{
+			Files: []matrix.FileAttachment{
 				{
 					Filename: "test-document.txt",
 					MxcURI:   fileMxcURI,
@@ -661,12 +651,12 @@ func (suite *MatrixClientTestSuite) TestMatrixClientWithFiles() {
 		require.NoError(suite.T(), err, "Should upload test file")
 
 		// Send message with only files (no text)
-		messageReq := MessageRequest{
+		messageReq := matrix.MessageRequest{
 			RoomID:      roomID,
 			GhostUserID: ghostUser.UserID,
 			// No Message text
 			PostID: "test-file-only-post",
-			Files: []FileAttachment{
+			Files: []matrix.FileAttachment{
 				{
 					Filename: "file-only.txt",
 					MxcURI:   mxcURI,
@@ -775,7 +765,7 @@ func TestValidatePathComponent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validatePathComponent(tt.component)
+			err := matrix.ValidatePathComponent(tt.component)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -866,7 +856,7 @@ func TestBuildSecureURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := buildSecureURL(tt.baseURL, tt.pathComponents...)
+			result, err := matrix.BuildSecureURL(tt.baseURL, tt.pathComponents...)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -972,7 +962,7 @@ func TestValidateMXCComponents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateMXCComponents(tt.serverName, tt.mediaID)
+			err := matrix.ValidateMXCComponents(tt.serverName, tt.mediaID)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -1024,7 +1014,7 @@ func TestPathTraversalAttackVectors(t *testing.T) {
 
 	for _, tt := range attackVectors {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validatePathComponent(tt.component)
+			err := matrix.ValidatePathComponent(tt.component)
 
 			if tt.wantErr {
 				assert.Error(t, err, "Expected path traversal to be detected in: %s", tt.component)
@@ -1100,7 +1090,7 @@ func TestBuildSecureURLIntegration(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := buildSecureURL(tt.baseURL, tt.pathComponents...)
+			result, err := matrix.BuildSecureURL(tt.baseURL, tt.pathComponents...)
 
 			if tt.expectedResult {
 				assert.NoError(t, err, tt.description)
@@ -1148,7 +1138,7 @@ func TestURLEscapingBehavior(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := buildSecureURL("https://example.com/", tt.component)
+			result, err := matrix.BuildSecureURL("https://example.com/", tt.component)
 			require.NoError(t, err)
 
 			// Extract the escaped component from the result
@@ -1160,12 +1150,12 @@ func TestURLEscapingBehavior(t *testing.T) {
 
 func TestMXCURIValidationErrorReporting(t *testing.T) {
 	// Test improved error reporting for malformed MXC URIs
-	client := &Client{
-		serverURL:  "https://matrix.example.com",
-		asToken:    "test-token",
-		logger:     NewTestLogger(t),
-		httpClient: &http.Client{},
-	}
+	client := matrix.NewClientWithLogger(
+		"https://matrix.example.com",
+		"test-token",
+		"test-remote-id",
+		matrix.NewTestLogger(t),
+	)
 
 	testCases := []struct {
 		name        string
@@ -1204,12 +1194,12 @@ func TestMXCURIValidationErrorReporting(t *testing.T) {
 
 func TestMXCURIValidationErrorReportingWithBetterErrorMessages(t *testing.T) {
 	// Test that we get better error messages that help with debugging
-	client := &Client{
-		serverURL:  "https://matrix.example.com",
-		asToken:    "test-token",
-		logger:     NewTestLogger(t),
-		httpClient: &http.Client{},
-	}
+	client := matrix.NewClientWithLogger(
+		"https://matrix.example.com",
+		"test-token",
+		"test-remote-id",
+		matrix.NewTestLogger(t),
+	)
 
 	// Test path traversal error gets caught early with descriptive message
 	_, err := client.DownloadFile("mxc://valid.server/../evil", 1024*1024, "image/")
@@ -1234,7 +1224,7 @@ func (suite *MatrixClientTestSuite) testAdvancedRoomOperations() {
 		require.NoError(suite.T(), err, "Should resolve public room alias")
 
 		// Test getting join rule for public room
-		joinRule, err := suite.client.getRoomJoinRule(publicRoomID)
+		joinRule, err := suite.client.GetRoomJoinRule(publicRoomID)
 		require.NoError(suite.T(), err, "Should get join rule for public room")
 		assert.Equal(suite.T(), "public", joinRule, "Public room should have 'public' join rule")
 		suite.T().Logf("Public room %s has join rule: %s", publicRoomID, joinRule)
@@ -1247,13 +1237,13 @@ func (suite *MatrixClientTestSuite) testAdvancedRoomOperations() {
 		require.NoError(suite.T(), err, "Should resolve private room alias")
 
 		// Test getting join rule for private room
-		joinRule, err = suite.client.getRoomJoinRule(privateRoomID)
+		joinRule, err = suite.client.GetRoomJoinRule(privateRoomID)
 		require.NoError(suite.T(), err, "Should get join rule for private room")
 		assert.Equal(suite.T(), "invite", joinRule, "Private room should have 'invite' join rule")
 		suite.T().Logf("Private room %s has join rule: %s", privateRoomID, joinRule)
 
 		// Test with non-existent room
-		_, err = suite.client.getRoomJoinRule("!nonexistent:test.matrix.local")
+		_, err = suite.client.GetRoomJoinRule("!nonexistent:test.matrix.local")
 		assert.Error(suite.T(), err, "Should fail to get join rule for non-existent room")
 	})
 
