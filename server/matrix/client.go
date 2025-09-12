@@ -188,10 +188,12 @@ type Client struct {
 	serverDomain string // explicit server domain for testing
 
 	// Rate limiting
-	rateLimitConfig     RateLimitConfig
-	roomCreationLimiter *TokenBucket
-	messageLimiter      *TokenBucket
-	inviteLimiter       *TokenBucket
+	rateLimitConfig      RateLimitConfig
+	roomCreationLimiter  *TokenBucket
+	messageLimiter       *TokenBucket
+	inviteLimiter        *TokenBucket
+	registrationLimiter  *TokenBucket
+	joinLimiter          *TokenBucket
 }
 
 // MessageContent represents the content structure for Matrix messages.
@@ -261,6 +263,8 @@ func NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID string, logger
 		client.roomCreationLimiter = NewTokenBucket(rateLimitConfig.RoomCreation)
 		client.messageLimiter = NewTokenBucket(rateLimitConfig.Messages)
 		client.inviteLimiter = NewTokenBucket(rateLimitConfig.Invites)
+		client.registrationLimiter = NewTokenBucket(rateLimitConfig.Registration)
+		client.joinLimiter = NewTokenBucket(rateLimitConfig.Joins)
 	}
 
 	return client
@@ -282,6 +286,17 @@ func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string)
 		return nil, errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for reaction sending
+	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.messageLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Reaction sending rate limited", "error", err)
+			return nil, errors.Wrap(err, "reaction sending rate limited")
+		}
+	}
+
 	// Matrix reaction content structure
 	content := map[string]any{
 		"m.relates_to": map[string]any{
@@ -298,6 +313,17 @@ func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string)
 func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
+	}
+
+	// Apply rate limiting for redaction operations
+	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.messageLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Event redaction rate limited", "error", err)
+			return nil, errors.Wrap(err, "event redaction rate limited")
+		}
 	}
 
 	// Empty content for redaction
@@ -473,6 +499,17 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 		return errors.New("matrix client not configured")
 	}
 
+	// Apply rate limiting for room join operations (rc_joins)
+	if c.rateLimitConfig.Enabled && c.joinLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.joinLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Room join rate limited", "error", err)
+			return errors.Wrap(err, "room join rate limited")
+		}
+	}
+
 	// Use the unified join endpoint that supports both room IDs and aliases
 	encodedIdentifier := url.PathEscape(roomIdentifier)
 	requestURL := c.serverURL + "/_matrix/client/v3/join/" + encodedIdentifier
@@ -507,6 +544,17 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
+	}
+
+	// Apply rate limiting for room join operations (rc_joins)
+	if c.rateLimitConfig.Enabled && c.joinLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.joinLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Room join rate limited", "error", err)
+			return errors.Wrap(err, "room join rate limited")
+		}
 	}
 
 	// Use the unified join endpoint that supports both room IDs and aliases
@@ -548,6 +596,17 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 func (c *Client) InviteUserToRoom(roomID, userID string) error {
 	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
+	}
+
+	// Apply rate limiting for room invite operations
+	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.inviteLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Room invite rate limited", "error", err)
+			return errors.Wrap(err, "room invite rate limited")
+		}
 	}
 
 	c.logger.LogDebug("Inviting user to Matrix room", "room_id", roomID, "user_id", userID)
@@ -952,6 +1011,17 @@ func (c *Client) CreateDirectRoom(ghostUserIDs []string, roomName string) (strin
 		return "", errors.New("direct room requires at least 2 users")
 	}
 
+	// Apply rate limiting for room creation operations
+	if c.rateLimitConfig.Enabled && c.roomCreationLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.roomCreationLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Direct room creation rate limited", "error", err)
+			return "", errors.Wrap(err, "direct room creation rate limited")
+		}
+	}
+
 	c.logger.LogDebug("Creating Matrix DM room", "users", ghostUserIDs)
 
 	roomData := map[string]any{
@@ -1116,6 +1186,17 @@ func (c *Client) CreateGhostUser(mattermostUserID, displayName string, avatarDat
 		return nil, errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for user creation operations
+	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.inviteLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Ghost user creation rate limited", "error", err)
+			return nil, errors.Wrap(err, "ghost user creation rate limited")
+		}
+	}
+
 	// Extract server domain from serverURL
 	serverDomain, err := c.extractServerDomain()
 	if err != nil {
@@ -1222,6 +1303,17 @@ func (c *Client) SetDisplayName(userID, displayName string) error {
 		return errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for profile operations
+	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.inviteLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Display name setting rate limited", "error", err)
+			return errors.Wrap(err, "display name setting rate limited")
+		}
+	}
+
 	// Content for the display name event
 	content := map[string]any{
 		"displayname": displayName,
@@ -1270,6 +1362,17 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 		return errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for profile operations
+	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.inviteLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Avatar URL setting rate limited", "error", err)
+			return errors.Wrap(err, "avatar URL setting rate limited")
+		}
+	}
+
 	// Content for the avatar URL event
 	content := map[string]any{
 		"avatar_url": avatarURL,
@@ -1316,6 +1419,17 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 func (c *Client) UploadMedia(data []byte, filename, contentType string) (string, error) {
 	if c.asToken == "" {
 		return "", errors.New("application service token not configured")
+	}
+
+	// Apply rate limiting for media upload operations
+	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.messageLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Media upload rate limited", "error", err)
+			return "", errors.Wrap(err, "media upload rate limited")
+		}
 	}
 
 	// Use the media upload endpoint
@@ -1419,6 +1533,17 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 		return nil, errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for message edit operations
+	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.messageLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Message edit rate limited", "error", err)
+			return nil, errors.Wrap(err, "message edit rate limited")
+		}
+	}
+
 	// Matrix edit event content structure
 	newContent := map[string]any{
 		"msgtype": "m.text",
@@ -1448,6 +1573,17 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 func (c *Client) SendMessage(req MessageRequest) (*SendEventResponse, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
+	}
+
+	// Apply rate limiting for message sending
+	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.messageLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("Message sending rate limited", "error", err)
+			return nil, errors.Wrap(err, "message sending rate limited")
+		}
 	}
 
 	// Validate required fields
@@ -2214,6 +2350,114 @@ func (c *Client) GetServerInfo() (*ServerInfo, error) {
 	}
 
 	return serverInfo, nil
+}
+
+// RegisterUser creates a regular Matrix user (not a ghost user) with rate limiting
+func (c *Client) RegisterUser(username, password string) (*RegisterResponse, error) {
+	// Apply rate limiting for user registration operations (rc_registration)
+	if c.rateLimitConfig.Enabled && c.registrationLimiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := c.registrationLimiter.Wait(ctx); err != nil {
+			c.logger.LogWarn("User registration rate limited", "error", err)
+			return nil, errors.Wrap(err, "user registration rate limited")
+		}
+	}
+
+	// First, try to get registration flows
+	_, err := c.makeMatrixRequest("POST", "/_matrix/client/v3/register", map[string]any{}, "")
+	if err != nil {
+		// If we get an error, it might contain flow information - this is expected
+		c.logger.LogDebug("Registration flow error (expected)", "error", err)
+	}
+
+	// Try registration with dummy auth
+	userData := map[string]any{
+		"username": username,
+		"password": password,
+		"auth": map[string]any{
+			"type": "m.login.dummy",
+		},
+	}
+
+	result, err := c.makeMatrixRequest("POST", "/_matrix/client/v3/register", userData, "")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to register user")
+	}
+
+	var response RegisterResponse
+	responseBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to marshal registration response")
+	}
+
+	err = json.Unmarshal(responseBytes, &response)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal registration response")
+	}
+
+	return &response, nil
+}
+
+// RegisterResponse represents the response from Matrix user registration
+type RegisterResponse struct {
+	UserID      string `json:"user_id"`
+	AccessToken string `json:"access_token"`
+	HomeServer  string `json:"home_server"`
+	DeviceID    string `json:"device_id"`
+}
+
+// makeMatrixRequest makes an HTTP request to Matrix without Application Service authentication
+func (c *Client) makeMatrixRequest(method, endpoint string, data any, token string) (any, error) {
+	var body io.Reader
+
+	if data != nil {
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		body = strings.NewReader(string(jsonData))
+	}
+
+	requestURL := c.serverURL + endpoint
+	req, err := http.NewRequest(method, requestURL, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if data != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(responseBody))
+	}
+
+	if len(responseBody) == 0 {
+		return map[string]any{}, nil
+	}
+
+	var result any
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // GetMattermostChannelID retrieves the Mattermost channel ID from the Matrix room's custom state.

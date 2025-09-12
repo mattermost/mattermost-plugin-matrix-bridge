@@ -357,30 +357,11 @@ type User struct {
 }
 
 // CreateUser creates a test user and returns user information
+// Uses the rate-limited Matrix client to avoid 429 errors
 func (mc *Container) CreateUser(t *testing.T, username, password string) *User {
-	// First, try to get registration flows
-	_, err := mc.makeMatrixRequestNoAuth("POST", "/_matrix/client/v3/register", map[string]any{})
-	if err != nil {
-		// If we get an error, it might contain flow information
-		t.Logf("Registration flow error (expected): %v", err)
-	}
-
-	// Try registration with dummy auth
-	userData := map[string]any{
-		"username": username,
-		"password": password,
-		"auth": map[string]any{
-			"type": "m.login.dummy",
-		},
-	}
-
-	result, err := mc.makeMatrixRequestNoAuth("POST", "/_matrix/client/v3/register", userData)
-	require.NoError(t, err)
-
-	var response RegisterResponse
-	responseBytes, err := json.Marshal(result)
-	require.NoError(t, err)
-	err = json.Unmarshal(responseBytes, &response)
+	// Use the rate-limited Matrix client instead of direct HTTP calls
+	// This prevents 429 M_LIMIT_EXCEEDED errors during rapid user creation
+	response, err := mc.Client.RegisterUser(username, password)
 	require.NoError(t, err)
 
 	return &User{
@@ -638,25 +619,7 @@ encryption_enabled_by_default_for_room_type: off
 allow_public_rooms_over_federation: true
 allow_public_rooms_without_auth: true
 
-# Disable rate limiting for tests
-rc_message:
-  per_second: 1000
-  burst_count: 1000
-
-rc_registration:
-  per_second: 1000
-  burst_count: 1000
-
-rc_login:
-  address:
-    per_second: 1000
-    burst_count: 1000
-  account:
-    per_second: 1000
-    burst_count: 1000
-  failed_attempts:
-    per_second: 1000
-    burst_count: 1000
+# Use default Synapse rate limits to test client-side throttling
 
 # Enable registration for testing
 enable_registration: true

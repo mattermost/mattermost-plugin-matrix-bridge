@@ -11,12 +11,16 @@ import (
 
 // RateLimitConfig defines rate limiting configuration for Matrix operations
 type RateLimitConfig struct {
-	// RoomCreation limits for room creation operations
+	// RoomCreation limits for room creation operations (rc_room_creation)
 	RoomCreation TokenBucketConfig `json:"room_creation"`
-	// Messages limits for message sending operations
+	// Messages limits for message sending operations (rc_message)
 	Messages TokenBucketConfig `json:"messages"`
-	// Invites limits for room invitation operations
+	// Invites limits for room invitation operations (rc_invites)
 	Invites TokenBucketConfig `json:"invites"`
+	// Registration limits for user registration operations (rc_registration)
+	Registration TokenBucketConfig `json:"registration"`
+	// Joins limits for room join operations (rc_joins)
+	Joins TokenBucketConfig `json:"joins"`
 	// Enabled controls whether rate limiting is active
 	Enabled bool `json:"enabled"`
 }
@@ -59,6 +63,11 @@ func NewTokenBucket(config TokenBucketConfig) *TokenBucket {
 func (tb *TokenBucket) Allow() bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
+
+	// Check for disabled case: rate=0, burstSize=0, interval=0
+	if tb.rate == 0 && tb.burstSize == 0 && tb.interval == 0 {
+		return true // Disabled rate limiting allows all operations
+	}
 
 	now := time.Now()
 
@@ -116,6 +125,11 @@ func (tb *TokenBucket) getWaitTime() time.Duration {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
+	// Check for disabled case: rate=0, burstSize=0, interval=0
+	if tb.rate == 0 && tb.burstSize == 0 && tb.interval == 0 {
+		return 0 // No waiting needed when disabled
+	}
+
 	now := time.Now()
 
 	// For interval-based limiting
@@ -147,46 +161,67 @@ func (tb *TokenBucket) getWaitTime() time.Duration {
 func DefaultRateLimitConfig() RateLimitConfig {
 	return RateLimitConfig{
 		Enabled: true,
-		// Room creation: Allow bursts but limit sustained creation
-		// Based on Synapse defaults but more permissive for Application Services
+		// Room creation: Match Synapse rc_room_creation defaults
 		RoomCreation: TokenBucketConfig{
-			Rate:      0.5, // 0.5 rooms per second sustained rate
-			BurstSize: 5,   // Allow creating 5 rooms quickly
-			Interval:  0,   // Use token bucket, not interval
+			Rate:      0.05, // 0.05 rooms per second (20 second intervals)
+			BurstSize: 2,    // Allow creating 2 rooms quickly
+			Interval:  0,    // Use token bucket, not interval
 		},
-		// Messages: Based on Synapse rc_message defaults (0.2/sec, burst 10)
+		// Messages: Match Synapse rc_message defaults exactly
 		Messages: TokenBucketConfig{
 			Rate:      0.2, // 0.2 messages per second sustained
 			BurstSize: 10,  // Allow 10 message burst
 			Interval:  0,
 		},
-		// Invites: Based on Synapse rc_invites defaults
+		// Invites: Match Synapse rc_invites per_room defaults
 		Invites: TokenBucketConfig{
-			Rate:      0.3, // 0.3 invites per second sustained
+			Rate:      0.3, // 0.3 invites per second per room
 			BurstSize: 10,  // Allow 10 invite burst
+			Interval:  0,
+		},
+		// Registration: Match Synapse rc_registration defaults
+		Registration: TokenBucketConfig{
+			Rate:      0.17, // 0.17 registrations per second
+			BurstSize: 3,    // Allow 3 registration burst
+			Interval:  0,    // Use token bucket, not interval
+		},
+		// Joins: Match Synapse rc_joins local defaults
+		Joins: TokenBucketConfig{
+			Rate:      0.2, // 0.2 joins per second (local rate)
+			BurstSize: 5,   // Allow 5 join burst
 			Interval:  0,
 		},
 	}
 }
 
-// TestRateLimitConfig returns more aggressive limits suitable for tests
+// TestRateLimitConfig returns fast limits suitable for tests while maintaining throttling behavior
 func TestRateLimitConfig() RateLimitConfig {
 	return RateLimitConfig{
 		Enabled: true,
-		// More aggressive limits for tests to prevent CI rate limiting
+		// 10x faster than production but still tests throttling behavior
 		RoomCreation: TokenBucketConfig{
-			Rate:      0, // Disable token bucket
-			BurstSize: 0,
-			Interval:  2 * time.Second, // 2 second minimum interval between operations
+			Rate:      0.5, // 0.5 rooms per second (2 second intervals) - 10x faster than 0.05/sec
+			BurstSize: 2,   // Same burst size for testing
+			Interval:  0,
 		},
 		Messages: TokenBucketConfig{
-			Rate:      0.1, // Slower message rate for tests
-			BurstSize: 5,
+			Rate:      2.0, // 2 messages per second (500ms intervals) - 10x faster than 0.2/sec
+			BurstSize: 10,  // Same burst size for testing
 			Interval:  0,
 		},
 		Invites: TokenBucketConfig{
-			Rate:      0.2,
-			BurstSize: 5,
+			Rate:      3.0, // 3 invites per second - 10x faster than 0.3/sec
+			BurstSize: 10,  // Same burst size for testing
+			Interval:  0,
+		},
+		Registration: TokenBucketConfig{
+			Rate:      1.7, // 1.7 registrations per second - 10x faster than 0.17/sec
+			BurstSize: 3,   // Same burst size for testing
+			Interval:  0,
+		},
+		Joins: TokenBucketConfig{
+			Rate:      2.0, // 2 joins per second - 10x faster than 0.2/sec
+			BurstSize: 5,   // Same burst size for testing
 			Interval:  0,
 		},
 	}
