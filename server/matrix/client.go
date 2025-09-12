@@ -26,7 +26,7 @@ type Error struct {
 
 // Error implements the error interface
 func (e *Error) Error() string {
-	return fmt.Sprintf("Matrix API error: %d %s - %s", e.StatusCode, e.ErrCode, e.ErrMsg)
+	return fmt.Sprintf("matrix API error: %d %s - %s", e.StatusCode, e.ErrCode, e.ErrMsg)
 }
 
 // IsAlreadyJoined checks if the error indicates the user is already in the room
@@ -196,6 +196,20 @@ type Client struct {
 	joinLimiter         *TokenBucket
 }
 
+// waitForRateLimit applies rate limiting for the specified operation
+func (c *Client) waitForRateLimit(limiter *TokenBucket, operation string) error {
+	if c.rateLimitConfig.Enabled && limiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := limiter.Wait(ctx); err != nil {
+			c.logger.LogWarn(operation+" rate limited", "error", err)
+			return errors.Wrap(err, operation+" rate limited")
+		}
+	}
+	return nil
+}
+
 // MessageContent represents the content structure for Matrix messages.
 type MessageContent struct {
 	MsgType       string `json:"msgtype"`
@@ -287,14 +301,8 @@ func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string)
 	}
 
 	// Apply rate limiting for reaction sending
-	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.messageLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Reaction sending rate limited", "error", err)
-			return nil, errors.Wrap(err, "reaction sending rate limited")
-		}
+	if err := c.waitForRateLimit(c.messageLimiter, "Reaction sending"); err != nil {
+		return nil, err
 	}
 
 	// Matrix reaction content structure
@@ -316,14 +324,8 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 	}
 
 	// Apply rate limiting for redaction operations
-	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.messageLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Event redaction rate limited", "error", err)
-			return nil, errors.Wrap(err, "event redaction rate limited")
-		}
+	if err := c.waitForRateLimit(c.messageLimiter, "Event redaction"); err != nil {
+		return nil, err
 	}
 
 	// Empty content for redaction
@@ -500,14 +502,8 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 	}
 
 	// Apply rate limiting for room join operations (rc_joins)
-	if c.rateLimitConfig.Enabled && c.joinLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.joinLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Room join rate limited", "error", err)
-			return errors.Wrap(err, "room join rate limited")
-		}
+	if err := c.waitForRateLimit(c.joinLimiter, "Room join"); err != nil {
+		return err
 	}
 
 	// Use the unified join endpoint that supports both room IDs and aliases
@@ -547,14 +543,8 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	}
 
 	// Apply rate limiting for room join operations (rc_joins)
-	if c.rateLimitConfig.Enabled && c.joinLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.joinLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Room join rate limited", "error", err)
-			return errors.Wrap(err, "room join rate limited")
-		}
+	if err := c.waitForRateLimit(c.joinLimiter, "Room join"); err != nil {
+		return err
 	}
 
 	// Use the unified join endpoint that supports both room IDs and aliases
@@ -599,14 +589,8 @@ func (c *Client) InviteUserToRoom(roomID, userID string) error {
 	}
 
 	// Apply rate limiting for room invite operations
-	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.inviteLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Room invite rate limited", "error", err)
-			return errors.Wrap(err, "room invite rate limited")
-		}
+	if err := c.waitForRateLimit(c.inviteLimiter, "Room invite"); err != nil {
+		return err
 	}
 
 	c.logger.LogDebug("Inviting user to Matrix room", "room_id", roomID, "user_id", userID)
@@ -816,14 +800,8 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 	}
 
 	// Apply rate limiting for room creation
-	if c.rateLimitConfig.Enabled && c.roomCreationLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.roomCreationLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Room creation rate limited", "error", err)
-			return "", errors.Wrap(err, "room creation rate limited")
-		}
+	if err := c.waitForRateLimit(c.roomCreationLimiter, "Room creation"); err != nil {
+		return "", err
 	}
 
 	c.logger.LogDebug("Creating Matrix room", "name", name, "topic", topic, "server_domain", serverDomain)
@@ -1012,14 +990,8 @@ func (c *Client) CreateDirectRoom(ghostUserIDs []string, roomName string) (strin
 	}
 
 	// Apply rate limiting for room creation operations
-	if c.rateLimitConfig.Enabled && c.roomCreationLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.roomCreationLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Direct room creation rate limited", "error", err)
-			return "", errors.Wrap(err, "direct room creation rate limited")
-		}
+	if err := c.waitForRateLimit(c.roomCreationLimiter, "Direct room creation"); err != nil {
+		return "", err
 	}
 
 	c.logger.LogDebug("Creating Matrix DM room", "users", ghostUserIDs)
@@ -1187,14 +1159,8 @@ func (c *Client) CreateGhostUser(mattermostUserID, displayName string, avatarDat
 	}
 
 	// Apply rate limiting for user creation operations
-	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.inviteLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Ghost user creation rate limited", "error", err)
-			return nil, errors.Wrap(err, "ghost user creation rate limited")
-		}
+	if err := c.waitForRateLimit(c.inviteLimiter, "Ghost user creation"); err != nil {
+		return nil, err
 	}
 
 	// Extract server domain from serverURL
@@ -1304,14 +1270,8 @@ func (c *Client) SetDisplayName(userID, displayName string) error {
 	}
 
 	// Apply rate limiting for profile operations
-	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.inviteLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Display name setting rate limited", "error", err)
-			return errors.Wrap(err, "display name setting rate limited")
-		}
+	if err := c.waitForRateLimit(c.inviteLimiter, "Display name setting"); err != nil {
+		return err
 	}
 
 	// Content for the display name event
@@ -1363,14 +1323,8 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 	}
 
 	// Apply rate limiting for profile operations
-	if c.rateLimitConfig.Enabled && c.inviteLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.inviteLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Avatar URL setting rate limited", "error", err)
-			return errors.Wrap(err, "avatar URL setting rate limited")
-		}
+	if err := c.waitForRateLimit(c.inviteLimiter, "Avatar URL setting"); err != nil {
+		return err
 	}
 
 	// Content for the avatar URL event
@@ -1422,14 +1376,8 @@ func (c *Client) UploadMedia(data []byte, filename, contentType string) (string,
 	}
 
 	// Apply rate limiting for media upload operations
-	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.messageLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Media upload rate limited", "error", err)
-			return "", errors.Wrap(err, "media upload rate limited")
-		}
+	if err := c.waitForRateLimit(c.messageLimiter, "Media upload"); err != nil {
+		return "", err
 	}
 
 	// Use the media upload endpoint
@@ -1534,14 +1482,8 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 	}
 
 	// Apply rate limiting for message edit operations
-	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.messageLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Message edit rate limited", "error", err)
-			return nil, errors.Wrap(err, "message edit rate limited")
-		}
+	if err := c.waitForRateLimit(c.messageLimiter, "Message edit"); err != nil {
+		return nil, err
 	}
 
 	// Matrix edit event content structure
@@ -1576,14 +1518,8 @@ func (c *Client) SendMessage(req MessageRequest) (*SendEventResponse, error) {
 	}
 
 	// Apply rate limiting for message sending
-	if c.rateLimitConfig.Enabled && c.messageLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.messageLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("Message sending rate limited", "error", err)
-			return nil, errors.Wrap(err, "message sending rate limited")
-		}
+	if err := c.waitForRateLimit(c.messageLimiter, "Message sending"); err != nil {
+		return nil, err
 	}
 
 	// Validate required fields
@@ -2355,14 +2291,8 @@ func (c *Client) GetServerInfo() (*ServerInfo, error) {
 // RegisterUser creates a regular Matrix user (not a ghost user) with rate limiting
 func (c *Client) RegisterUser(username, password string) (*RegisterResponse, error) {
 	// Apply rate limiting for user registration operations (rc_registration)
-	if c.rateLimitConfig.Enabled && c.registrationLimiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.registrationLimiter.Wait(ctx); err != nil {
-			c.logger.LogWarn("User registration rate limited", "error", err)
-			return nil, errors.Wrap(err, "user registration rate limited")
-		}
+	if err := c.waitForRateLimit(c.registrationLimiter, "User registration"); err != nil {
+		return nil, err
 	}
 
 	// First, try to get registration flows

@@ -21,6 +21,10 @@ const (
 	RateLimitRestricted   RateLimitingMode = "restricted"   // Maximum throttling (slowest, for shared/limited Matrix servers)
 )
 
+// DisabledWaitTime is returned when rate limiting is effectively disabled (rate <= 0)
+// This long duration prevents infinite waiting while clearly indicating disabled state
+const DisabledWaitTime = time.Hour
+
 // RateLimitConfig defines rate limiting configuration for Matrix operations
 type RateLimitConfig struct {
 	// RoomCreation limits for room creation operations (rc_room_creation)
@@ -71,13 +75,17 @@ func NewTokenBucket(config TokenBucketConfig) *TokenBucket {
 	return tb
 }
 
+// isDisabled checks if rate limiting is disabled
+func (tb *TokenBucket) isDisabled() bool {
+	return tb.rate == 0 && tb.burstSize == 0 && tb.interval == 0
+}
+
 // Allow checks if an operation is allowed and consumes a token if so
 func (tb *TokenBucket) Allow() bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
-	// Check for disabled case: rate=0, burstSize=0, interval=0
-	if tb.rate == 0 && tb.burstSize == 0 && tb.interval == 0 {
+	if tb.isDisabled() {
 		return true // Disabled rate limiting allows all operations
 	}
 
@@ -137,8 +145,7 @@ func (tb *TokenBucket) getWaitTime() time.Duration {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
-	// Check for disabled case: rate=0, burstSize=0, interval=0
-	if tb.rate == 0 && tb.burstSize == 0 && tb.interval == 0 {
+	if tb.isDisabled() {
 		return 0 // No waiting needed when disabled
 	}
 
@@ -164,7 +171,7 @@ func (tb *TokenBucket) getWaitTime() time.Duration {
 	// Time to get 1 token
 	tokensNeeded := 1.0 - tb.tokens
 	if tb.rate <= 0 {
-		return time.Hour // Effectively disabled
+		return DisabledWaitTime // Effectively disabled
 	}
 	return time.Duration(tokensNeeded / tb.rate * float64(time.Second))
 }
