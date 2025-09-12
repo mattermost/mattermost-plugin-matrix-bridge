@@ -12,6 +12,7 @@ import (
 // RateLimitingMode represents the different rate limiting strategies available to users
 type RateLimitingMode string
 
+// Rate limiting mode constants define different throttling strategies
 const (
 	RateLimitDisabled     RateLimitingMode = "disabled"     // No rate limiting (maximum performance, risk of 429 errors)
 	RateLimitRelaxed      RateLimitingMode = "relaxed"      // Light throttling (fast, suitable for dedicated Matrix servers)

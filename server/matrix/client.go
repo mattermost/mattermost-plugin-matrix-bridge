@@ -188,12 +188,12 @@ type Client struct {
 	serverDomain string // explicit server domain for testing
 
 	// Rate limiting
-	rateLimitConfig      RateLimitConfig
-	roomCreationLimiter  *TokenBucket
-	messageLimiter       *TokenBucket
-	inviteLimiter        *TokenBucket
-	registrationLimiter  *TokenBucket
-	joinLimiter          *TokenBucket
+	rateLimitConfig     RateLimitConfig
+	roomCreationLimiter *TokenBucket
+	messageLimiter      *TokenBucket
+	inviteLimiter       *TokenBucket
+	registrationLimiter *TokenBucket
+	joinLimiter         *TokenBucket
 }
 
 // MessageContent represents the content structure for Matrix messages.

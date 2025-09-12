@@ -518,59 +518,6 @@ func (mc *Container) makeMatrixRequest(method, endpoint string, data any) (any, 
 	return result, nil
 }
 
-// makeMatrixRequestNoAuth makes an unauthenticated request to the Matrix server
-func (mc *Container) makeMatrixRequestNoAuth(method, endpoint string, data any) (any, error) {
-	var body io.Reader
-
-	if data != nil {
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			return nil, err
-		}
-		body = strings.NewReader(string(jsonData))
-	}
-
-	req, err := http.NewRequest(method, mc.ServerURL+endpoint, body)
-	if err != nil {
-		return nil, err
-	}
-
-	if data != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode >= 400 {
-		//nolint:staticcheck // Error message capitalization is intentional for Matrix API errors
-		return nil, fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(responseBody))
-	}
-
-	if len(responseBody) == 0 {
-		return nil, nil
-	}
-
-	var result any
-	err = json.Unmarshal(responseBody, &result)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
-}
-
 // generateSynapseConfig generates a basic Synapse configuration
 func generateSynapseConfig(config MatrixTestConfig) string {
 	return fmt.Sprintf(`

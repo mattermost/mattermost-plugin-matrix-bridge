@@ -116,7 +116,7 @@ func TestClient_ConcurrentMessageSending_RateLimiting(t *testing.T) {
 	// Send multiple messages concurrently
 	for i := 0; i < numMessages; i++ {
 		wg.Add(1)
-		go func(msgNum int) {
+		go func(_ int) {
 			defer wg.Done()
 			start := time.Now()
 			_, err := client.SendMessage(req)
@@ -434,6 +434,6 @@ func BenchmarkClient_SendMessage_WithRateLimit(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		// We expect this to fail with network error, but we're measuring the overhead
 		// of rate limiting checks, not actual network calls
-		client.SendMessage(req)
+		_, _ = client.SendMessage(req)
 	}
 }

@@ -118,7 +118,7 @@ func TestClient_MessageSpamLoad(t *testing.T) {
 	// Launch spammer goroutines
 	for i := 0; i < numSpammers; i++ {
 		wg.Add(1)
-		go func(spammerID int) {
+		go func(_ int) {
 			defer wg.Done()
 			for j := 0; j < messagesPerSpammer && ctx.Err() == nil; j++ {
 				atomic.AddInt64(&totalAttempts, 1)
@@ -204,7 +204,7 @@ func TestClient_RoomCreationSpamLoad(t *testing.T) {
 	// Launch room creator goroutines
 	for i := 0; i < numCreators; i++ {
 		wg.Add(1)
-		go func(creatorID int) {
+		go func(_ int) {
 			defer wg.Done()
 			for j := 0; j < roomsPerCreator && ctx.Err() == nil; j++ {
 				atomic.AddInt64(&totalAttempts, 1)
@@ -287,7 +287,7 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 	// Launch mixed operation workers
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func(_ int) {
 			defer wg.Done()
 
 			for j := 0; j < operationsPerWorker && ctx.Err() == nil; j++ {
@@ -388,7 +388,7 @@ func TestTokenBucket_StressTest(t *testing.T) {
 	// Launch stress test goroutines
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
-		go func(goroutineID int) {
+		go func(_ int) {
 			defer wg.Done()
 
 			for j := 0; j < operationsPerGoroutine; j++ {
@@ -403,9 +403,10 @@ func TestTokenBucket_StressTest(t *testing.T) {
 				err := tb.Wait(opCtx)
 				opCancel()
 
-				if err == nil {
+				switch err {
+				case nil:
 					atomic.AddInt64(&allowedOperations, 1)
-				} else if err == context.DeadlineExceeded {
+				case context.DeadlineExceeded:
 					atomic.AddInt64(&timeoutOperations, 1)
 				}
 
