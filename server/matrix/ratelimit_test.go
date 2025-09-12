@@ -265,19 +265,250 @@ func TestTestRateLimitConfig(t *testing.T) {
 	config := TestRateLimitConfig()
 
 	assert.True(t, config.Enabled, "Test config should be enabled")
-	// Test config uses fast rates (10x faster than production) for efficient testing
-	assert.Equal(t, 0.5, config.RoomCreation.Rate, "Test config should have 0.5 rooms per second")
-	assert.Equal(t, 2, config.RoomCreation.BurstSize, "Test config should have burst of 2 rooms")
+	// Test config now uses Relaxed mode (5x faster than Synapse defaults) for efficient testing
+	assert.Equal(t, 0.25, config.RoomCreation.Rate, "Test config should have 0.25 rooms per second")
+	assert.Equal(t, 3, config.RoomCreation.BurstSize, "Test config should have burst of 3 rooms")
 	assert.Equal(t, time.Duration(0), config.RoomCreation.Interval, "Test config should use token bucket for room creation")
-	assert.Equal(t, 2.0, config.Messages.Rate, "Test config should allow 2 messages per second")
-	assert.Equal(t, 10, config.Messages.BurstSize, "Test config should have burst of 10 messages")
-	assert.Equal(t, 3.0, config.Invites.Rate, "Test config should allow 3 invites per second")
-	assert.Equal(t, 10, config.Invites.BurstSize, "Test config should have burst of 10 invites")
-	assert.Equal(t, 1.7, config.Registration.Rate, "Test config should allow 1.7 registrations per second")
-	assert.Equal(t, 3, config.Registration.BurstSize, "Test config should have burst of 3 registrations")
+	assert.Equal(t, 1.0, config.Messages.Rate, "Test config should allow 1 messages per second")
+	assert.Equal(t, 15, config.Messages.BurstSize, "Test config should have burst of 15 messages")
+	assert.Equal(t, 1.5, config.Invites.Rate, "Test config should allow 1.5 invites per second")
+	assert.Equal(t, 15, config.Invites.BurstSize, "Test config should have burst of 15 invites")
+	assert.Equal(t, 0.85, config.Registration.Rate, "Test config should allow 0.85 registrations per second")
+	assert.Equal(t, 5, config.Registration.BurstSize, "Test config should have burst of 5 registrations")
 	assert.Equal(t, time.Duration(0), config.Registration.Interval, "Test config should use token bucket for registration")
-	assert.Equal(t, 2.0, config.Joins.Rate, "Test config should allow 2 joins per second")
-	assert.Equal(t, 5, config.Joins.BurstSize, "Test config should have burst of 5 joins")
+	assert.Equal(t, 1.0, config.Joins.Rate, "Test config should allow 1 joins per second")
+	assert.Equal(t, 8, config.Joins.BurstSize, "Test config should have burst of 8 joins")
+}
+
+func TestGetRateLimitConfigByMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     RateLimitingMode
+		validate func(t *testing.T, config RateLimitConfig)
+	}{
+		{
+			name: "Disabled mode",
+			mode: RateLimitDisabled,
+			validate: func(t *testing.T, config RateLimitConfig) {
+				assert.False(t, config.Enabled, "Disabled mode should have rate limiting disabled")
+			},
+		},
+		{
+			name: "Relaxed mode",
+			mode: RateLimitRelaxed,
+			validate: func(t *testing.T, config RateLimitConfig) {
+				assert.True(t, config.Enabled, "Relaxed mode should be enabled")
+				// Should be 5x faster than Synapse defaults
+				assert.Equal(t, 0.25, config.RoomCreation.Rate, "Relaxed mode should have 0.25 rooms/sec")
+				assert.Equal(t, 1.0, config.Messages.Rate, "Relaxed mode should have 1.0 messages/sec")
+				assert.Equal(t, 1.5, config.Invites.Rate, "Relaxed mode should have 1.5 invites/sec")
+				assert.Equal(t, 0.85, config.Registration.Rate, "Relaxed mode should have 0.85 registrations/sec")
+				assert.Equal(t, 1.0, config.Joins.Rate, "Relaxed mode should have 1.0 joins/sec")
+			},
+		},
+		{
+			name: "Automatic mode (default)",
+			mode: RateLimitAutomatic,
+			validate: func(t *testing.T, config RateLimitConfig) {
+				assert.True(t, config.Enabled, "Automatic mode should be enabled")
+				// Should be 2x faster than Synapse defaults
+				assert.Equal(t, 0.1, config.RoomCreation.Rate, "Automatic mode should have 0.1 rooms/sec")
+				assert.Equal(t, 0.4, config.Messages.Rate, "Automatic mode should have 0.4 messages/sec")
+				assert.Equal(t, 0.6, config.Invites.Rate, "Automatic mode should have 0.6 invites/sec")
+				assert.Equal(t, 0.34, config.Registration.Rate, "Automatic mode should have 0.34 registrations/sec")
+				assert.Equal(t, 0.4, config.Joins.Rate, "Automatic mode should have 0.4 joins/sec")
+			},
+		},
+		{
+			name: "Conservative mode",
+			mode: RateLimitConservative,
+			validate: func(t *testing.T, config RateLimitConfig) {
+				assert.True(t, config.Enabled, "Conservative mode should be enabled")
+				// Should match Synapse defaults exactly
+				defaultConfig := DefaultRateLimitConfig()
+				assert.Equal(t, defaultConfig.RoomCreation.Rate, config.RoomCreation.Rate, "Conservative should match Synapse room creation rate")
+				assert.Equal(t, defaultConfig.Messages.Rate, config.Messages.Rate, "Conservative should match Synapse message rate")
+				assert.Equal(t, defaultConfig.Invites.Rate, config.Invites.Rate, "Conservative should match Synapse invite rate")
+				assert.Equal(t, defaultConfig.Registration.Rate, config.Registration.Rate, "Conservative should match Synapse registration rate")
+				assert.Equal(t, defaultConfig.Joins.Rate, config.Joins.Rate, "Conservative should match Synapse join rate")
+			},
+		},
+		{
+			name: "Restricted mode",
+			mode: RateLimitRestricted,
+			validate: func(t *testing.T, config RateLimitConfig) {
+				assert.True(t, config.Enabled, "Restricted mode should be enabled")
+				// Should be 2x slower than Synapse defaults
+				assert.Equal(t, 0.025, config.RoomCreation.Rate, "Restricted mode should have 0.025 rooms/sec")
+				assert.Equal(t, 0.1, config.Messages.Rate, "Restricted mode should have 0.1 messages/sec")
+				assert.Equal(t, 0.15, config.Invites.Rate, "Restricted mode should have 0.15 invites/sec")
+				assert.Equal(t, 0.085, config.Registration.Rate, "Restricted mode should have 0.085 registrations/sec")
+				assert.Equal(t, 0.1, config.Joins.Rate, "Restricted mode should have 0.1 joins/sec")
+			},
+		},
+		{
+			name: "Unknown mode defaults to automatic",
+			mode: RateLimitingMode("unknown"),
+			validate: func(t *testing.T, config RateLimitConfig) {
+				automaticConfig := GetRateLimitConfigByMode(RateLimitAutomatic)
+				assert.Equal(t, automaticConfig, config, "Unknown mode should default to automatic")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := GetRateLimitConfigByMode(tt.mode)
+			tt.validate(t, config)
+		})
+	}
+}
+
+func TestRateLimitingModePerformanceOrder(t *testing.T) {
+	// Test that modes are ordered from fastest to slowest for messages
+	configs := map[string]RateLimitConfig{
+		"disabled":     GetRateLimitConfigByMode(RateLimitDisabled),
+		"relaxed":      GetRateLimitConfigByMode(RateLimitRelaxed),
+		"automatic":    GetRateLimitConfigByMode(RateLimitAutomatic),
+		"conservative": GetRateLimitConfigByMode(RateLimitConservative),
+		"restricted":   GetRateLimitConfigByMode(RateLimitRestricted),
+	}
+
+	// Disabled should have no rate (effectively infinite)
+	assert.False(t, configs["disabled"].Enabled, "Disabled should not be enabled")
+
+	// For enabled modes, verify rate ordering (higher rate = faster)
+	assert.Greater(t, configs["relaxed"].Messages.Rate, configs["automatic"].Messages.Rate,
+		"Relaxed should be faster than automatic")
+	assert.Greater(t, configs["automatic"].Messages.Rate, configs["conservative"].Messages.Rate,
+		"Automatic should be faster than conservative")
+	assert.Greater(t, configs["conservative"].Messages.Rate, configs["restricted"].Messages.Rate,
+		"Conservative should be faster than restricted")
+
+	// Same ordering should apply to room creation
+	assert.Greater(t, configs["relaxed"].RoomCreation.Rate, configs["automatic"].RoomCreation.Rate,
+		"Relaxed room creation should be faster than automatic")
+	assert.Greater(t, configs["automatic"].RoomCreation.Rate, configs["conservative"].RoomCreation.Rate,
+		"Automatic room creation should be faster than conservative")
+	assert.Greater(t, configs["conservative"].RoomCreation.Rate, configs["restricted"].RoomCreation.Rate,
+		"Conservative room creation should be faster than restricted")
+}
+
+func TestValidateRateLimitingMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		mode     RateLimitingMode
+		expected bool
+	}{
+		{
+			name:     "Valid disabled mode",
+			mode:     RateLimitDisabled,
+			expected: true,
+		},
+		{
+			name:     "Valid relaxed mode",
+			mode:     RateLimitRelaxed,
+			expected: true,
+		},
+		{
+			name:     "Valid automatic mode",
+			mode:     RateLimitAutomatic,
+			expected: true,
+		},
+		{
+			name:     "Valid conservative mode",
+			mode:     RateLimitConservative,
+			expected: true,
+		},
+		{
+			name:     "Valid restricted mode",
+			mode:     RateLimitRestricted,
+			expected: true,
+		},
+		{
+			name:     "Invalid empty mode",
+			mode:     RateLimitingMode(""),
+			expected: false,
+		},
+		{
+			name:     "Invalid unknown mode",
+			mode:     RateLimitingMode("unknown"),
+			expected: false,
+		},
+		{
+			name:     "Invalid random string",
+			mode:     RateLimitingMode("totally_invalid"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ValidateRateLimitingMode(tt.mode)
+			assert.Equal(t, tt.expected, result, "ValidateRateLimitingMode() mismatch for mode: %v", tt.mode)
+		})
+	}
+}
+
+func TestParseRateLimitingMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected RateLimitingMode
+	}{
+		{
+			name:     "Valid disabled mode",
+			input:    "disabled",
+			expected: RateLimitDisabled,
+		},
+		{
+			name:     "Valid relaxed mode",
+			input:    "relaxed",
+			expected: RateLimitRelaxed,
+		},
+		{
+			name:     "Valid automatic mode",
+			input:    "automatic",
+			expected: RateLimitAutomatic,
+		},
+		{
+			name:     "Valid conservative mode",
+			input:    "conservative",
+			expected: RateLimitConservative,
+		},
+		{
+			name:     "Valid restricted mode",
+			input:    "restricted",
+			expected: RateLimitRestricted,
+		},
+		{
+			name:     "Empty string defaults to automatic",
+			input:    "",
+			expected: RateLimitAutomatic,
+		},
+		{
+			name:     "Invalid string defaults to automatic",
+			input:    "unknown",
+			expected: RateLimitAutomatic,
+		},
+		{
+			name:     "Random string defaults to automatic",
+			input:    "totally_invalid",
+			expected: RateLimitAutomatic,
+		},
+		{
+			name:     "Case sensitive - uppercase fails",
+			input:    "AUTOMATIC",
+			expected: RateLimitAutomatic,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ParseRateLimitingMode(tt.input)
+			assert.Equal(t, tt.expected, result, "ParseRateLimitingMode() mismatch for input: %v", tt.input)
+		})
+	}
 }
 
 func TestIsRateLimitError(t *testing.T) {

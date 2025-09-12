@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/pkg/errors"
 )
 
@@ -26,6 +27,7 @@ type configuration struct {
 	MatrixHSToken        string `json:"matrix_hs_token"`
 	EnableSync           bool   `json:"enable_sync"`
 	MatrixUsernamePrefix string `json:"matrix_username_prefix"`
+	RateLimitingMode     string `json:"rate_limiting_mode"`
 }
 
 // Clone shallow copies the configuration. Your implementation may require a deep copy if
@@ -110,6 +112,11 @@ func (p *Plugin) validateConfiguration(config *configuration) error {
 			return errors.New("Matrix Homeserver Token is required when sync is enabled")
 		}
 	}
+
+	// Validate and normalize rate limiting mode using matrix package
+	parsedMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
+	config.RateLimitingMode = string(parsedMode)
+
 	return nil
 }
 

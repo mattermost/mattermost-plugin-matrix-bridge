@@ -9,6 +9,17 @@ import (
 	"github.com/pkg/errors"
 )
 
+// RateLimitingMode represents the different rate limiting strategies available to users
+type RateLimitingMode string
+
+const (
+	RateLimitDisabled     RateLimitingMode = "disabled"     // No rate limiting (maximum performance, risk of 429 errors)
+	RateLimitRelaxed      RateLimitingMode = "relaxed"      // Light throttling (fast, suitable for dedicated Matrix servers)
+	RateLimitAutomatic    RateLimitingMode = "automatic"    // Balanced throttling (good performance with safety) - DEFAULT
+	RateLimitConservative RateLimitingMode = "conservative" // Heavy throttling (safest, matches Synapse defaults exactly)
+	RateLimitRestricted   RateLimitingMode = "restricted"   // Maximum throttling (slowest, for shared/limited Matrix servers)
+)
+
 // RateLimitConfig defines rate limiting configuration for Matrix operations
 type RateLimitConfig struct {
 	// RoomCreation limits for room creation operations (rc_room_creation)
@@ -196,35 +207,149 @@ func DefaultRateLimitConfig() RateLimitConfig {
 
 // TestRateLimitConfig returns fast limits suitable for tests while maintaining throttling behavior
 func TestRateLimitConfig() RateLimitConfig {
-	return RateLimitConfig{
-		Enabled: true,
-		// 10x faster than production but still tests throttling behavior
-		RoomCreation: TokenBucketConfig{
-			Rate:      0.5, // 0.5 rooms per second (2 second intervals) - 10x faster than 0.05/sec
-			BurstSize: 2,   // Same burst size for testing
-			Interval:  0,
-		},
-		Messages: TokenBucketConfig{
-			Rate:      2.0, // 2 messages per second (500ms intervals) - 10x faster than 0.2/sec
-			BurstSize: 10,  // Same burst size for testing
-			Interval:  0,
-		},
-		Invites: TokenBucketConfig{
-			Rate:      3.0, // 3 invites per second - 10x faster than 0.3/sec
-			BurstSize: 10,  // Same burst size for testing
-			Interval:  0,
-		},
-		Registration: TokenBucketConfig{
-			Rate:      1.7, // 1.7 registrations per second - 10x faster than 0.17/sec
-			BurstSize: 3,   // Same burst size for testing
-			Interval:  0,
-		},
-		Joins: TokenBucketConfig{
-			Rate:      2.0, // 2 joins per second - 10x faster than 0.2/sec
-			BurstSize: 5,   // Same burst size for testing
-			Interval:  0,
-		},
+	// Use relaxed mode for testing - fast enough for tests but still validates throttling
+	return GetRateLimitConfigByMode(RateLimitRelaxed)
+}
+
+// GetRateLimitConfigByMode returns a rate limit configuration based on the specified mode
+func GetRateLimitConfigByMode(mode RateLimitingMode) RateLimitConfig {
+	switch mode {
+	case RateLimitDisabled:
+		return RateLimitConfig{
+			Enabled: false, // Disable all rate limiting
+		}
+
+	case RateLimitRelaxed:
+		// 5x faster than Synapse defaults - for dedicated Matrix servers
+		return RateLimitConfig{
+			Enabled: true,
+			RoomCreation: TokenBucketConfig{
+				Rate:      0.25, // 0.25 rooms per second (4 second intervals)
+				BurstSize: 3,    // Allow creating 3 rooms quickly
+				Interval:  0,
+			},
+			Messages: TokenBucketConfig{
+				Rate:      1.0, // 1 message per second
+				BurstSize: 15,  // Allow 15 message burst
+				Interval:  0,
+			},
+			Invites: TokenBucketConfig{
+				Rate:      1.5, // 1.5 invites per second
+				BurstSize: 15,  // Allow 15 invite burst
+				Interval:  0,
+			},
+			Registration: TokenBucketConfig{
+				Rate:      0.85, // 0.85 registrations per second
+				BurstSize: 5,    // Allow 5 registration burst
+				Interval:  0,
+			},
+			Joins: TokenBucketConfig{
+				Rate:      1.0, // 1 join per second
+				BurstSize: 8,   // Allow 8 join burst
+				Interval:  0,
+			},
+		}
+
+	case RateLimitAutomatic:
+		// 2x faster than Synapse defaults - balanced performance with safety
+		return RateLimitConfig{
+			Enabled: true,
+			RoomCreation: TokenBucketConfig{
+				Rate:      0.1, // 0.1 rooms per second (10 second intervals)
+				BurstSize: 3,   // Allow creating 3 rooms quickly
+				Interval:  0,
+			},
+			Messages: TokenBucketConfig{
+				Rate:      0.4, // 0.4 messages per second
+				BurstSize: 12,  // Allow 12 message burst
+				Interval:  0,
+			},
+			Invites: TokenBucketConfig{
+				Rate:      0.6, // 0.6 invites per second
+				BurstSize: 12,  // Allow 12 invite burst
+				Interval:  0,
+			},
+			Registration: TokenBucketConfig{
+				Rate:      0.34, // 0.34 registrations per second
+				BurstSize: 4,    // Allow 4 registration burst
+				Interval:  0,
+			},
+			Joins: TokenBucketConfig{
+				Rate:      0.4, // 0.4 joins per second
+				BurstSize: 7,   // Allow 7 join burst
+				Interval:  0,
+			},
+		}
+
+	case RateLimitConservative:
+		// Match Synapse defaults exactly - maximum safety
+		return DefaultRateLimitConfig()
+
+	case RateLimitRestricted:
+		// 2x slower than Synapse defaults - for shared/limited Matrix servers
+		return RateLimitConfig{
+			Enabled: true,
+			RoomCreation: TokenBucketConfig{
+				Rate:      0.025, // 0.025 rooms per second (40 second intervals)
+				BurstSize: 1,     // Allow creating 1 room only
+				Interval:  0,
+			},
+			Messages: TokenBucketConfig{
+				Rate:      0.1, // 0.1 messages per second
+				BurstSize: 5,   // Allow 5 message burst
+				Interval:  0,
+			},
+			Invites: TokenBucketConfig{
+				Rate:      0.15, // 0.15 invites per second
+				BurstSize: 5,    // Allow 5 invite burst
+				Interval:  0,
+			},
+			Registration: TokenBucketConfig{
+				Rate:      0.085, // 0.085 registrations per second
+				BurstSize: 2,     // Allow 2 registration burst
+				Interval:  0,
+			},
+			Joins: TokenBucketConfig{
+				Rate:      0.1, // 0.1 joins per second
+				BurstSize: 3,   // Allow 3 join burst
+				Interval:  0,
+			},
+		}
+
+	default:
+		// Default to automatic mode for unknown values
+		return GetRateLimitConfigByMode(RateLimitAutomatic)
 	}
+}
+
+// ValidateRateLimitingMode validates a rate limiting mode and returns true if valid
+func ValidateRateLimitingMode(mode RateLimitingMode) bool {
+	validModes := []RateLimitingMode{
+		RateLimitDisabled,
+		RateLimitRelaxed,
+		RateLimitAutomatic,
+		RateLimitConservative,
+		RateLimitRestricted,
+	}
+
+	for _, validMode := range validModes {
+		if mode == validMode {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseRateLimitingMode parses a string to RateLimitingMode with automatic default fallback
+func ParseRateLimitingMode(modeStr string) RateLimitingMode {
+	mode := RateLimitingMode(modeStr)
+
+	// Return default for empty or invalid modes
+	if modeStr == "" || !ValidateRateLimitingMode(mode) {
+		return RateLimitAutomatic
+	}
+
+	return mode
 }
 
 // IsRateLimitError checks if an error is a Matrix 429 rate limit error

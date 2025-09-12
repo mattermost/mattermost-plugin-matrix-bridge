@@ -509,7 +509,10 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 
 	// Verify that rate limiting is working as designed
 	assert.Greater(t, immediateCount, 0, "Should allow some immediate messages (burst)")
-	assert.GreaterOrEqual(t, throttledCount, rapidOperations/2, "Should throttle at least half of rapid messages")
+	// With current test config (1.0 msgs/sec, burst 15), we expect most messages to be immediate
+	// and only messages beyond the burst to be throttled
+	expectedThrottled := max(0, rapidOperations-config.Messages.BurstSize)
+	assert.GreaterOrEqual(t, throttledCount, expectedThrottled, "Should throttle messages beyond burst capacity")
 
 	// Most importantly: if we were actually hitting a Matrix server, these delays
 	// should prevent 429 M_LIMIT_EXCEEDED errors because we're self-limiting

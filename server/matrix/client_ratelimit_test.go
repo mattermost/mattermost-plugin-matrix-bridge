@@ -152,12 +152,7 @@ func TestClient_ConcurrentMessageSending_RateLimiting(t *testing.T) {
 
 func TestClient_RateLimiting_Disabled(t *testing.T) {
 	// Test that when rate limiting is disabled, operations are immediate
-	config := RateLimitConfig{
-		Enabled:      false,                                        // Disabled
-		Messages:     TokenBucketConfig{Interval: 1 * time.Second}, // Would be restrictive if enabled
-		RoomCreation: TokenBucketConfig{Interval: 1 * time.Second}, // Would be restrictive if enabled
-		Invites:      TokenBucketConfig{Interval: 1 * time.Second}, // Would be restrictive if enabled
-	}
+	config := GetRateLimitConfigByMode(RateLimitDisabled)
 
 	logger := NewTestLogger(t)
 	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
@@ -423,16 +418,8 @@ func BenchmarkTokenBucket_Allow_Token(b *testing.B) {
 }
 
 func BenchmarkClient_SendMessage_WithRateLimit(b *testing.B) {
-	config := RateLimitConfig{
-		Enabled: true,
-		Messages: TokenBucketConfig{
-			Rate:      1000000.0, // Very permissive for benchmarking
-			BurstSize: 1000000,
-			Interval:  0,
-		},
-		RoomCreation: TokenBucketConfig{Rate: 1000000, BurstSize: 1000000},
-		Invites:      TokenBucketConfig{Rate: 1000000, BurstSize: 1000000},
-	}
+	// Use disabled rate limiting for pure performance benchmarking
+	config := GetRateLimitConfigByMode(RateLimitDisabled)
 
 	logger := NewTestLogger(b)
 	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
