@@ -91,11 +91,11 @@ func TestClient_MessageSpamLoad(t *testing.T) {
 	config := TestRateLimitConfig()
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	req := MessageRequest{
-		RoomID:      "!spam-test:matrix.org",
-		GhostUserID: "@spammer:matrix.org",
+		RoomID:      "!spam-test:example.invalid",
+		GhostUserID: "@spammer:example.invalid",
 		Message:     "Spam message content",
 	}
 
@@ -184,7 +184,7 @@ func TestClient_RoomCreationSpamLoad(t *testing.T) {
 	config := TestRateLimitConfig()
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	const numCreators = 10
 	const roomsPerCreator = 5
@@ -212,7 +212,7 @@ func TestClient_RoomCreationSpamLoad(t *testing.T) {
 				roomName := func() string { return "Spam Room" }() // Use closure to avoid name conflicts
 
 				start := time.Now()
-				_, err := client.CreateRoom(roomName, "", "test.matrix.org", true, "")
+				_, err := client.CreateRoom(roomName, "", "test.example.invalid", true, "")
 				elapsed := time.Since(start)
 
 				if err != nil {
@@ -266,7 +266,7 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 	config := TestRateLimitConfig()
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	const numWorkers = 15
 	const operationsPerWorker = 10
@@ -296,7 +296,7 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 					// Room creation (less frequent)
 					atomic.AddInt64(&roomAttempts, 1)
 					start := time.Now()
-					_, err := client.CreateRoom("Mixed Load Room", "", "test.matrix.org", true, "")
+					_, err := client.CreateRoom("Mixed Load Room", "", "test.example.invalid", true, "")
 					elapsed := time.Since(start)
 
 					if err != nil && elapsed > 200*time.Millisecond {
@@ -307,8 +307,8 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 					atomic.AddInt64(&messageAttempts, 1)
 					start := time.Now()
 					_, err := client.SendMessage(MessageRequest{
-						RoomID:      "!mixed-load:matrix.org",
-						GhostUserID: "@mixed-user:matrix.org",
+						RoomID:      "!mixed-load:example.invalid",
+						GhostUserID: "@mixed-user:example.invalid",
 						Message:     "Mixed load test message",
 					})
 					elapsed := time.Since(start)
@@ -451,7 +451,7 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 	// Use standard test config which provides fast but consistent throttling validation
 	config := TestRateLimitConfig()
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	// Calculate expected timing thresholds from actual config
 	var expectedThrottleDelay time.Duration
@@ -471,8 +471,8 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 
 	// Test rapid message sending (what was failing)
 	messageReq := MessageRequest{
-		RoomID:      "!integration-test:matrix.org",
-		GhostUserID: "@integration-test:matrix.org",
+		RoomID:      "!integration-test:example.invalid",
+		GhostUserID: "@integration-test:example.invalid",
 		Message:     "Integration test message",
 	}
 

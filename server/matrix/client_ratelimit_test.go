@@ -24,11 +24,11 @@ func TestClient_SendMessage_RateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	req := MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Test message",
 	}
 
@@ -66,11 +66,11 @@ func TestClient_CreateRoom_RateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	// First room creation should succeed quickly
 	start := time.Now()
-	_, err := client.CreateRoom("Test Room 1", "", "test.matrix.org", true, "")
+	_, err := client.CreateRoom("Test Room 1", "", "test.example.invalid", true, "")
 	elapsed := time.Since(start)
 
 	// We expect this to fail with a network error since we're not actually connecting
@@ -79,7 +79,7 @@ func TestClient_CreateRoom_RateLimiting(t *testing.T) {
 
 	// Second room creation should be rate limited
 	start = time.Now()
-	_, err = client.CreateRoom("Test Room 2", "", "test.matrix.org", true, "")
+	_, err = client.CreateRoom("Test Room 2", "", "test.example.invalid", true, "")
 	elapsed = time.Since(start)
 
 	assert.Error(t, err, "Expected network error")
@@ -101,11 +101,11 @@ func TestClient_ConcurrentMessageSending_RateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	req := MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Concurrent test message",
 	}
 
@@ -155,11 +155,11 @@ func TestClient_RateLimiting_Disabled(t *testing.T) {
 	config := GetRateLimitConfigByMode(RateLimitDisabled)
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	req := MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Test message",
 	}
 
@@ -188,11 +188,11 @@ func TestClient_RateLimiting_ContextTimeout(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	req := MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Test message",
 	}
 
@@ -233,11 +233,11 @@ func TestClient_TokenBucketBurstBehavior(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	req := MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Burst test message",
 	}
 
@@ -279,13 +279,13 @@ func TestClient_MixedOperations_IndependentRateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	// Send message (consumes message rate limit)
 	start := time.Now()
 	_, err := client.SendMessage(MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Test message",
 	})
 	elapsed := time.Since(start)
@@ -294,7 +294,7 @@ func TestClient_MixedOperations_IndependentRateLimiting(t *testing.T) {
 
 	// Create room immediately after (should not be affected by message rate limit)
 	start = time.Now()
-	_, err = client.CreateRoom("Test Room", "", "test.matrix.org", true, "")
+	_, err = client.CreateRoom("Test Room", "", "test.example.invalid", true, "")
 	elapsed = time.Since(start)
 	assert.Error(t, err)
 	assert.Less(t, elapsed, 30*time.Millisecond, "Room creation should not be affected by message rate limit")
@@ -302,8 +302,8 @@ func TestClient_MixedOperations_IndependentRateLimiting(t *testing.T) {
 	// Second message should be rate limited
 	start = time.Now()
 	_, err = client.SendMessage(MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Second message",
 	})
 	elapsed = time.Since(start)
@@ -312,7 +312,7 @@ func TestClient_MixedOperations_IndependentRateLimiting(t *testing.T) {
 
 	// Second room creation should be rate limited (but differently than messages)
 	start = time.Now()
-	_, err = client.CreateRoom("Test Room 2", "", "test.matrix.org", true, "")
+	_, err = client.CreateRoom("Test Room 2", "", "test.example.invalid", true, "")
 	elapsed = time.Since(start)
 	assert.Error(t, err)
 	assert.GreaterOrEqual(t, elapsed, 80*time.Millisecond, "Second room creation should be rate limited with 200ms interval")
@@ -324,7 +324,7 @@ func TestClient_RateLimitError_Detection(t *testing.T) {
 
 	config := TestRateLimitConfig() // Use standard test config
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	// Verify that rate limiters are properly initialized
 	assert.NotNil(t, client.messageLimiter, "Message limiter should be initialized")
@@ -422,11 +422,11 @@ func BenchmarkClient_SendMessage_WithRateLimit(b *testing.B) {
 	config := GetRateLimitConfigByMode(RateLimitDisabled)
 
 	logger := NewTestLogger(b)
-	client := NewClientWithLoggerAndRateLimit("https://test.matrix.org", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
 	req := MessageRequest{
-		RoomID:      "!test:matrix.org",
-		GhostUserID: "@test:matrix.org",
+		RoomID:      "!test:example.invalid",
+		GhostUserID: "@test:example.invalid",
 		Message:     "Benchmark message",
 	}
 
