@@ -57,11 +57,12 @@ func (suite *PluginIntegrationTestSuite) SetupTest() {
 	suite.plugin.logger = &testLogger{t: suite.T()}
 
 	// Initialize Matrix client
-	suite.plugin.matrixClient = matrix.NewClientWithLogger(
+	suite.plugin.matrixClient = matrix.NewClientWithLoggerAndRateLimit(
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		suite.plugin.remoteID,
 		matrix.NewTestLogger(suite.T()),
+		matrix.TestRateLimitConfig(),
 	)
 	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
 

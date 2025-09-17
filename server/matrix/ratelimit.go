@@ -213,10 +213,10 @@ func DefaultRateLimitConfig() RateLimitConfig {
 	}
 }
 
-// TestRateLimitConfig returns fast limits suitable for tests while maintaining throttling behavior
+// TestRateLimitConfig returns conservative limits suitable for tests to avoid Matrix server rate limits
 func TestRateLimitConfig() RateLimitConfig {
-	// Use relaxed mode for testing - fast enough for tests but still validates throttling
-	return GetRateLimitConfigByMode(RateLimitRelaxed)
+	// Use conservative mode for testing - matches Synapse defaults to avoid 429 errors
+	return GetRateLimitConfigByMode(RateLimitConservative)
 }
 
 // GetRateLimitConfigByMode returns a rate limit configuration based on the specified mode

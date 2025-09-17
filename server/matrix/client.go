@@ -244,16 +244,6 @@ type SendEventResponse struct {
 	EventID string `json:"event_id"`
 }
 
-// NewClient creates a new Matrix client with the given server URL, application service token, and remote ID.
-func NewClient(serverURL, asToken, remoteID string, api plugin.API) *Client {
-	return NewClientWithRateLimit(serverURL, asToken, remoteID, api, DefaultRateLimitConfig())
-}
-
-// NewClientWithLogger creates a new Matrix client with a custom logger (useful for testing).
-func NewClientWithLogger(serverURL, asToken, remoteID string, logger Logger) *Client {
-	return NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, logger, DefaultRateLimitConfig())
-}
-
 // NewClientWithRateLimit creates a new Matrix client with custom rate limiting.
 func NewClientWithRateLimit(serverURL, asToken, remoteID string, api plugin.API, rateLimitConfig RateLimitConfig) *Client {
 	return NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, NewAPILogger(api), rateLimitConfig)

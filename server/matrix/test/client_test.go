@@ -446,11 +446,12 @@ func BenchmarkMatrixClientOperations(b *testing.B) {
 func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 	suite.Run("EmptyTokenClient", func() {
 		// Test client with empty token
-		emptyTokenClient := matrix.NewClientWithLogger(
+		emptyTokenClient := matrix.NewClientWithLoggerAndRateLimit(
 			suite.matrixContainer.ServerURL,
 			"", // Empty token
 			"test-remote-id",
 			matrix.NewTestLogger(suite.T()),
+			matrix.TestRateLimitConfig(),
 		)
 
 		// Should fail operations that require authentication
@@ -461,11 +462,12 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 
 	suite.Run("InvalidServerURL", func() {
 		// Test client with invalid server URL
-		invalidURLClient := matrix.NewClientWithLogger(
+		invalidURLClient := matrix.NewClientWithLoggerAndRateLimit(
 			"http://nonexistent.invalid:1234",
 			suite.matrixContainer.ASToken,
 			"test-remote-id",
 			matrix.NewTestLogger(suite.T()),
+			matrix.TestRateLimitConfig(),
 		)
 
 		err := invalidURLClient.TestConnection()
@@ -563,11 +565,12 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 
 	suite.Run("NetworkErrorHandling", func() {
 		// Test with client pointing to a port that definitely doesn't exist
-		networkFailClient := matrix.NewClientWithLogger(
+		networkFailClient := matrix.NewClientWithLoggerAndRateLimit(
 			"http://localhost:99999", // Port that should be unused
 			suite.matrixContainer.ASToken,
 			"test-remote-id",
 			matrix.NewTestLogger(suite.T()),
+			matrix.TestRateLimitConfig(),
 		)
 
 		// All operations should fail with network errors
@@ -1150,11 +1153,12 @@ func TestURLEscapingBehavior(t *testing.T) {
 
 func TestMXCURIValidationErrorReporting(t *testing.T) {
 	// Test improved error reporting for malformed MXC URIs
-	client := matrix.NewClientWithLogger(
+	client := matrix.NewClientWithLoggerAndRateLimit(
 		"https://matrix.example.com",
 		"test-token",
 		"test-remote-id",
 		matrix.NewTestLogger(t),
+		matrix.TestRateLimitConfig(),
 	)
 
 	testCases := []struct {
@@ -1194,11 +1198,12 @@ func TestMXCURIValidationErrorReporting(t *testing.T) {
 
 func TestMXCURIValidationErrorReportingWithBetterErrorMessages(t *testing.T) {
 	// Test that we get better error messages that help with debugging
-	client := matrix.NewClientWithLogger(
+	client := matrix.NewClientWithLoggerAndRateLimit(
 		"https://matrix.example.com",
 		"test-token",
 		"test-remote-id",
 		matrix.NewTestLogger(t),
+		matrix.TestRateLimitConfig(),
 	)
 
 	// Test path traversal error gets caught early with descriptive message

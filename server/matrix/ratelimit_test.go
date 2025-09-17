@@ -265,19 +265,19 @@ func TestTestRateLimitConfig(t *testing.T) {
 	config := TestRateLimitConfig()
 
 	assert.True(t, config.Enabled, "Test config should be enabled")
-	// Test config now uses Relaxed mode (5x faster than Synapse defaults) for efficient testing
-	assert.Equal(t, 0.25, config.RoomCreation.Rate, "Test config should have 0.25 rooms per second")
-	assert.Equal(t, 3, config.RoomCreation.BurstSize, "Test config should have burst of 3 rooms")
+	// Test config now uses Conservative mode (matches Synapse defaults) to avoid 429 errors
+	assert.Equal(t, 0.05, config.RoomCreation.Rate, "Test config should have 0.05 rooms per second")
+	assert.Equal(t, 2, config.RoomCreation.BurstSize, "Test config should have burst of 2 rooms")
 	assert.Equal(t, time.Duration(0), config.RoomCreation.Interval, "Test config should use token bucket for room creation")
-	assert.Equal(t, 1.0, config.Messages.Rate, "Test config should allow 1 messages per second")
-	assert.Equal(t, 15, config.Messages.BurstSize, "Test config should have burst of 15 messages")
-	assert.Equal(t, 1.5, config.Invites.Rate, "Test config should allow 1.5 invites per second")
-	assert.Equal(t, 15, config.Invites.BurstSize, "Test config should have burst of 15 invites")
-	assert.Equal(t, 0.85, config.Registration.Rate, "Test config should allow 0.85 registrations per second")
-	assert.Equal(t, 5, config.Registration.BurstSize, "Test config should have burst of 5 registrations")
+	assert.Equal(t, 0.2, config.Messages.Rate, "Test config should allow 0.2 messages per second")
+	assert.Equal(t, 10, config.Messages.BurstSize, "Test config should have burst of 10 messages")
+	assert.Equal(t, 0.3, config.Invites.Rate, "Test config should allow 0.3 invites per second")
+	assert.Equal(t, 10, config.Invites.BurstSize, "Test config should have burst of 10 invites")
+	assert.Equal(t, 0.17, config.Registration.Rate, "Test config should allow 0.17 registrations per second")
+	assert.Equal(t, 3, config.Registration.BurstSize, "Test config should have burst of 3 registrations")
 	assert.Equal(t, time.Duration(0), config.Registration.Interval, "Test config should use token bucket for registration")
-	assert.Equal(t, 1.0, config.Joins.Rate, "Test config should allow 1 joins per second")
-	assert.Equal(t, 8, config.Joins.BurstSize, "Test config should have burst of 8 joins")
+	assert.Equal(t, 0.2, config.Joins.Rate, "Test config should allow 0.2 joins per second")
+	assert.Equal(t, 5, config.Joins.BurstSize, "Test config should have burst of 5 joins")
 }
 
 func TestGetRateLimitConfigByMode(t *testing.T) {
