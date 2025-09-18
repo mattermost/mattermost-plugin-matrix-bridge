@@ -60,6 +60,10 @@ func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client {
 	return m.client
 }
 
+func (m *mockPlugin) GetRemoteID() string {
+	return "test-remote-id"
+}
+
 func (m *mockPlugin) RunKVStoreMigrations() error {
 	return nil // Mock implementation always succeeds
 }

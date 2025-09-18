@@ -49,6 +49,9 @@ type PluginAccessor interface {
 	GetPluginAPI() plugin.API
 	GetPluginAPIClient() *pluginapi.Client
 
+	// Shared channel access
+	GetRemoteID() string
+
 	// Migration access
 	RunKVStoreMigrations() error
 	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
@@ -550,30 +553,25 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		// Continue anyway - the forward mapping was saved successfully
 	}
 
-	// Automatically share the channel to enable sync
+	// Automatically share the channel and invite the bridge plugin to enable sync
 	shareStatus := ""
-	sharedChannel := &model.SharedChannel{
-		ChannelId:        args.ChannelId,
-		TeamId:           args.TeamId,
-		Home:             true,
-		ReadOnly:         false,
-		ShareName:        sanitizeShareName(channelName),
-		ShareDisplayName: channelName,
-		SharePurpose:     topic,
-		ShareHeader:      "",
-		CreatorId:        args.UserId,
-		CreateAt:         model.GetMillis(),
-		UpdateAt:         model.GetMillis(),
-		RemoteId:         "",
-	}
+	remoteID := c.plugin.GetRemoteID()
+	c.client.Log.Debug("Attempting to invite bridge plugin to channel", "channel_id", args.ChannelId, "remote_id", remoteID)
 
-	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
-	if shareErr != nil {
-		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_id", roomID)
+	if remoteID == "" {
+		c.client.Log.Warn("Cannot invite bridge plugin - plugin remote ID is empty", "channel_id", args.ChannelId)
 		shareStatus = channelSharingFailed
 	} else {
-		c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId, "room_id", roomID)
-		shareStatus = channelSharingEnabled
+		// InviteRemoteToChannel automatically shares the channel if not shared (shareIfNotShared=true)
+		// and invites the remote, which creates the actual connection needed for sync
+		shareErr := c.pluginAPI.InviteRemoteToChannel(args.ChannelId, remoteID, args.UserId, true)
+		if shareErr != nil {
+			c.client.Log.Warn("Failed to automatically invite bridge plugin to channel", "error", shareErr, "channel_id", args.ChannelId, "room_id", roomID)
+			shareStatus = channelSharingFailed
+		} else {
+			c.client.Log.Info("Successfully invited bridge plugin to channel", "channel_id", args.ChannelId, "room_id", roomID, "remote_id", remoteID)
+			shareStatus = channelSharingEnabled
+		}
 	}
 
 	// Build status message based on publish parameter
