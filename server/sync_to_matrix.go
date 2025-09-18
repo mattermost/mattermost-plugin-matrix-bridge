@@ -1280,17 +1280,32 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 }
 
 // GetMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
+// If KV lookup fails, attempts to reconstruct the Matrix user ID from the username
 func (b *MattermostToMatrixBridge) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Use Mattermost user ID as key: mattermost_user_<mattermostUserID> -> matrixUserID
 	mattermostUserKey := kvstore.BuildMattermostUserKey(mattermostUserID)
 	matrixUserIDBytes, err := b.kvstore.Get(mattermostUserKey)
+	if err == nil && len(matrixUserIDBytes) > 0 {
+		return string(matrixUserIDBytes), nil
+	}
+
+	// KV lookup failed - try to reconstruct from username as fallback
+	b.logger.LogWarn("KV store lookup failed for Matrix user ID, attempting fallback reconstruction", "user_id", mattermostUserID, "error", err)
+
+	user, appErr := b.API.GetUser(mattermostUserID)
+	if appErr != nil {
+		return "", errors.Wrap(appErr, "failed to get user for Matrix ID reconstruction")
+	}
+
+	reconstructedID := b.reconstructMatrixUserIDFromUsername(user.Username)
+	if reconstructedID != "" {
+		b.logger.LogWarn("Successfully reconstructed Matrix user ID from username (KV mapping missing)", "user_id", mattermostUserID, "username", user.Username, "matrix_user_id", reconstructedID)
+		return reconstructedID, nil
+	}
+
+	// Both KV lookup and reconstruction failed
 	if err != nil {
-		return "", errors.Wrap(err, "no Matrix user ID mapping found for Mattermost user")
+		return "", errors.Wrap(err, "no Matrix user ID mapping found for Mattermost user and reconstruction failed")
 	}
-
-	if len(matrixUserIDBytes) == 0 {
-		return "", errors.New("empty Matrix user ID mapping found")
-	}
-
-	return string(matrixUserIDBytes), nil
+	return "", errors.New("empty Matrix user ID mapping found and reconstruction failed")
 }
