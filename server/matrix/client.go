@@ -198,15 +198,34 @@ type Client struct {
 
 // waitForRateLimit applies rate limiting for the specified operation
 func (c *Client) waitForRateLimit(limiter *TokenBucket, operation string) error {
-	if c.rateLimitConfig.Enabled && limiter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := limiter.Wait(ctx); err != nil {
-			c.logger.LogWarn(operation+" rate limited", "error", err)
-			return errors.Wrap(err, operation+" rate limited")
-		}
+	if !c.rateLimitConfig.Enabled {
+		c.logger.LogDebug("Rate limiting disabled, proceeding without throttling", "operation", operation)
+		return nil
 	}
+
+	if limiter == nil {
+		c.logger.LogWarn("Rate limiter not initialized for operation", "operation", operation)
+		return nil
+	}
+
+	c.logger.LogDebug("Applying rate limiting", "operation", operation)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+	if err := limiter.Wait(ctx); err != nil {
+		c.logger.LogWarn("Rate limiting failed", "operation", operation, "error", err, "waited_duration", time.Since(startTime))
+		return errors.Wrap(err, operation+" rate limited")
+	}
+
+	waitDuration := time.Since(startTime)
+	if waitDuration > 100*time.Millisecond {
+		c.logger.LogInfo("Rate limiting applied", "operation", operation, "waited_duration", waitDuration)
+	} else {
+		c.logger.LogDebug("Rate limiting completed (no wait required)", "operation", operation, "waited_duration", waitDuration)
+	}
+
 	return nil
 }
 
@@ -264,11 +283,19 @@ func NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID string, logger
 
 	// Initialize rate limiters if enabled
 	if rateLimitConfig.Enabled {
+		logger.LogInfo("Initializing Matrix client with rate limiting enabled",
+			"room_creation_rate", rateLimitConfig.RoomCreation.Rate,
+			"room_creation_burst", rateLimitConfig.RoomCreation.BurstSize,
+			"message_rate", rateLimitConfig.Messages.Rate,
+			"message_burst", rateLimitConfig.Messages.BurstSize)
+
 		client.roomCreationLimiter = NewTokenBucket(rateLimitConfig.RoomCreation)
 		client.messageLimiter = NewTokenBucket(rateLimitConfig.Messages)
 		client.inviteLimiter = NewTokenBucket(rateLimitConfig.Invites)
 		client.registrationLimiter = NewTokenBucket(rateLimitConfig.Registration)
 		client.joinLimiter = NewTokenBucket(rateLimitConfig.Joins)
+	} else {
+		logger.LogWarn("Matrix client initialized with rate limiting DISABLED - may encounter 429 errors")
 	}
 
 	return client
