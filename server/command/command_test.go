@@ -26,6 +26,10 @@ func (m *mockConfiguration) GetMatrixServerURL() string {
 	return m.serverURL
 }
 
+func (m *mockConfiguration) GetMatrixUsernamePrefixForServer(_ string) string {
+	return "matrix" // Use default prefix for tests
+}
+
 // mockPlugin implements the PluginAccessor interface for testing
 type mockPlugin struct {
 	client       *pluginapi.Client
@@ -351,6 +355,9 @@ func setupCommandRegistration(env *env) {
 	mapCmd := model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc)
 	mapCmd.AddTextArgument("Matrix room alias or room ID", "[room_alias|room_id]", "")
 	matrixData.AddCommand(mapCmd)
+
+	// Unmap command
+	matrixData.AddCommand(model.NewAutocompleteData("unmap", unmapCommandHint, unmapCommandDesc))
 
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", listCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))

@@ -17,6 +17,7 @@ import (
 // Configuration interface for accessing plugin configuration
 type Configuration interface {
 	GetMatrixServerURL() string
+	GetMatrixUsernamePrefixForServer(serverURL string) string
 }
 
 // MigrationResult holds the results of a migration operation
@@ -55,6 +56,7 @@ type PluginAccessor interface {
 	// Migration access
 	RunKVStoreMigrations() error
 	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
+
 }
 
 // sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
@@ -162,12 +164,46 @@ func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID string) (int,
 			}
 		}
 
-		offset += limit
 		c.client.Log.Debug("Processed page of channel members", "processed_in_page", len(pageMembers), "total_processed", totalMembers, "total_joined", joinedCount)
 	}
 
 	c.client.Log.Info("Completed syncing channel members to Matrix room", "joined_count", joinedCount, "total_members", totalMembers, "room_id", roomID)
 	return joinedCount, totalMembers, nil
+}
+
+// reconstructMatrixUserIDFromUsername reconstructs a Matrix user ID from a Mattermost username
+// This handles cases where Matrix users exist in channels but don't have KV mappings yet
+func (c *Handler) reconstructMatrixUserIDFromUsername(mattermostUsername string) string {
+	// Mattermost usernames for Matrix users follow the pattern: "prefix:username"
+	// We need to reverse this to get "@username:server.com"
+
+	config := c.plugin.GetConfiguration()
+	prefix := config.GetMatrixUsernamePrefixForServer(config.GetMatrixServerURL())
+
+	// Check if username has the expected prefix
+	expectedPrefix := prefix + ":"
+	if !strings.HasPrefix(mattermostUsername, expectedPrefix) {
+		return "" // Not a Matrix-originated user
+	}
+
+	// Extract the original Matrix username
+	matrixUsername := strings.TrimPrefix(mattermostUsername, expectedPrefix)
+	if matrixUsername == "" {
+		return "" // Empty username
+	}
+
+	// Extract server domain from Matrix server URL
+	serverURL := config.GetMatrixServerURL()
+	serverDomain := strings.TrimPrefix(serverURL, "https://")
+	serverDomain = strings.TrimPrefix(serverDomain, "http://")
+
+	// Remove any path components (e.g., "server.com:8008/_matrix" -> "server.com:8008")
+	if idx := strings.Index(serverDomain, "/"); idx != -1 {
+		serverDomain = serverDomain[:idx]
+	}
+
+	// Reconstruct the full Matrix user ID
+	return "@" + matrixUsername + ":" + serverDomain
 }
 
 // Handler implements slash command processing for the Matrix Bridge plugin.
@@ -190,7 +226,7 @@ const (
 	matrixCommandTrigger = "matrix"
 
 	// Main command usage
-	matrixCommandUsage = "Usage: /matrix [test|create|map|list|status|migrate] [room_name|room_alias|room_id]"
+	matrixCommandUsage = "Usage: /matrix [test|create|map|unmap|list|status|migrate] [room_name|room_alias|room_id]"
 
 	// Subcommand descriptions for autocomplete
 	testCommandDesc    = "Test Matrix server connection and configuration"
@@ -198,6 +234,8 @@ const (
 	createCommandHint  = "[room_name] [publish=true|false]"
 	mapCommandDesc     = "Map current channel to Matrix room (prefer #alias:server.com)"
 	mapCommandHint     = "[room_alias|room_id]"
+	unmapCommandDesc   = "Remove mapping between current channel and Matrix room, and uninvite plugin from shared channel"
+	unmapCommandHint   = ""
 	listCommandDesc    = "List all channel-to-room mappings"
 	statusCommandDesc  = "Show bridge status"
 	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings"
@@ -208,7 +246,7 @@ const (
 
 	// Error messages
 	matrixClientNotConfigured = "❌ Matrix client not configured. Please configure Matrix settings in System Console."
-	unknownSubcommandError    = "Unknown subcommand. Use: test, create, map, list, status, or migrate"
+	unknownSubcommandError    = "Unknown subcommand. Use: test, create, map, unmap, list, status, or migrate"
 
 	// Status messages
 	autoJoinSuccess     = "\n\n✅ **Auto-joined** Matrix room successfully!"
@@ -270,6 +308,9 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	mapCmd := model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc)
 	mapCmd.AddTextArgument("Matrix room alias or room ID", "[room_alias|room_id]", "")
 	matrixData.AddCommand(mapCmd)
+
+	// Unmap command
+	matrixData.AddCommand(model.NewAutocompleteData("unmap", unmapCommandHint, unmapCommandDesc))
 
 	matrixData.AddCommand(model.NewAutocompleteData("list", "", listCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
@@ -447,35 +488,117 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		}
 	}
 
-	// Only auto-share the channel if mapping was successfully saved
-	shareStatus := ""
-	sharedChannel := &model.SharedChannel{
-		ChannelId:        args.ChannelId,
-		TeamId:           args.TeamId,
-		Home:             true,
-		ReadOnly:         false,
-		ShareName:        sanitizeShareName(channelName),
-		ShareDisplayName: channelName,
-		SharePurpose:     fmt.Sprintf("Mapped to Matrix room: %s", roomIdentifier),
-		ShareHeader:      "",
-		CreatorId:        args.UserId,
-		CreateAt:         model.GetMillis(),
-		UpdateAt:         model.GetMillis(),
-		RemoteId:         "",
+	// Sync all channel members to the Matrix room (same as /matrix create does)
+	var memberSyncStatus string
+	roomID := roomIdentifier
+	// Resolve to actual room ID if it's an alias
+	if resolvedRoomID, err := matrixClient.ResolveRoomAlias(roomIdentifier); err == nil && resolvedRoomID != "" {
+		roomID = resolvedRoomID
 	}
 
-	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
-	if shareErr != nil {
-		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
-		shareStatus = channelSharingFailed
+	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(args.ChannelId, roomID)
+	if syncErr != nil {
+		c.client.Log.Error("Failed to sync channel members to Matrix room", "error", syncErr, "room_id", roomID, "channel_id", args.ChannelId)
+		memberSyncStatus = roomMemberSyncFailed
 	} else {
-		c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
-		shareStatus = channelSharingEnabled
+		// Generate appropriate status message based on sync results
+		if joinedCount == 0 {
+			memberSyncStatus = ""
+		} else if joinedCount == 1 && totalMembers == 1 {
+			// Only one member (likely the command issuer) in a single-member channel
+			memberSyncStatus = roomCreatorWithUserReady
+		} else {
+			// Multiple members were synced
+			memberSyncStatus = fmt.Sprintf("\n\n✅ **All channel members synced to Matrix** - %d of %d users joined the room.", joinedCount, totalMembers)
+		}
+	}
+
+	// Share the channel and invite this plugin to receive sync messages
+	shareStatus := c.shareChannelAndInvitePlugin(args, channelName, fmt.Sprintf("Mapped to Matrix room: %s", roomIdentifier))
+
+	return &model.CommandResponse{
+		ResponseType: model.CommandResponseTypeEphemeral,
+		Text:         fmt.Sprintf("✅ **Mapping Saved**\n\n**Channel:** %s\n**Matrix Room:** `%s`%s%s%s", channelName, roomIdentifier, joinStatus, memberSyncStatus, shareStatus),
+	}
+}
+
+func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandResponse {
+	// Get channel info for display
+	channel, appErr := c.client.Channel.Get(args.ChannelId)
+	channelName := args.ChannelId
+	if appErr == nil {
+		channelName = channel.DisplayName
+		if channelName == "" {
+			channelName = channel.Name
+		}
+	}
+
+	// Check if this channel has a Matrix room mapping
+	channelMappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
+	roomIDBytes, err := c.kvstore.Get(channelMappingKey)
+	if err != nil {
+		// Key not found is expected for unmapped channels
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         fmt.Sprintf("❌ **No Mapping Found**\n\nChannel `%s` is not currently mapped to any Matrix room.", channelName),
+		}
+	}
+
+	matrixRoomIdentifier := string(roomIDBytes)
+
+	// Clear the Matrix room state to prevent fallback lookups - this is critical
+	matrixClient := c.plugin.GetMatrixClient()
+	if matrixClient == nil {
+		c.client.Log.Error("Matrix client not available, cannot clear room state", "room_id", matrixRoomIdentifier)
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         "❌ **Error:** Matrix client not configured. Cannot safely unmap - sync messages would continue.",
+		}
+	}
+
+	if err := matrixClient.RemoveMattermostChannelID(matrixRoomIdentifier); err != nil {
+		c.client.Log.Error("Failed to clear Matrix room state - sync messages would continue", "error", err, "room_id", matrixRoomIdentifier, "channel_id", args.ChannelId)
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         "❌ **Error:** Failed to clear Matrix room state. Cannot safely unmap - sync messages would continue. Check plugin logs for details.",
+		}
+	}
+
+	c.client.Log.Info("Successfully cleared Matrix room state", "room_id", matrixRoomIdentifier)
+
+	// Remove the channel->room mapping
+	if err := c.kvstore.Delete(channelMappingKey); err != nil {
+		c.client.Log.Error("Failed to remove channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         "❌ **Error:** Failed to remove channel mapping. Check plugin logs for details.",
+		}
+	}
+
+	// Remove the room->channel mapping
+	roomMappingKey := kvstore.BuildRoomMappingKey(matrixRoomIdentifier)
+	if err := c.kvstore.Delete(roomMappingKey); err != nil {
+		c.client.Log.Warn("Failed to remove room mapping", "error", err, "room_identifier", matrixRoomIdentifier, "channel_id", args.ChannelId)
+		// Continue - the main mapping was removed
+	}
+
+	c.client.Log.Info("Removed Matrix room mapping", "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
+
+	// Uninvite this plugin from the shared channel
+	uninviteErr := c.pluginAPI.UninviteRemoteFromChannel(args.ChannelId, c.plugin.GetRemoteID())
+
+	var uninviteStatus string
+	if uninviteErr != nil {
+		c.client.Log.Warn("Failed to uninvite plugin from shared channel", "error", uninviteErr, "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		uninviteStatus = "\n\n⚠️ **Note:** Failed to uninvite plugin from shared channel. The channel may still receive some sync events."
+	} else {
+		c.client.Log.Info("Successfully uninvited plugin from shared channel", "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		uninviteStatus = "\n\n✅ **Plugin uninvited** from shared channel successfully!"
 	}
 
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
-		Text:         fmt.Sprintf("✅ **Mapping Saved**\n\n**Channel:** %s\n**Matrix Room:** `%s`%s%s", channelName, roomIdentifier, joinStatus, shareStatus),
+		Text:         fmt.Sprintf("✅ **Mapping Removed**\n\n**Channel:** %s\n**Matrix Room:** `%s`%s", channelName, matrixRoomIdentifier, uninviteStatus),
 	}
 }
 
@@ -553,26 +676,8 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		// Continue anyway - the forward mapping was saved successfully
 	}
 
-	// Automatically share the channel and invite the bridge plugin to enable sync
-	shareStatus := ""
-	remoteID := c.plugin.GetRemoteID()
-	c.client.Log.Debug("Attempting to invite bridge plugin to channel", "channel_id", args.ChannelId, "remote_id", remoteID)
-
-	if remoteID == "" {
-		c.client.Log.Warn("Cannot invite bridge plugin - plugin remote ID is empty", "channel_id", args.ChannelId)
-		shareStatus = channelSharingFailed
-	} else {
-		// InviteRemoteToChannel automatically shares the channel if not shared (shareIfNotShared=true)
-		// and invites the remote, which creates the actual connection needed for sync
-		shareErr := c.pluginAPI.InviteRemoteToChannel(args.ChannelId, remoteID, args.UserId, true)
-		if shareErr != nil {
-			c.client.Log.Warn("Failed to automatically invite bridge plugin to channel", "error", shareErr, "channel_id", args.ChannelId, "room_id", roomID)
-			shareStatus = channelSharingFailed
-		} else {
-			c.client.Log.Info("Successfully invited bridge plugin to channel", "channel_id", args.ChannelId, "room_id", roomID, "remote_id", remoteID)
-			shareStatus = channelSharingEnabled
-		}
-	}
+	// Share the channel and invite this plugin to receive sync messages
+	shareStatus := c.shareChannelAndInvitePlugin(args, channelName, topic)
 
 	// Build status message based on publish parameter
 	publishStatus := ""
@@ -753,6 +858,8 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 		}
 		roomID := fields[2]
 		return c.executeMapCommand(args, roomID)
+	case "unmap":
+		return c.executeUnmapCommand(args)
 	case "list":
 		return c.executeListMappingsCommand(args)
 	case "status":
@@ -768,6 +875,43 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 			Text:         unknownSubcommandError,
 		}
 	}
+}
+
+// shareChannelAndInvitePlugin shares a channel and invites this plugin to receive sync messages
+func (c *Handler) shareChannelAndInvitePlugin(args *model.CommandArgs, channelName, purpose string) string {
+	sharedChannel := &model.SharedChannel{
+		ChannelId:        args.ChannelId,
+		TeamId:           args.TeamId,
+		Home:             true,
+		ReadOnly:         false,
+		ShareName:        sanitizeShareName(channelName),
+		ShareDisplayName: channelName,
+		SharePurpose:     purpose,
+		ShareHeader:      "",
+		CreatorId:        args.UserId,
+		CreateAt:         model.GetMillis(),
+		UpdateAt:         model.GetMillis(),
+		RemoteId:         "",
+	}
+
+	_, shareErr := c.pluginAPI.ShareChannel(sharedChannel)
+	if shareErr != nil {
+		c.client.Log.Warn("Failed to automatically share channel", "error", shareErr, "channel_id", args.ChannelId)
+		return channelSharingFailed
+	}
+
+	c.client.Log.Info("Automatically shared channel", "channel_id", args.ChannelId)
+
+	// Invite this plugin to the shared channel to ensure we receive sync messages
+	// This is critical - without this invitation, the channel won't receive sync events
+	inviteErr := c.pluginAPI.InviteRemoteToChannel(args.ChannelId, c.plugin.GetRemoteID(), args.UserId, false)
+	if inviteErr != nil {
+		c.client.Log.Error("Failed to invite plugin to shared channel - bridge will not receive sync events", "error", inviteErr, "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		return channelSharingFailed
+	}
+
+	c.client.Log.Info("Successfully invited plugin to shared channel", "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+	return channelSharingEnabled
 }
 
 // extractServerDomain extracts the domain from the Matrix server URL

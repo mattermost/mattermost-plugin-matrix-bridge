@@ -2427,3 +2427,35 @@ func (c *Client) GetMattermostChannelID(roomID string) (string, error) {
 
 	return stateContent.MattermostChannelID, nil
 }
+
+// RemoveMattermostChannelID removes the Mattermost channel ID from the Matrix room's custom state.
+// This prevents the room from being found during fallback lookups after unmapping.
+func (c *Client) RemoveMattermostChannelID(roomID string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	url := c.serverURL + "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/state/com.mattermost.bridge.channel/"
+
+	// Send an empty object to clear the state
+	body := strings.NewReader("{}")
+	req, err := http.NewRequest("PUT", url, body)
+	if err != nil {
+		return errors.Wrap(err, "failed to create room state removal request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send room state removal request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return errors.Errorf("failed to remove room state: HTTP %d", resp.StatusCode)
+	}
+
+	return nil
+}
