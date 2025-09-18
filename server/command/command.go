@@ -56,7 +56,6 @@ type PluginAccessor interface {
 	// Migration access
 	RunKVStoreMigrations() error
 	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
-
 }
 
 // sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
@@ -165,6 +164,9 @@ func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID string) (int,
 		}
 
 		c.client.Log.Debug("Processed page of channel members", "processed_in_page", len(pageMembers), "total_processed", totalMembers, "total_joined", joinedCount)
+
+		// Move to next page
+		offset += limit
 	}
 
 	c.client.Log.Info("Completed syncing channel members to Matrix room", "joined_count", joinedCount, "total_members", totalMembers, "room_id", roomID)
