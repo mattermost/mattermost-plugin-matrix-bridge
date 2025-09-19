@@ -229,13 +229,14 @@ func GetRateLimitConfigByMode(mode RateLimitingMode) RateLimitConfig {
 		}
 
 	case RateLimitTesting:
-		// Fast rate limiting for unit tests - 2 second intervals for room creation
+		// Very conservative rate limiting for unit tests - fixed 10 second intervals
+		// Use interval-based limiting instead of token bucket for more predictability
 		return RateLimitConfig{
 			Enabled: true,
 			RoomCreation: TokenBucketConfig{
-				Rate:      0.5, // 0.5 rooms per second (2 second intervals)
-				BurstSize: 2,   // Allow creating 2 rooms quickly
-				Interval:  0,
+				Rate:      0,                // Disable token bucket
+				BurstSize: 0,                // Disable burst
+				Interval:  10 * time.Second, // Fixed 10 second intervals
 			},
 			Messages: TokenBucketConfig{
 				Rate:      10.0, // 10 messages per second

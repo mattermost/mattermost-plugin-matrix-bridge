@@ -637,8 +637,15 @@ rc_api:
   per_second: 100000
   burst_count: 100000
 
+# Global rate limiting that might affect all requests
+rc_per_second: 100000
+rc_burst_count: 100000
+
 # Try to disable AS user rate limiting (these users should not be rate limited)
 app_service_rate_limited: false
+
+# Disable request size limits that might be interfering
+max_upload_size: 1000M
 `, config.ServerName)
 }
 

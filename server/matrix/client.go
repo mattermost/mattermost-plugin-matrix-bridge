@@ -901,9 +901,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 		return "", errors.Wrap(err, "failed to marshal room creation data")
 	}
 
-	// Add user_id parameter to explicitly indicate this is an AS bot request
-	// This should bypass rate limiting for application service users
-	url := c.serverURL + "/_matrix/client/v3/createRoom?user_id=" + url.QueryEscape("@_mattermost_bot:"+serverDomain)
+	url := c.serverURL + "/_matrix/client/v3/createRoom"
 
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
