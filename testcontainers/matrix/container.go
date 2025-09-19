@@ -566,7 +566,53 @@ encryption_enabled_by_default_for_room_type: off
 allow_public_rooms_over_federation: true
 allow_public_rooms_without_auth: true
 
-# Use default Synapse rate limits to test client-side throttling
+# Permissive rate limits for faster unit testing
+# Set high limits to effectively disable rate limiting during tests
+rc_message:
+  per_second: 1000
+  burst_count: 1000
+
+# Room creation doesn't have a specific rc_ parameter in Synapse
+# It's typically handled by general request rate limiting or rc_joins
+
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
+
+rc_login:
+  address:
+    per_second: 1000
+    burst_count: 1000
+  account:
+    per_second: 1000
+    burst_count: 1000
+  failed_attempts:
+    per_second: 1000
+    burst_count: 1000
+
+rc_admin_redaction:
+  per_second: 1000
+  burst_count: 1000
+
+rc_joins:
+  local:
+    per_second: 1000
+    burst_count: 1000
+  remote:
+    per_second: 1000
+    burst_count: 1000
+
+rc_3pid_validation:
+  per_second: 1000
+  burst_count: 1000
+
+rc_invites:
+  per_room:
+    per_second: 1000
+    burst_count: 1000
+  per_user:
+    per_second: 1000
+    burst_count: 1000
 
 # Enable registration for testing
 enable_registration: true
