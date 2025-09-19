@@ -122,14 +122,9 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
-	plugin.matrixClient = createMatrixClientWithTestLogger(
-		t,
-		matrixContainer.ServerURL,
-		matrixContainer.ASToken,
-		plugin.remoteID,
-	)
-	// Set explicit server domain for testing
-	plugin.matrixClient.SetServerDomain(matrixContainer.ServerDomain)
+	// Reuse the container's Matrix client to share rate limiting state
+	// This prevents rate limit conflicts between container setup and plugin operations
+	plugin.matrixClient = matrixContainer.Client
 
 	config := &configuration{
 		MatrixServerURL: matrixContainer.ServerURL,
