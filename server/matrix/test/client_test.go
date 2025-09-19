@@ -41,9 +41,8 @@ func (suite *MatrixClientTestSuite) TearDownTest() {
 	}
 }
 
-// TestMatrixClientOperations tests core Matrix client operations that affect change
-// and then query the server to verify the changes were applied correctly.
-func (suite *MatrixClientTestSuite) TestMatrixClientOperations() {
+// TestMatrixClientBasicOperations tests basic Matrix client connectivity and permissions
+func (suite *MatrixClientTestSuite) TestMatrixClientBasicOperations() {
 	// Test server connectivity first
 	suite.Run("TestConnection", func() {
 		err := suite.client.TestConnection()
@@ -83,11 +82,11 @@ func (suite *MatrixClientTestSuite) TestMatrixClientOperations() {
 	suite.Run("MediaOperations", func() {
 		suite.testMediaOperations()
 	})
+}
 
-	// Run advanced room operation tests
-	suite.Run("AdvancedRoomOperations", func() {
-		suite.testAdvancedRoomOperations()
-	})
+// TestMatrixClientAdvancedRoomOperations tests advanced room operations with fresh container
+func (suite *MatrixClientTestSuite) TestMatrixClientAdvancedRoomOperations() {
+	suite.testAdvancedRoomOperations()
 }
 
 // testRoomOperations tests room creation, joining, and management operations
