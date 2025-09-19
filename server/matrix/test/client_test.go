@@ -445,17 +445,17 @@ func BenchmarkMatrixClientOperations(b *testing.B) {
 // TestMatrixClientErrorHandling tests error handling and edge cases
 func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 	suite.Run("EmptyTokenClient", func() {
-		// Test client with empty token
+		// Test client with empty token (use fake URL to avoid hitting real server)
 		emptyTokenClient := matrix.NewClientWithLoggerAndRateLimit(
-			suite.matrixContainer.ServerURL,
-			"", // Empty token
+			"https://fake-matrix-server.invalid", // Fake URL - we're only testing empty token validation
+			"",                                   // Empty token
 			"test-remote-id",
 			matrix.NewTestLogger(suite.T()),
 			matrix.TestRateLimitConfig(),
 		)
 
-		// Should fail operations that require authentication
-		_, err := emptyTokenClient.CreateRoom("Test", "Test", suite.matrixContainer.ServerDomain, false, "test")
+		// Should fail operations that require authentication (use TestConnection instead of CreateRoom to avoid rate limits)
+		err := emptyTokenClient.TestConnection()
 		assert.Error(suite.T(), err, "Should fail with empty token")
 		assert.Contains(suite.T(), err.Error(), "not configured", "Error should mention configuration issue")
 	})
