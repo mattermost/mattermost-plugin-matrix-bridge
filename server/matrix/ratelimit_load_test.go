@@ -87,8 +87,8 @@ func TestClient_MessageSpamLoad(t *testing.T) {
 		t.Skip("Skipping load test in short mode")
 	}
 
-	// Use standard test configuration for consistent behavior across all tests
-	config := TestRateLimitConfig()
+	// Use load test configuration optimized for measurable throttling
+	config := LoadTestRateLimitConfig()
 
 	logger := NewTestLogger(t)
 	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
@@ -180,8 +180,8 @@ func TestClient_RoomCreationSpamLoad(t *testing.T) {
 		t.Skip("Skipping load test in short mode")
 	}
 
-	// Use standard test configuration for consistent behavior across all tests
-	config := TestRateLimitConfig()
+	// Use load test configuration optimized for measurable throttling
+	config := LoadTestRateLimitConfig()
 
 	logger := NewTestLogger(t)
 	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
@@ -262,8 +262,8 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 		t.Skip("Skipping load test in short mode")
 	}
 
-	// Use standard test configuration for consistent behavior across all tests
-	config := TestRateLimitConfig()
+	// Use load test configuration optimized for measurable throttling
+	config := LoadTestRateLimitConfig()
 
 	logger := NewTestLogger(t)
 	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)

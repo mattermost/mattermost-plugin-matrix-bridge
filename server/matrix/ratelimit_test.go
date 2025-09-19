@@ -262,22 +262,22 @@ func TestDefaultRateLimitConfig(t *testing.T) {
 }
 
 func TestTestRateLimitConfig(t *testing.T) {
-	config := TestRateLimitConfig()
+	config := UnitTestRateLimitConfig()
 
-	assert.True(t, config.Enabled, "Test config should be enabled")
-	// Test config now uses Conservative mode (matches Synapse defaults) to avoid 429 errors
-	assert.Equal(t, 0.05, config.RoomCreation.Rate, "Test config should have 0.05 rooms per second")
-	assert.Equal(t, 2, config.RoomCreation.BurstSize, "Test config should have burst of 2 rooms")
+	assert.True(t, config.Enabled, "Unit test config should be enabled")
+	// Unit test config uses shared constants - tests automatically stay in sync when constants change
+	assert.Equal(t, UnitTestRoomCreationRate, config.RoomCreation.Rate, "Unit test config should use UnitTestRoomCreationRate constant")
+	assert.Equal(t, UnitTestRoomCreationBurstSize, config.RoomCreation.BurstSize, "Unit test config should use UnitTestRoomCreationBurstSize constant")
 	assert.Equal(t, time.Duration(0), config.RoomCreation.Interval, "Test config should use token bucket for room creation")
-	assert.Equal(t, 0.2, config.Messages.Rate, "Test config should allow 0.2 messages per second")
-	assert.Equal(t, 10, config.Messages.BurstSize, "Test config should have burst of 10 messages")
-	assert.Equal(t, 0.3, config.Invites.Rate, "Test config should allow 0.3 invites per second")
-	assert.Equal(t, 10, config.Invites.BurstSize, "Test config should have burst of 10 invites")
-	assert.Equal(t, 0.17, config.Registration.Rate, "Test config should allow 0.17 registrations per second")
-	assert.Equal(t, 3, config.Registration.BurstSize, "Test config should have burst of 3 registrations")
+	assert.Equal(t, UnitTestMessageRate, config.Messages.Rate, "Unit test config should use UnitTestMessageRate constant")
+	assert.Equal(t, UnitTestMessageBurstSize, config.Messages.BurstSize, "Unit test config should use UnitTestMessageBurstSize constant")
+	assert.Equal(t, UnitTestInviteRate, config.Invites.Rate, "Unit test config should use UnitTestInviteRate constant")
+	assert.Equal(t, UnitTestInviteBurstSize, config.Invites.BurstSize, "Unit test config should use UnitTestInviteBurstSize constant")
+	assert.Equal(t, UnitTestRegistrationRate, config.Registration.Rate, "Unit test config should use UnitTestRegistrationRate constant")
+	assert.Equal(t, UnitTestRegistrationBurstSize, config.Registration.BurstSize, "Unit test config should use UnitTestRegistrationBurstSize constant")
 	assert.Equal(t, time.Duration(0), config.Registration.Interval, "Test config should use token bucket for registration")
-	assert.Equal(t, 0.2, config.Joins.Rate, "Test config should allow 0.2 joins per second")
-	assert.Equal(t, 5, config.Joins.BurstSize, "Test config should have burst of 5 joins")
+	assert.Equal(t, UnitTestJoinRate, config.Joins.Rate, "Unit test config should use UnitTestJoinRate constant")
+	assert.Equal(t, UnitTestJoinBurstSize, config.Joins.BurstSize, "Unit test config should use UnitTestJoinBurstSize constant")
 }
 
 func TestGetRateLimitConfigByMode(t *testing.T) {

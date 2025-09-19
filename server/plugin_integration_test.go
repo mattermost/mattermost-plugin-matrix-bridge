@@ -56,15 +56,9 @@ func (suite *PluginIntegrationTestSuite) SetupTest() {
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	suite.plugin.logger = &testLogger{t: suite.T()}
 
-	// Initialize Matrix client
-	suite.plugin.matrixClient = matrix.NewClientWithLoggerAndRateLimit(
-		suite.matrixContainer.ServerURL,
-		suite.matrixContainer.ASToken,
-		suite.plugin.remoteID,
-		matrix.NewTestLogger(suite.T()),
-		matrix.TestRateLimitConfig(),
-	)
-	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	// Reuse the container's Matrix client to share rate limiting state
+	// This prevents rate limit conflicts between container setup and plugin operations
+	suite.plugin.matrixClient = suite.matrixContainer.Client
 
 	// Set configuration
 	config := &configuration{

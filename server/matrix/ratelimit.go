@@ -216,8 +216,73 @@ func DefaultRateLimitConfig() RateLimitConfig {
 
 // TestRateLimitConfig returns fast limits suitable for unit tests with permissive Synapse configuration
 func TestRateLimitConfig() RateLimitConfig {
-	// Use testing mode - fast 2 second intervals work with permissive test Synapse config
+	// Use testing mode - optimized for real Matrix server integration tests
 	return GetRateLimitConfigByMode(RateLimitTesting)
+}
+
+// Unit test rate limiting constants - shared between config and tests
+const (
+	UnitTestRoomCreationRate      = 0.05 // 0.05 rooms per second (20 second intervals)
+	UnitTestRoomCreationBurstSize = 2    // Allow creating 2 rooms quickly
+	UnitTestMessageRate           = 0.2  // 0.2 messages per second
+	UnitTestMessageBurstSize      = 10   // Allow 10 message burst
+	UnitTestInviteRate            = 0.3  // 0.3 invites per second
+	UnitTestInviteBurstSize       = 10   // Allow 10 invite burst
+	UnitTestRegistrationRate      = 0.17 // 0.17 registrations per second
+	UnitTestRegistrationBurstSize = 3    // Allow 3 registration burst
+	UnitTestJoinRate              = 0.2  // 0.2 joins per second
+	UnitTestJoinBurstSize         = 5    // Allow 5 join burst
+)
+
+// UnitTestRateLimitConfig returns predictable rate limits for unit tests that don't connect to real servers
+func UnitTestRateLimitConfig() RateLimitConfig {
+	// Uses constants so that tests and config stay in sync when values are tweaked
+	return RateLimitConfig{
+		Enabled: true,
+		RoomCreation: TokenBucketConfig{
+			Rate:      UnitTestRoomCreationRate,
+			BurstSize: UnitTestRoomCreationBurstSize,
+			Interval:  0, // Use token bucket, not interval
+		},
+		Messages: TokenBucketConfig{
+			Rate:      UnitTestMessageRate,
+			BurstSize: UnitTestMessageBurstSize,
+			Interval:  0,
+		},
+		Invites: TokenBucketConfig{
+			Rate:      UnitTestInviteRate,
+			BurstSize: UnitTestInviteBurstSize,
+			Interval:  0,
+		},
+		Registration: TokenBucketConfig{
+			Rate:      UnitTestRegistrationRate,
+			BurstSize: UnitTestRegistrationBurstSize,
+			Interval:  0,
+		},
+		Joins: TokenBucketConfig{
+			Rate:      UnitTestJoinRate,
+			BurstSize: UnitTestJoinBurstSize,
+			Interval:  0,
+		},
+	}
+}
+
+// LoadTestRateLimitConfig returns rate limits optimized for load testing (high throttling)
+func LoadTestRateLimitConfig() RateLimitConfig {
+	// Designed to produce measurable throttling under load for TestClient_MessageSpamLoad
+	return RateLimitConfig{
+		Enabled: true,
+		Messages: TokenBucketConfig{
+			Rate:      5.0, // 5 messages per second - designed to throttle spam
+			BurstSize: 10,  // Allow 10 message burst
+			Interval:  0,
+		},
+		// Other operations use conservative rates
+		RoomCreation: TokenBucketConfig{Rate: 0.1, BurstSize: 2, Interval: 0},
+		Invites:      TokenBucketConfig{Rate: 1.0, BurstSize: 5, Interval: 0},
+		Registration: TokenBucketConfig{Rate: 1.0, BurstSize: 3, Interval: 0},
+		Joins:        TokenBucketConfig{Rate: 1.0, BurstSize: 5, Interval: 0},
+	}
 }
 
 // GetRateLimitConfigByMode returns a rate limit configuration based on the specified mode

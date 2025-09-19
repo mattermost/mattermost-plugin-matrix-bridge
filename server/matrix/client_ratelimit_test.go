@@ -322,7 +322,7 @@ func TestClient_RateLimitError_Detection(t *testing.T) {
 	// Test that client properly detects when it should have prevented rate limit errors
 	// This is more of a documentation test for the intended behavior
 
-	config := TestRateLimitConfig() // Use standard test config
+	config := UnitTestRateLimitConfig() // Use unit test config with predictable values
 	logger := NewTestLogger(t)
 	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
 
