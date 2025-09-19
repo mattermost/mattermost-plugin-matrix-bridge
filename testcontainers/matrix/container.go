@@ -566,66 +566,62 @@ encryption_enabled_by_default_for_room_type: off
 allow_public_rooms_over_federation: true
 allow_public_rooms_without_auth: true
 
-# Permissive rate limits for faster unit testing
-# Set high limits to effectively disable rate limiting during tests
+# Extremely permissive rate limits for unit testing
+# Use very high values instead of 0 to avoid Synapse bugs
+# Application service users should bypass most rate limiting anyway
 rc_message:
-  per_second: 1000
-  burst_count: 1000
+  per_second: 100000
+  burst_count: 100000
 
-# General request rate limiting - this may affect room creation
-request_rate:
-  per_second: 1000
-  burst_count: 1000
-
-# Additional rate limits that might affect room operations
+# Federation-related limits that might affect room operations
 rc_federation:
-  window_size: 1000
+  window_size: 100000
   sleep_limit: 10
-  sleep_delay: 500
-  reject_limit: 50
-  concurrent: 3
+  sleep_delay: 1
+  reject_limit: 100000
+  concurrent: 100
 
 # Room creation doesn't have a specific rc_ parameter in Synapse
 # It's typically handled by general request rate limiting or rc_joins
 
 rc_registration:
-  per_second: 1000
-  burst_count: 1000
+  per_second: 100000
+  burst_count: 100000
 
 rc_login:
   address:
-    per_second: 1000
-    burst_count: 1000
+    per_second: 100000
+    burst_count: 100000
   account:
-    per_second: 1000
-    burst_count: 1000
+    per_second: 100000
+    burst_count: 100000
   failed_attempts:
-    per_second: 1000
-    burst_count: 1000
+    per_second: 100000
+    burst_count: 100000
 
 rc_admin_redaction:
-  per_second: 1000
-  burst_count: 1000
+  per_second: 100000
+  burst_count: 100000
 
 rc_joins:
   local:
-    per_second: 1000
-    burst_count: 1000
+    per_second: 100000
+    burst_count: 100000
   remote:
-    per_second: 1000
-    burst_count: 1000
+    per_second: 100000
+    burst_count: 100000
 
 rc_3pid_validation:
-  per_second: 1000
-  burst_count: 1000
+  per_second: 100000
+  burst_count: 100000
 
 rc_invites:
   per_room:
-    per_second: 1000
-    burst_count: 1000
+    per_second: 100000
+    burst_count: 100000
   per_user:
-    per_second: 1000
-    burst_count: 1000
+    per_second: 100000
+    burst_count: 100000
 
 # Enable registration for testing
 enable_registration: true
@@ -633,18 +629,16 @@ enable_registration_without_verification: true
 
 # Additional global rate limiting that might affect API calls
 rc_state_events_per_room:
-  per_second: 1000
-  burst_count: 1000
-
-# Federation-related limits that might affect room operations
-rc_remote_room_state:
-  per_second: 1000
-  burst_count: 1000
+  per_second: 100000
+  burst_count: 100000
 
 # General API call rate limiting
-rc_api_rate:
-  per_second: 1000
-  burst_count: 1000
+rc_api:
+  per_second: 100000
+  burst_count: 100000
+
+# Try to disable AS user rate limiting (these users should not be rate limited)
+app_service_rate_limited: false
 `, config.ServerName)
 }
 
