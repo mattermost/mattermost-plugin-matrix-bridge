@@ -15,6 +15,7 @@ type RateLimitingMode string
 // Rate limiting mode constants define different throttling strategies
 const (
 	RateLimitDisabled     RateLimitingMode = "disabled"     // No rate limiting (maximum performance, risk of 429 errors)
+	RateLimitTesting      RateLimitingMode = "testing"      // Fast rate limiting for unit tests (2 second intervals)
 	RateLimitRelaxed      RateLimitingMode = "relaxed"      // Light throttling (fast, suitable for dedicated Matrix servers)
 	RateLimitAutomatic    RateLimitingMode = "automatic"    // Balanced throttling (good performance with safety) - DEFAULT
 	RateLimitConservative RateLimitingMode = "conservative" // Heavy throttling (safest, matches Synapse defaults exactly)
@@ -213,10 +214,10 @@ func DefaultRateLimitConfig() RateLimitConfig {
 	}
 }
 
-// TestRateLimitConfig returns conservative limits suitable for tests to avoid Matrix server rate limits
+// TestRateLimitConfig returns fast limits suitable for unit tests with permissive Synapse configuration
 func TestRateLimitConfig() RateLimitConfig {
-	// Use conservative mode for testing - matches Synapse defaults to avoid 429 errors
-	return GetRateLimitConfigByMode(RateLimitConservative)
+	// Use testing mode - fast 2 second intervals work with permissive test Synapse config
+	return GetRateLimitConfigByMode(RateLimitTesting)
 }
 
 // GetRateLimitConfigByMode returns a rate limit configuration based on the specified mode
@@ -225,6 +226,37 @@ func GetRateLimitConfigByMode(mode RateLimitingMode) RateLimitConfig {
 	case RateLimitDisabled:
 		return RateLimitConfig{
 			Enabled: false, // Disable all rate limiting
+		}
+
+	case RateLimitTesting:
+		// Fast rate limiting for unit tests - 2 second intervals for room creation
+		return RateLimitConfig{
+			Enabled: true,
+			RoomCreation: TokenBucketConfig{
+				Rate:      0.5, // 0.5 rooms per second (2 second intervals)
+				BurstSize: 2,   // Allow creating 2 rooms quickly
+				Interval:  0,
+			},
+			Messages: TokenBucketConfig{
+				Rate:      10.0, // 10 messages per second
+				BurstSize: 20,   // Allow 20 message burst
+				Interval:  0,
+			},
+			Invites: TokenBucketConfig{
+				Rate:      10.0, // 10 invites per second
+				BurstSize: 20,   // Allow 20 invite burst
+				Interval:  0,
+			},
+			Registration: TokenBucketConfig{
+				Rate:      5.0, // 5 registrations per second
+				BurstSize: 10,  // Allow 10 registration burst
+				Interval:  0,
+			},
+			Joins: TokenBucketConfig{
+				Rate:      5.0, // 5 joins per second
+				BurstSize: 10,  // Allow 10 join burst
+				Interval:  0,
+			},
 		}
 
 	case RateLimitRelaxed:
@@ -334,6 +366,7 @@ func GetRateLimitConfigByMode(mode RateLimitingMode) RateLimitConfig {
 func ValidateRateLimitingMode(mode RateLimitingMode) bool {
 	validModes := []RateLimitingMode{
 		RateLimitDisabled,
+		RateLimitTesting,
 		RateLimitRelaxed,
 		RateLimitAutomatic,
 		RateLimitConservative,
