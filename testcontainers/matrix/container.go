@@ -572,6 +572,19 @@ rc_message:
   per_second: 1000
   burst_count: 1000
 
+# General request rate limiting - this may affect room creation
+request_rate:
+  per_second: 1000
+  burst_count: 1000
+
+# Additional rate limits that might affect room operations
+rc_federation:
+  window_size: 1000
+  sleep_limit: 10
+  sleep_delay: 500
+  reject_limit: 50
+  concurrent: 3
+
 # Room creation doesn't have a specific rc_ parameter in Synapse
 # It's typically handled by general request rate limiting or rc_joins
 
@@ -617,6 +630,21 @@ rc_invites:
 # Enable registration for testing
 enable_registration: true
 enable_registration_without_verification: true
+
+# Additional global rate limiting that might affect API calls
+rc_state_events_per_room:
+  per_second: 1000
+  burst_count: 1000
+
+# Federation-related limits that might affect room operations
+rc_remote_room_state:
+  per_second: 1000
+  burst_count: 1000
+
+# General API call rate limiting
+rc_api_rate:
+  per_second: 1000
+  burst_count: 1000
 `, config.ServerName)
 }
 
