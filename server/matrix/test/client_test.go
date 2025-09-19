@@ -20,20 +20,11 @@ type MatrixClientTestSuite struct {
 	client          *matrix.Client
 }
 
-// SetupSuite starts the Matrix container before running tests
-func (suite *MatrixClientTestSuite) SetupSuite() {
-	suite.matrixContainer = matrixtest.StartMatrixContainer(suite.T(), matrixtest.DefaultMatrixConfig())
-}
-
-// TearDownSuite cleans up the Matrix container after tests
-func (suite *MatrixClientTestSuite) TearDownSuite() {
-	if suite.matrixContainer != nil {
-		suite.matrixContainer.Cleanup(suite.T())
-	}
-}
-
-// SetupTest prepares each test with Matrix client and ensures AS bot is created
+// SetupTest creates a fresh Matrix container for each test to avoid rate limiting accumulation
 func (suite *MatrixClientTestSuite) SetupTest() {
+	// Start fresh Matrix container for each test to reset rate limiting state
+	suite.matrixContainer = matrixtest.StartMatrixContainer(suite.T(), matrixtest.DefaultMatrixConfig())
+
 	// Use the container's Matrix client which has rate limiting built-in
 	suite.client = suite.matrixContainer.Client
 
@@ -41,6 +32,13 @@ func (suite *MatrixClientTestSuite) SetupTest() {
 	// Use a unique name to avoid alias conflicts between test methods
 	roomName := fmt.Sprintf("AS Bot Provisioning Room %d", time.Now().UnixNano())
 	_ = suite.matrixContainer.CreateRoom(suite.T(), roomName)
+}
+
+// TearDownTest cleans up the Matrix container after each test
+func (suite *MatrixClientTestSuite) TearDownTest() {
+	if suite.matrixContainer != nil {
+		suite.matrixContainer.Cleanup(suite.T())
+	}
 }
 
 // TestMatrixClientOperations tests core Matrix client operations that affect change
