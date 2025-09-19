@@ -562,13 +562,33 @@ user_directory:
 # Disable encryption for simpler testing
 encryption_enabled_by_default_for_room_type: off
 
-# Allow public rooms
+# Allow public rooms and directory publishing
 allow_public_rooms_over_federation: true
 allow_public_rooms_without_auth: true
 
 # Enable registration for testing
 enable_registration: true
 enable_registration_without_verification: true
+
+# Disable rate limiting for tests (matches production config)
+rc_message:
+  per_second: 1000
+  burst_count: 1000
+
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
+
+rc_login:
+  address:
+    per_second: 1000
+    burst_count: 1000
+  account:
+    per_second: 1000
+    burst_count: 1000
+  failed_attempts:
+    per_second: 1000
+    burst_count: 1000
 `, config.ServerName)
 }
 
