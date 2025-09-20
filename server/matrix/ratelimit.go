@@ -222,16 +222,17 @@ func TestRateLimitConfig() RateLimitConfig {
 
 // Unit test rate limiting constants - shared between config and tests
 const (
-	UnitTestRoomCreationRate      = 0.1  // 0.1 rooms per second (10 second intervals) - 2x faster
-	UnitTestRoomCreationBurstSize = 4    // Allow creating 4 rooms quickly - 2x larger
-	UnitTestMessageRate           = 0.4  // 0.4 messages per second - 2x faster
-	UnitTestMessageBurstSize      = 20   // Allow 20 message burst - 2x larger
-	UnitTestInviteRate            = 0.6  // 0.6 invites per second - 2x faster
-	UnitTestInviteBurstSize       = 20   // Allow 20 invite burst - 2x larger
-	UnitTestRegistrationRate      = 0.34 // 0.34 registrations per second - 2x faster
-	UnitTestRegistrationBurstSize = 6    // Allow 6 registration burst - 2x larger
-	UnitTestJoinRate              = 0.4  // 0.4 joins per second - 2x faster
-	UnitTestJoinBurstSize         = 10   // Allow 10 join burst - 2x larger
+	UnitTestRoomCreationRate      = 0.075                   // 0.075 rooms per second (13.3 second intervals) - 25% slower
+	UnitTestRoomCreationBurstSize = 3                       // Allow creating 3 rooms quickly - 25% smaller
+	UnitTestRoomCreationInterval  = 6700 * time.Millisecond // 6.7 second intervals for testing mode
+	UnitTestMessageRate           = 0.3                     // 0.3 messages per second - 25% slower
+	UnitTestMessageBurstSize      = 15                      // Allow 15 message burst - 25% smaller
+	UnitTestInviteRate            = 0.45                    // 0.45 invites per second - 25% slower
+	UnitTestInviteBurstSize       = 15                      // Allow 15 invite burst - 25% smaller
+	UnitTestRegistrationRate      = 0.255                   // 0.255 registrations per second - 25% slower
+	UnitTestRegistrationBurstSize = 4                       // Allow 4 registration burst - 25% smaller
+	UnitTestJoinRate              = 0.3                     // 0.3 joins per second - 25% slower
+	UnitTestJoinBurstSize         = 7                       // Allow 7 join burst - 25% smaller
 )
 
 // UnitTestRateLimitConfig returns predictable rate limits for unit tests that don't connect to real servers
@@ -294,33 +295,33 @@ func GetRateLimitConfigByMode(mode RateLimitingMode) RateLimitConfig {
 		}
 
 	case RateLimitTesting:
-		// Faster rate limiting for integration tests - uses doubled constants
+		// More conservative rate limiting for integration tests - uses reduced constants
 		// Use interval-based limiting for room creation, token bucket for other operations
 		return RateLimitConfig{
 			Enabled: true,
 			RoomCreation: TokenBucketConfig{
-				Rate:      0,               // Disable token bucket
-				BurstSize: 0,               // Disable burst
-				Interval:  5 * time.Second, // Fixed 5 second intervals (2x faster)
+				Rate:      0,                            // Disable token bucket
+				BurstSize: 0,                            // Disable burst
+				Interval:  UnitTestRoomCreationInterval, // Use constant for easy tweaking
 			},
 			Messages: TokenBucketConfig{
-				Rate:      UnitTestMessageRate * 25, // Scale up for integration tests: 0.4 * 25 = 10.0
-				BurstSize: UnitTestMessageBurstSize, // 20 message burst
+				Rate:      UnitTestMessageRate * 33.3, // Scale up for integration tests: 0.3 * 33.3 ≈ 10.0
+				BurstSize: UnitTestMessageBurstSize,   // 15 message burst
 				Interval:  0,
 			},
 			Invites: TokenBucketConfig{
-				Rate:      UnitTestInviteRate * 16.67, // Scale up for integration tests: 0.6 * 16.67 ≈ 10.0
-				BurstSize: UnitTestInviteBurstSize,    // 20 invite burst
+				Rate:      UnitTestInviteRate * 22.2, // Scale up for integration tests: 0.45 * 22.2 ≈ 10.0
+				BurstSize: UnitTestInviteBurstSize,   // 15 invite burst
 				Interval:  0,
 			},
 			Registration: TokenBucketConfig{
-				Rate:      UnitTestRegistrationRate * 14.7, // Scale up for integration tests: 0.34 * 14.7 ≈ 5.0
-				BurstSize: UnitTestRegistrationBurstSize,   // 6 registration burst
+				Rate:      UnitTestRegistrationRate * 19.6, // Scale up for integration tests: 0.255 * 19.6 ≈ 5.0
+				BurstSize: UnitTestRegistrationBurstSize,   // 4 registration burst
 				Interval:  0,
 			},
 			Joins: TokenBucketConfig{
-				Rate:      UnitTestJoinRate * 12.5, // Scale up for integration tests: 0.4 * 12.5 = 5.0
-				BurstSize: UnitTestJoinBurstSize,   // 10 join burst
+				Rate:      UnitTestJoinRate * 16.7, // Scale up for integration tests: 0.3 * 16.7 ≈ 5.0
+				BurstSize: UnitTestJoinBurstSize,   // 7 join burst
 				Interval:  0,
 			},
 		}
