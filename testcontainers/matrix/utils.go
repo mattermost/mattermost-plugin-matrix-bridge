@@ -2,10 +2,10 @@ package matrix
 
 // FindEventByPostID finds a Matrix event by its Mattermost post ID
 func FindEventByPostID(events []Event, postID string) *Event {
-	for _, event := range events {
+	for i, event := range events {
 		if mattermostPostID, exists := event.Content["mattermost_post_id"].(string); exists {
 			if mattermostPostID == postID {
-				return &event
+				return &events[i]
 			}
 		}
 	}
@@ -14,26 +14,29 @@ func FindEventByPostID(events []Event, postID string) *Event {
 
 // FindLatestMessageEvent finds the most recent m.room.message event
 func FindLatestMessageEvent(events []Event) *Event {
-	var latestEvent *Event
+	var latestEventIndex = -1
 	var latestTimestamp int64
 
-	for _, event := range events {
+	for i, event := range events {
 		if event.Type == "m.room.message" {
 			if event.Timestamp > latestTimestamp {
 				latestTimestamp = event.Timestamp
-				latestEvent = &event
+				latestEventIndex = i
 			}
 		}
 	}
 
-	return latestEvent
+	if latestEventIndex >= 0 {
+		return &events[latestEventIndex]
+	}
+	return nil
 }
 
 // FindEventByType finds the first event of a specific type
 func FindEventByType(events []Event, eventType string) *Event {
-	for _, event := range events {
+	for i, event := range events {
 		if event.Type == eventType {
-			return &event
+			return &events[i]
 		}
 	}
 	return nil
@@ -51,8 +54,12 @@ func FindEventsByType(events []Event, eventType string) []Event {
 }
 
 // GetEventContent extracts content from a Matrix event
-func GetEventContent(event Event) map[string]any {
-	return event.Content
+// Returns the content map and a boolean indicating if content exists
+func GetEventContent(event Event) (map[string]any, bool) {
+	if event.Content != nil {
+		return event.Content, true
+	}
+	return nil, false
 }
 
 // GetEventSender extracts the sender from a Matrix event
