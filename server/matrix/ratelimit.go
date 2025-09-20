@@ -222,16 +222,16 @@ func TestRateLimitConfig() RateLimitConfig {
 
 // Unit test rate limiting constants - shared between config and tests
 const (
-	UnitTestRoomCreationRate      = 0.05 // 0.05 rooms per second (20 second intervals)
-	UnitTestRoomCreationBurstSize = 2    // Allow creating 2 rooms quickly
-	UnitTestMessageRate           = 0.2  // 0.2 messages per second
-	UnitTestMessageBurstSize      = 10   // Allow 10 message burst
-	UnitTestInviteRate            = 0.3  // 0.3 invites per second
-	UnitTestInviteBurstSize       = 10   // Allow 10 invite burst
-	UnitTestRegistrationRate      = 0.17 // 0.17 registrations per second
-	UnitTestRegistrationBurstSize = 3    // Allow 3 registration burst
-	UnitTestJoinRate              = 0.2  // 0.2 joins per second
-	UnitTestJoinBurstSize         = 5    // Allow 5 join burst
+	UnitTestRoomCreationRate      = 0.1  // 0.1 rooms per second (10 second intervals) - 2x faster
+	UnitTestRoomCreationBurstSize = 4    // Allow creating 4 rooms quickly - 2x larger
+	UnitTestMessageRate           = 0.4  // 0.4 messages per second - 2x faster
+	UnitTestMessageBurstSize      = 20   // Allow 20 message burst - 2x larger
+	UnitTestInviteRate            = 0.6  // 0.6 invites per second - 2x faster
+	UnitTestInviteBurstSize       = 20   // Allow 20 invite burst - 2x larger
+	UnitTestRegistrationRate      = 0.34 // 0.34 registrations per second - 2x faster
+	UnitTestRegistrationBurstSize = 6    // Allow 6 registration burst - 2x larger
+	UnitTestJoinRate              = 0.4  // 0.4 joins per second - 2x faster
+	UnitTestJoinBurstSize         = 10   // Allow 10 join burst - 2x larger
 )
 
 // UnitTestRateLimitConfig returns predictable rate limits for unit tests that don't connect to real servers
@@ -294,33 +294,33 @@ func GetRateLimitConfigByMode(mode RateLimitingMode) RateLimitConfig {
 		}
 
 	case RateLimitTesting:
-		// Very conservative rate limiting for unit tests - fixed 10 second intervals
-		// Use interval-based limiting instead of token bucket for more predictability
+		// Faster rate limiting for integration tests - uses doubled constants
+		// Use interval-based limiting for room creation, token bucket for other operations
 		return RateLimitConfig{
 			Enabled: true,
 			RoomCreation: TokenBucketConfig{
-				Rate:      0,                // Disable token bucket
-				BurstSize: 0,                // Disable burst
-				Interval:  10 * time.Second, // Fixed 10 second intervals
+				Rate:      0,               // Disable token bucket
+				BurstSize: 0,               // Disable burst
+				Interval:  5 * time.Second, // Fixed 5 second intervals (2x faster)
 			},
 			Messages: TokenBucketConfig{
-				Rate:      10.0, // 10 messages per second
-				BurstSize: 20,   // Allow 20 message burst
+				Rate:      UnitTestMessageRate * 25, // Scale up for integration tests: 0.4 * 25 = 10.0
+				BurstSize: UnitTestMessageBurstSize, // 20 message burst
 				Interval:  0,
 			},
 			Invites: TokenBucketConfig{
-				Rate:      10.0, // 10 invites per second
-				BurstSize: 20,   // Allow 20 invite burst
+				Rate:      UnitTestInviteRate * 16.67, // Scale up for integration tests: 0.6 * 16.67 ≈ 10.0
+				BurstSize: UnitTestInviteBurstSize,    // 20 invite burst
 				Interval:  0,
 			},
 			Registration: TokenBucketConfig{
-				Rate:      5.0, // 5 registrations per second
-				BurstSize: 10,  // Allow 10 registration burst
+				Rate:      UnitTestRegistrationRate * 14.7, // Scale up for integration tests: 0.34 * 14.7 ≈ 5.0
+				BurstSize: UnitTestRegistrationBurstSize,   // 6 registration burst
 				Interval:  0,
 			},
 			Joins: TokenBucketConfig{
-				Rate:      5.0, // 5 joins per second
-				BurstSize: 10,  // Allow 10 join burst
+				Rate:      UnitTestJoinRate * 12.5, // Scale up for integration tests: 0.4 * 12.5 = 5.0
+				BurstSize: UnitTestJoinBurstSize,   // 10 join burst
 				Interval:  0,
 			},
 		}
