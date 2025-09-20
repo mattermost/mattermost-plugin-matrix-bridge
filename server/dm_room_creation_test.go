@@ -16,7 +16,7 @@ import (
 // DMRoomCreationTestSuite contains integration tests for DM room creation on Matrix
 type DMRoomCreationTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -141,7 +141,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 	require.NoError(suite.T(), err)
 
 	// Verify that a room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(dmChannelID)
+	dmRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(dmChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 
@@ -282,7 +282,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 	require.NoError(suite.T(), err)
 
 	// Verify that a room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(groupDMChannelID)
+	dmRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(groupDMChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 
@@ -407,7 +407,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 	require.NoError(suite.T(), err)
 
 	// Verify that a room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.getMatrixRoomID(dmChannelID)
+	dmRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(dmChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 

@@ -70,7 +70,8 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 
 // Shared utility methods that both bridge types need
 
-func (s *BridgeUtils) getMatrixRoomID(channelID string) (string, error) {
+// GetMatrixRoomID retrieves the Matrix room ID for a given Mattermost channel ID
+func (s *BridgeUtils) GetMatrixRoomID(channelID string) (string, error) {
 	roomID, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
 	if err != nil {
 		// KV store error (typically key not found) - unmapped channels are expected
@@ -84,16 +85,11 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	var roomID string
 	var err error
 
-	if strings.HasPrefix(matrixRoomIdentifier, "#") {
-		// Resolve alias to room ID
-		roomID, err = s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
-		if err != nil {
-			s.logger.LogWarn("Failed to resolve room alias during mapping creation", "room_alias", matrixRoomIdentifier, "error", err)
-			// Fallback: store the alias (better than failing completely)
-			roomID = matrixRoomIdentifier
-		}
-	} else {
-		// Already a room ID
+	// Resolve room identifier to room ID (handles both aliases and room IDs)
+	roomID, err = s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	if err != nil {
+		s.logger.LogWarn("Failed to resolve room identifier during mapping creation", "room_identifier", matrixRoomIdentifier, "error", err)
+		// Fallback: store the original identifier (better than failing completely)
 		roomID = matrixRoomIdentifier
 	}
 
@@ -432,4 +428,39 @@ func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) 
 	}
 
 	return false, nil, nil
+}
+
+// reconstructMatrixUserIDFromUsername reconstructs a Matrix user ID from a Mattermost username
+// This handles cases where Matrix users exist in channels but don't have KV mappings yet
+func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername string) string {
+	// Mattermost usernames for Matrix users follow the pattern: "prefix:username"
+	// We need to reverse this to get "@username:server.com"
+
+	config := s.configGetter.getConfiguration()
+	prefix := config.GetMatrixUsernamePrefixForServer(config.GetMatrixServerURL())
+
+	// Check if username has the expected prefix
+	expectedPrefix := prefix + ":"
+	if !strings.HasPrefix(mattermostUsername, expectedPrefix) {
+		return "" // Not a Matrix-originated user
+	}
+
+	// Extract the original Matrix username
+	matrixUsername := strings.TrimPrefix(mattermostUsername, expectedPrefix)
+	if matrixUsername == "" {
+		return "" // Empty username
+	}
+
+	// Extract server domain from Matrix server URL
+	serverURL := config.GetMatrixServerURL()
+	serverDomain := strings.TrimPrefix(serverURL, "https://")
+	serverDomain = strings.TrimPrefix(serverDomain, "http://")
+
+	// Remove any path components (e.g., "server.com:8008/_matrix" -> "server.com:8008")
+	if idx := strings.Index(serverDomain, "/"); idx != -1 {
+		serverDomain = serverDomain[:idx]
+	}
+
+	// Reconstruct the full Matrix user ID
+	return "@" + matrixUsername + ":" + serverDomain
 }

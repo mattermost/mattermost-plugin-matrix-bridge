@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,13 +16,13 @@ import (
 // MatrixSyncTestSuite contains integration tests for syncing to Matrix
 type MatrixSyncTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 	plugin          *Plugin
 	testChannelID   string
 	testUserID      string
 	testRoomID      string
 	testGhostUserID string
-	validator       *matrixtest.MatrixEventValidation
+	validator       *matrixtest.EventValidation
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -42,9 +43,12 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	api := &plugintest.API{}
 
 	// Set up test data - create fresh room for each test to ensure isolation
+	// The CreateRoom method now includes automatic throttling to prevent rate limits
 	suite.testChannelID = model.NewId()
 	suite.testUserID = model.NewId()
-	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), "Test Room")
+	// Use unique room name to avoid alias conflicts between tests
+	uniqueRoomName := fmt.Sprintf("Sync Test Room %s", suite.testChannelID[:8])
+	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), uniqueRoomName)
 	suite.testGhostUserID = "@_mattermost_" + suite.testUserID + ":" + suite.matrixContainer.ServerDomain
 
 	// Create plugin instance
@@ -88,7 +92,7 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
-	suite.validator = matrixtest.NewMatrixEventValidation(
+	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
 		suite.plugin.remoteID,
@@ -119,7 +123,7 @@ func (suite *MatrixSyncTestSuite) TestBasicMessageSync() {
 	require.NoError(suite.T(), err)
 
 	// Wait for Matrix to process the message with polling
-	var messageEvent map[string]any
+	var messageEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		messageEvent = matrixtest.FindEventByPostID(events, post.Id)
@@ -127,7 +131,7 @@ func (suite *MatrixSyncTestSuite) TestBasicMessageSync() {
 	}, 10*time.Second, 500*time.Millisecond, "Should find synced message event within timeout")
 
 	// Validate the message event
-	suite.validator.ValidateMessageEvent(messageEvent, post)
+	suite.validator.ValidateMessageEvent(*messageEvent, post)
 }
 
 // TestMarkdownMessageSync tests syncing a message with Markdown formatting
@@ -146,7 +150,7 @@ func (suite *MatrixSyncTestSuite) TestMarkdownMessageSync() {
 	require.NoError(suite.T(), err)
 
 	// Wait for processing with polling
-	var messageEvent map[string]any
+	var messageEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		messageEvent = matrixtest.FindEventByPostID(events, post.Id)
@@ -154,18 +158,17 @@ func (suite *MatrixSyncTestSuite) TestMarkdownMessageSync() {
 	}, 10*time.Second, 500*time.Millisecond, "Should find message event within timeout")
 
 	// Validate basic message structure
-	suite.validator.ValidateMessageEvent(messageEvent, post)
+	suite.validator.ValidateMessageEvent(*messageEvent, post)
 
 	// Verify HTML formatting was applied
-	content := messageEvent["content"].(map[string]any)
-	formattedBody, hasFormatted := content["formatted_body"].(string)
+	formattedBody, hasFormatted := messageEvent.Content["formatted_body"].(string)
 	require.True(suite.T(), hasFormatted, "Markdown message should have formatted_body")
 
 	// Check HTML conversion
 	assert.Contains(suite.T(), formattedBody, "<strong>Bold text</strong>", "Should convert **bold** to HTML")
 	assert.Contains(suite.T(), formattedBody, "<em>italic text</em>", "Should convert *italic* to HTML")
 	assert.Contains(suite.T(), formattedBody, "<code>code</code>", "Should convert `code` to HTML")
-	assert.Equal(suite.T(), "org.matrix.custom.html", content["format"], "Should specify HTML format")
+	assert.Equal(suite.T(), "org.matrix.custom.html", messageEvent.Content["format"], "Should specify HTML format")
 }
 
 // TestMessageWithMentions tests syncing a message with @mentions
@@ -192,7 +195,7 @@ func (suite *MatrixSyncTestSuite) TestMessageWithMentions() {
 	require.NoError(suite.T(), err)
 
 	// Wait for processing with polling
-	var messageEvent map[string]any
+	var messageEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		messageEvent = matrixtest.FindEventByPostID(events, post.Id)
@@ -200,10 +203,10 @@ func (suite *MatrixSyncTestSuite) TestMessageWithMentions() {
 	}, 10*time.Second, 500*time.Millisecond, "Should find message event within timeout")
 
 	// Validate mention processing
-	suite.validator.ValidateMessageWithMentions(messageEvent, post, 1)
+	suite.validator.ValidateMessageWithMentions(*messageEvent, post, 1)
 
 	// Verify specific mention details
-	content := messageEvent["content"].(map[string]any)
+	content := messageEvent.Content
 	mentions := content["m.mentions"].(map[string]any)
 	userIDs := mentions["user_ids"].([]any)
 	assert.Contains(suite.T(), userIDs, mentionedGhostUserID, "Should mention correct ghost user")
@@ -227,13 +230,13 @@ func (suite *MatrixSyncTestSuite) TestThreadedMessage() {
 	require.NoError(suite.T(), err)
 
 	// Get parent event ID from Matrix with polling
-	var parentEvent map[string]any
+	var parentEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		parentEvent = matrixtest.FindEventByPostID(events, parentPost.Id)
 		return parentEvent != nil
 	}, 10*time.Second, 500*time.Millisecond, "Should find parent event within timeout")
-	parentEventID := parentEvent["event_id"].(string)
+	parentEventID := parentEvent.EventID
 
 	// Post tracking will be handled by the in-memory KV store
 	api := suite.plugin.API.(*plugintest.API)
@@ -263,7 +266,7 @@ func (suite *MatrixSyncTestSuite) TestThreadedMessage() {
 	require.NoError(suite.T(), err)
 
 	// Verify threaded message in Matrix with polling
-	var replyEvent map[string]any
+	var replyEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		replyEvent = matrixtest.FindEventByPostID(events, replyPost.Id)
@@ -271,7 +274,7 @@ func (suite *MatrixSyncTestSuite) TestThreadedMessage() {
 	}, 10*time.Second, 500*time.Millisecond, "Should find reply event within timeout")
 
 	// Validate threading
-	suite.validator.ValidateThreadedMessage(replyEvent, replyPost, parentEventID)
+	suite.validator.ValidateThreadedMessage(*replyEvent, replyPost, parentEventID)
 }
 
 // TestMessageEdit tests editing an existing Matrix message
@@ -291,13 +294,13 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 	require.NoError(suite.T(), err)
 
 	// Get original event from Matrix with polling
-	var originalEvent map[string]any
+	var originalEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		originalEvent = matrixtest.FindEventByPostID(events, originalPost.Id)
 		return originalEvent != nil
 	}, 10*time.Second, 500*time.Millisecond, "Should find original event within timeout")
-	originalEventID := originalEvent["event_id"].(string)
+	originalEventID := originalEvent.EventID
 
 	// The first sync would have updated the post with Matrix event ID and stored UpdateAt in tracker
 	// We need to simulate this by updating our original post to match what would happen
@@ -327,18 +330,16 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 	require.NoError(suite.T(), err)
 
 	// Verify edit event in Matrix with polling
-	var editEvent map[string]any
+	var editEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		// Look for edit events (m.room.message with m.relates_to.rel_type = "m.replace")
 		for _, event := range events {
-			if event["type"] == "m.room.message" {
-				if content, ok := event["content"].(map[string]any); ok {
-					if relatesTo, hasRel := content["m.relates_to"].(map[string]any); hasRel {
-						if relType, ok := relatesTo["rel_type"].(string); ok && relType == "m.replace" {
-							editEvent = event
-							return true
-						}
+			if event.Type == "m.room.message" {
+				if relatesTo, hasRel := event.Content["m.relates_to"].(map[string]any); hasRel {
+					if relType, ok := relatesTo["rel_type"].(string); ok && relType == "m.replace" {
+						editEvent = &event
+						return true
 					}
 				}
 			}
@@ -347,7 +348,7 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 	}, 10*time.Second, 500*time.Millisecond, "Should find edit event within timeout")
 
 	// Validate edit event
-	suite.validator.ValidateEditEvent(editEvent, originalEventID, "Edited message content")
+	suite.validator.ValidateEditEvent(*editEvent, originalEventID, "Edited message content")
 }
 
 // TestReactionSync tests syncing reactions to Matrix
@@ -367,13 +368,13 @@ func (suite *MatrixSyncTestSuite) TestReactionSync() {
 	require.NoError(suite.T(), err)
 
 	// Get Matrix event ID with polling
-	var messageEvent map[string]any
+	var messageEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		messageEvent = matrixtest.FindEventByPostID(events, post.Id)
 		return messageEvent != nil
 	}, 10*time.Second, 500*time.Millisecond, "Should find message event within timeout")
-	eventID := messageEvent["event_id"].(string)
+	eventID := messageEvent.EventID
 
 	// Set Matrix event ID in post properties
 	post.Props = map[string]any{
@@ -397,7 +398,7 @@ func (suite *MatrixSyncTestSuite) TestReactionSync() {
 	require.NoError(suite.T(), err)
 
 	// Verify reaction in Matrix with polling
-	var reactionEvent map[string]any
+	var reactionEvent *matrixtest.Event
 	require.Eventually(suite.T(), func() bool {
 		events := suite.matrixContainer.GetRoomEvents(suite.T(), suite.testRoomID)
 		reactionEvent = matrixtest.FindEventByType(events, "m.reaction")
@@ -406,7 +407,7 @@ func (suite *MatrixSyncTestSuite) TestReactionSync() {
 
 	// Validate reaction
 	expectedEmoji := "👍" // thumbsup converts to thumbs up emoji
-	suite.validator.ValidateReactionEvent(reactionEvent, eventID, expectedEmoji)
+	suite.validator.ValidateReactionEvent(*reactionEvent, eventID, expectedEmoji)
 }
 
 // Run the test suite

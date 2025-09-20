@@ -387,7 +387,7 @@ func (b *MatrixToMattermostBridge) syncMatrixRedactionToMattermost(event MatrixE
 	}
 
 	// Get the Matrix room ID to fetch the redacted event details
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		b.logger.LogWarn("Failed to get Matrix room identifier for redaction", "error", err, "channel_id", channelID)
 		return nil
@@ -773,7 +773,7 @@ func (b *MatrixToMattermostBridge) storeMatrixEventPostMapping(matrixEventID, ma
 // getPostIDFromMatrixEventMetadata retrieves post ID from Matrix event content (for Mattermost-originated events)
 func (b *MatrixToMattermostBridge) getPostIDFromMatrixEventMetadata(matrixEventID, channelID string) string {
 	// Get the Matrix room ID for this channel
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		b.logger.LogDebug("Failed to get Matrix room identifier", "error", err, "channel_id", channelID, "matrix_event_id", matrixEventID)
 		return ""
@@ -819,7 +819,7 @@ func (b *MatrixToMattermostBridge) getPostIDFromMatrixEventMetadata(matrixEventI
 // is related to a primary message that has a Mattermost post ID
 func (b *MatrixToMattermostBridge) getPostIDFromRelatedMatrixEvent(matrixEventID, channelID string) string {
 	// Get the Matrix room ID for this channel
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		b.logger.LogWarn("Failed to get Matrix room identifier for related event lookup", "error", err, "channel_id", channelID)
 		return ""

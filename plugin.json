@@ -52,6 +52,35 @@
                 "default": false
             },
             {
+                "key": "rate_limiting_mode",
+                "display_name": "Matrix Rate Limiting",
+                "type": "dropdown",
+                "help_text": "Controls how aggressively the bridge sends requests to your Matrix server to prevent rate limiting.",
+                "default": "automatic",
+                "options": [
+                    {
+                        "display_name": "Disabled - No rate limiting (maximum performance, risk of 429 errors)",
+                        "value": "disabled"
+                    },
+                    {
+                        "display_name": "Relaxed - Light throttling (fast, suitable for dedicated Matrix servers)",
+                        "value": "relaxed"
+                    },
+                    {
+                        "display_name": "Automatic - Balanced throttling (good performance with safety) [Recommended]",
+                        "value": "automatic"
+                    },
+                    {
+                        "display_name": "Conservative - Heavy throttling (safest, matches Synapse defaults exactly)",
+                        "value": "conservative"
+                    },
+                    {
+                        "display_name": "Restricted - Maximum throttling (slowest, for shared/limited Matrix servers)",
+                        "value": "restricted"
+                    }
+                ]
+            },
+            {
                 "key": "registration_download",
                 "display_name": "Matrix Application Service Registration",
                 "type": "custom",

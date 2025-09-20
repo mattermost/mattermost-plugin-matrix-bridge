@@ -149,7 +149,9 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 
 func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
-	p.matrixClient = matrix.NewClient(config.MatrixServerURL, config.MatrixASToken, p.remoteID, p.API)
+	rateLimitMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
+	rateLimitConfig := matrix.GetRateLimitConfigByMode(rateLimitMode)
+	p.matrixClient = matrix.NewClientWithRateLimit(config.MatrixServerURL, config.MatrixASToken, p.remoteID, p.API, rateLimitConfig)
 }
 
 func (p *Plugin) initBridges() {
@@ -230,6 +232,11 @@ func (p *Plugin) CreateOrGetGhostUser(mattermostUserID string) (string, error) {
 	return p.mattermostToMatrixBridge.CreateOrGetGhostUser(mattermostUserID)
 }
 
+// GetMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
+func (p *Plugin) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
+	return p.mattermostToMatrixBridge.GetMatrixUserIDFromMattermostUser(mattermostUserID)
+}
+
 // GetPluginAPI returns the Mattermost plugin API
 func (p *Plugin) GetPluginAPI() plugin.API {
 	return p.API
@@ -238,6 +245,11 @@ func (p *Plugin) GetPluginAPI() plugin.API {
 // GetPluginAPIClient returns the pluginapi client
 func (p *Plugin) GetPluginAPIClient() *pluginapi.Client {
 	return p.client
+}
+
+// GetRemoteID returns the plugin's remote ID for shared channel operations
+func (p *Plugin) GetRemoteID() string {
+	return p.remoteID
 }
 
 // RunKVStoreMigrations exposes migration functionality to command handlers
@@ -260,6 +272,90 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 		DMMappingsCreated:        result.DMMappingsCreated,
 		ReverseDMMappingsCreated: result.ReverseDMMappingsCreated,
 	}, nil
+}
+
+// UserHasJoinedChannel is called when a user joins or is added to a channel
+func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.ChannelMember, actor *model.User) {
+	config := p.getConfiguration()
+	if !config.EnableSync {
+		return
+	}
+
+	if p.matrixClient == nil {
+		p.logger.LogError("Matrix client not initialized")
+		return
+	}
+
+	// First check if this channel is bridged to Matrix
+	matrixRoomID, err := p.mattermostToMatrixBridge.GetMatrixRoomID(channelMember.ChannelId)
+	if err != nil || matrixRoomID == "" {
+		// Channel is not bridged to Matrix, nothing to do
+		p.logger.LogDebug("Channel not bridged to Matrix, skipping user join sync", "channel_id", channelMember.ChannelId)
+		return
+	}
+
+	// Get the user who joined the channel
+	// If the actor is the same as the user who joined, use the provided actor to avoid API call
+	var user *model.User
+	if actor != nil && actor.Id == channelMember.UserId {
+		user = actor
+	} else {
+		var appErr *model.AppError
+		user, appErr = p.API.GetUser(channelMember.UserId)
+		if appErr != nil {
+			// Log the failure with context about both fallback methods
+			if actor == nil {
+				p.logger.LogError("Failed to get user who joined channel - no actor provided and GetUser API call failed",
+					"error", appErr,
+					"user_id", channelMember.UserId,
+					"channel_id", channelMember.ChannelId,
+					"troubleshooting", "both actor parameter and GetUser API call failed")
+			} else {
+				p.logger.LogError("Failed to get user who joined channel - actor provided but user ID mismatch, GetUser API call also failed",
+					"error", appErr,
+					"user_id", channelMember.UserId,
+					"actor_id", actor.Id,
+					"channel_id", channelMember.ChannelId,
+					"troubleshooting", "actor user ID did not match channel member user ID, and GetUser API call failed")
+			}
+			return
+		}
+	}
+
+	p.logger.LogDebug("User joined bridged channel",
+		"user_id", user.Id,
+		"username", user.Username,
+		"channel_id", channelMember.ChannelId,
+		"matrix_room_id", matrixRoomID,
+		"is_remote", user.IsRemote())
+
+	// If this is a Matrix-originated user (remote), invite them to the corresponding Matrix room
+	if user.IsRemote() {
+		if err := p.inviteRemoteUserToMatrixRoom(user, channelMember.ChannelId); err != nil {
+			p.logger.LogError("Failed to invite remote user to Matrix room", "error", err, "user_id", user.Id, "username", user.Username, "channel_id", channelMember.ChannelId)
+		}
+	} else {
+		// This is a local Mattermost user - create ghost user and join them to the Matrix room
+		ghostUserID, err := p.CreateOrGetGhostUser(user.Id)
+		if err != nil {
+			p.logger.LogError("Failed to create or get ghost user", "error", err, "user_id", user.Id, "username", user.Username)
+			return
+		}
+
+		// Resolve room alias to room ID if needed
+		resolvedRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomID)
+		if err != nil {
+			p.logger.LogError("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomID)
+			return
+		}
+
+		// Try to join the ghost user to the Matrix room (handles both public and private rooms)
+		if err := p.matrixClient.InviteAndJoinGhostUser(resolvedRoomID, ghostUserID); err != nil {
+			p.logger.LogError("Failed to join ghost user to Matrix room", "error", err, "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id)
+		} else {
+			p.logger.LogInfo("Successfully joined ghost user to Matrix room", "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id, "username", user.Username)
+		}
+	}
 }
 
 // See https://developers.mattermost.com/extend/plugins/server/reference/

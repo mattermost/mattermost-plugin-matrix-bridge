@@ -114,8 +114,8 @@ func (b *MattermostToMatrixBridge) ensureGhostUserInRoom(ghostUserID, roomID, us
 		return nil
 	}
 
-	// Try to join the ghost user to the room
-	err = b.matrixClient.JoinRoomAsUser(roomID, ghostUserID)
+	// Try to join the ghost user to the room (handles both public and private rooms)
+	err = b.matrixClient.InviteAndJoinGhostUser(roomID, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to join ghost user to room")
 	}
@@ -265,7 +265,7 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 	}
 
 	// First check if this is a regular channel with existing mapping
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier")
 	}
@@ -591,7 +591,7 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 // deletePostFromMatrix handles deleting a post from Matrix by redacting the Matrix message
 func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channelID string) error {
 	// Get Matrix room identifier
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for post deletion")
 	}
@@ -668,7 +668,7 @@ func (b *MattermostToMatrixBridge) SyncReactionToMatrix(reaction *model.Reaction
 // addReactionToMatrix adds a new reaction to Matrix
 func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction, channelID string) error {
 	// Get Matrix room identifier
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier")
 	}
@@ -747,7 +747,7 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 // removeReactionFromMatrix removes a reaction from Matrix by finding and redacting the matching reaction event
 func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reaction, channelID string) error {
 	// Get Matrix room identifier
-	matrixRoomIdentifier, err := b.getMatrixRoomID(channelID)
+	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for reaction removal")
 	}
@@ -929,7 +929,7 @@ func (b *MattermostToMatrixBridge) addMatrixMentionsWithData(content map[string]
 			b.logger.LogDebug("Found existing Matrix ghost user for Mattermost user mention", "username", username, "ghost_user_id", ghostUserID, "display_name", displayName)
 		} else {
 			// Check if this is a Matrix user represented in Mattermost (Matrix user → Mattermost user)
-			originalMatrixUserID, err := b.getMatrixUserIDFromMattermostUser(user.Id)
+			originalMatrixUserID, err := b.GetMatrixUserIDFromMattermostUser(user.Id)
 			if err == nil && originalMatrixUserID != "" {
 				matrixUserID = originalMatrixUserID
 				displayName = user.GetDisplayName(model.ShowFullName)
@@ -1213,7 +1213,7 @@ func (b *MattermostToMatrixBridge) getCurrentMatrixFileAttachments(matrixRoomID,
 // getOrCreateDMRoom gets an existing DM room mapping or creates a new Matrix DM room
 func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs []string, initiatingUserID string) (string, error) {
 	// First check if we already have a room mapping (unified for all channels)
-	existingRoomID, err := b.getMatrixRoomID(channelID)
+	existingRoomID, err := b.GetMatrixRoomID(channelID)
 	if err == nil && existingRoomID != "" {
 		b.logger.LogDebug("Found existing DM room mapping", "channel_id", channelID, "matrix_room_id", existingRoomID)
 		return existingRoomID, nil
@@ -1233,7 +1233,7 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 		if user.IsRemote() {
 			// This is a Matrix user that appears as remote in Mattermost
 			// Look up their original Matrix user ID via reverse mapping
-			matrixUserID, err := b.getMatrixUserIDFromMattermostUser(userID)
+			matrixUserID, err := b.GetMatrixUserIDFromMattermostUser(userID)
 			if err == nil && matrixUserID != "" {
 				b.logger.LogDebug("Using existing Matrix user ID for DM", "mattermost_user_id", userID, "matrix_user_id", matrixUserID)
 				matrixUserIDs = append(matrixUserIDs, matrixUserID)
@@ -1279,18 +1279,33 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 	return matrixRoomID, nil
 }
 
-// getMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
-func (b *MattermostToMatrixBridge) getMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
+// GetMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
+// If KV lookup fails, attempts to reconstruct the Matrix user ID from the username
+func (b *MattermostToMatrixBridge) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Use Mattermost user ID as key: mattermost_user_<mattermostUserID> -> matrixUserID
 	mattermostUserKey := kvstore.BuildMattermostUserKey(mattermostUserID)
 	matrixUserIDBytes, err := b.kvstore.Get(mattermostUserKey)
+	if err == nil && len(matrixUserIDBytes) > 0 {
+		return string(matrixUserIDBytes), nil
+	}
+
+	// KV lookup failed - try to reconstruct from username as fallback
+	b.logger.LogWarn("KV store lookup failed for Matrix user ID, attempting fallback reconstruction", "user_id", mattermostUserID, "error", err)
+
+	user, appErr := b.API.GetUser(mattermostUserID)
+	if appErr != nil {
+		return "", errors.Wrap(appErr, "failed to get user for Matrix ID reconstruction")
+	}
+
+	reconstructedID := b.reconstructMatrixUserIDFromUsername(user.Username)
+	if reconstructedID != "" {
+		b.logger.LogWarn("Successfully reconstructed Matrix user ID from username (KV mapping missing)", "user_id", mattermostUserID, "username", user.Username, "matrix_user_id", reconstructedID)
+		return reconstructedID, nil
+	}
+
+	// Both KV lookup and reconstruction failed
 	if err != nil {
-		return "", errors.Wrap(err, "no Matrix user ID mapping found for Mattermost user")
+		return "", errors.Wrap(err, "no Matrix user ID mapping found for Mattermost user and reconstruction failed")
 	}
-
-	if len(matrixUserIDBytes) == 0 {
-		return "", errors.New("empty Matrix user ID mapping found")
-	}
-
-	return string(matrixUserIDBytes), nil
+	return "", errors.New("empty Matrix user ID mapping found and reconstruction failed")
 }

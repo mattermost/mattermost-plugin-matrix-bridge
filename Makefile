@@ -319,7 +319,7 @@ detach: setup-attach
 .PHONY: test
 test: apply webapp/node_modules install-go-tools
 ifneq ($(HAS_SERVER),)
-	$(GOBIN)/gotestsum -- -v -count=1 -p 1 ./...
+	$(GOBIN)/gotestsum -- -v -count=1 -p 1 -timeout=20m ./...
 endif
 ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test;

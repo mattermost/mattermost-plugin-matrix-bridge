@@ -19,7 +19,7 @@ func TestExtractMatrixMessageContent(t *testing.T) {
 
 	logger := &testLogger{t: t}
 	kvstore := NewMemoryKVStore()
-	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+	matrixClient := matrix.NewClientWithLoggerAndRateLimit("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t), matrix.UnitTestRateLimitConfig())
 
 	config := BridgeUtilsConfig{
 		Logger:       logger,
@@ -234,7 +234,7 @@ func TestIsHTMLContent(t *testing.T) {
 
 	logger := &testLogger{t: t}
 	kvstore := NewMemoryKVStore()
-	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+	matrixClient := matrix.NewClientWithLoggerAndRateLimit("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t), matrix.UnitTestRateLimitConfig())
 
 	config := BridgeUtilsConfig{
 		Logger:       logger,
@@ -379,7 +379,7 @@ func TestExtractMattermostMetadata(t *testing.T) {
 	api := &plugintest.API{}
 	logger := &testLogger{t: t}
 	kvstore := NewMemoryKVStore()
-	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+	matrixClient := matrix.NewClientWithLoggerAndRateLimit("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t), matrix.UnitTestRateLimitConfig())
 
 	config := BridgeUtilsConfig{
 		Logger:       logger,
@@ -473,7 +473,7 @@ func TestIsGhostUser(t *testing.T) {
 	api := &plugintest.API{}
 	logger := &testLogger{t: t}
 	kvstore := NewMemoryKVStore()
-	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+	matrixClient := matrix.NewClientWithLoggerAndRateLimit("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t), matrix.UnitTestRateLimitConfig())
 
 	config := BridgeUtilsConfig{
 		Logger:       logger,
@@ -530,7 +530,7 @@ func TestExtractMentionedUsers(t *testing.T) {
 	api := &plugintest.API{}
 	logger := &testLogger{t: t}
 	kvstore := NewMemoryKVStore()
-	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+	matrixClient := matrix.NewClientWithLoggerAndRateLimit("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t), matrix.UnitTestRateLimitConfig())
 
 	config := BridgeUtilsConfig{
 		Logger:       logger,
@@ -624,7 +624,7 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 	api := &plugintest.API{}
 	logger := &testLogger{t: t}
 	kvstore := NewMemoryKVStore()
-	matrixClient := matrix.NewClientWithLogger("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t))
+	matrixClient := matrix.NewClientWithLoggerAndRateLimit("https://test.example.com", "test_token", "test_remote", matrix.NewTestLogger(t), matrix.UnitTestRateLimitConfig())
 
 	config := BridgeUtilsConfig{
 		Logger:       logger,

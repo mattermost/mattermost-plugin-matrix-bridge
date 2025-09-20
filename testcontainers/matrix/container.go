@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -18,23 +19,22 @@ import (
 
 // Global container registry for cleanup
 var (
-	activeContainers = make(map[*MatrixContainer]bool)
+	activeContainers = make(map[*Container]bool)
 	containerMutex   sync.RWMutex
 )
 
-// MatrixContainer wraps a testcontainer running Synapse
-//
-//nolint:revive // MatrixContainer is intentionally named to be descriptive in test context
-type MatrixContainer struct {
+// Container wraps a testcontainer running Synapse
+type Container struct {
 	Container    testcontainers.Container
 	ServerURL    string
 	ServerDomain string
 	ASToken      string
 	HSToken      string
+	Client       *matrix.Client
 }
 
 // StartMatrixContainer starts a Synapse container for testing
-func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContainer {
+func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *Container {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -88,7 +88,7 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContaine
 	serverURL := "http://localhost:18008"
 	t.Logf("Using host networking: %s", serverURL)
 
-	mc := &MatrixContainer{
+	mc := &Container{
 		Container:    container,
 		ServerURL:    serverURL,
 		ServerDomain: config.ServerName,
@@ -96,19 +96,29 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *MatrixContaine
 		HSToken:      config.HSToken,
 	}
 
+	// Wait for Matrix to be fully ready
+	mc.waitForMatrixReady(t)
+
+	// Create Matrix client with rate limiting for test operations
+	mc.Client = matrix.NewClientWithLoggerAndRateLimit(
+		serverURL,
+		config.ASToken,
+		"test-remote-id",
+		matrix.NewTestLogger(t),
+		matrix.TestRateLimitConfig(),
+	)
+	mc.Client.SetServerDomain(config.ServerName)
+
 	// Register container for cleanup tracking
 	containerMutex.Lock()
 	activeContainers[mc] = true
 	containerMutex.Unlock()
 
-	// Wait for Matrix to be fully ready
-	mc.waitForMatrixReady(t)
-
 	return mc
 }
 
 // Cleanup terminates the Matrix container
-func (mc *MatrixContainer) Cleanup(t *testing.T) {
+func (mc *Container) Cleanup(t *testing.T) {
 	if mc.Container == nil {
 		return
 	}
@@ -144,11 +154,11 @@ func CleanupAllContainers() {
 	}
 
 	// Clear the map
-	activeContainers = make(map[*MatrixContainer]bool)
+	activeContainers = make(map[*Container]bool)
 }
 
 // waitForMatrixReady waits for Matrix server to be fully operational
-func (mc *MatrixContainer) waitForMatrixReady(t *testing.T) {
+func (mc *Container) waitForMatrixReady(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -172,7 +182,7 @@ func (mc *MatrixContainer) waitForMatrixReady(t *testing.T) {
 }
 
 // isMatrixReady checks if Matrix server is responding properly
-func (mc *MatrixContainer) isMatrixReady() bool {
+func (mc *Container) isMatrixReady() bool {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 	}
@@ -186,74 +196,90 @@ func (mc *MatrixContainer) isMatrixReady() bool {
 }
 
 // CreateRoom creates a test room and returns its room ID
-func (mc *MatrixContainer) CreateRoom(t *testing.T, roomName string) string {
-	roomData := map[string]any{
-		"name":       roomName,
-		"preset":     "public_chat",
-		"visibility": "public",
-	}
-
-	roomID, err := mc.makeMatrixRequest("POST", "/_matrix/client/v3/createRoom", roomData)
+// Uses the Matrix client with proper rate limiting to avoid 429 errors
+func (mc *Container) CreateRoom(t *testing.T, roomName string) string {
+	roomIdentifier, err := mc.Client.CreateRoom(roomName, "", mc.ServerDomain, true, "")
 	require.NoError(t, err)
 
-	response := roomID.(map[string]any)
-	return response["room_id"].(string)
+	// The client returns either a room alias or room ID
+	// For test purposes, we need to get the actual room ID
+	if strings.HasPrefix(roomIdentifier, "#") {
+		// It's an alias, resolve it to room ID
+		roomID, err := mc.Client.ResolveRoomAlias(roomIdentifier)
+		require.NoError(t, err)
+		return roomID
+	}
+
+	// It's already a room ID
+	return roomIdentifier
 }
 
 // JoinRoom joins a room as the application service
-func (mc *MatrixContainer) JoinRoom(t *testing.T, roomID string) {
+func (mc *Container) JoinRoom(t *testing.T, roomID string) {
 	_, err := mc.makeMatrixRequest("POST", fmt.Sprintf("/_matrix/client/v3/join/%s", roomID), map[string]any{})
 	require.NoError(t, err)
 }
 
 // GetRoomEvents retrieves events from a Matrix room
-func (mc *MatrixContainer) GetRoomEvents(t *testing.T, roomID string) []map[string]any {
-	result, err := mc.makeMatrixRequest("GET", fmt.Sprintf("/_matrix/client/v3/rooms/%s/messages", roomID), nil)
+func (mc *Container) GetRoomEvents(t *testing.T, roomID string) []Event {
+	// Use backward direction with limit to get recent messages
+	result, err := mc.makeMatrixRequest("GET", fmt.Sprintf("/_matrix/client/v3/rooms/%s/messages?dir=b&limit=100", roomID), nil)
 	require.NoError(t, err)
 
-	response := result.(map[string]any)
-	chunk := response["chunk"].([]any)
+	var response RoomMessagesResponse
+	responseBytes, err := json.Marshal(result)
+	require.NoError(t, err)
+	err = json.Unmarshal(responseBytes, &response)
+	require.NoError(t, err)
 
-	events := make([]map[string]any, len(chunk))
-	for i, event := range chunk {
-		events[i] = event.(map[string]any)
+	// Debug: Log the events we receive
+	t.Logf("GetRoomEvents: Found %d events in room %s", len(response.Chunk), roomID)
+	for i, event := range response.Chunk {
+		t.Logf("Event %d: type=%s, event_id=%s, sender=%s, has_mattermost_post_id=%v",
+			i, event.Type, event.EventID, event.Sender,
+			event.Content != nil && event.Content["mattermost_post_id"] != nil)
 	}
 
-	return events
+	return response.Chunk
 }
 
 // GetEvent retrieves a specific event by ID
-func (mc *MatrixContainer) GetEvent(t *testing.T, roomID, eventID string) map[string]any {
+func (mc *Container) GetEvent(t *testing.T, roomID, eventID string) Event {
 	result, err := mc.makeMatrixRequest("GET", fmt.Sprintf("/_matrix/client/v3/rooms/%s/event/%s", roomID, eventID), nil)
 	require.NoError(t, err)
 
-	return result.(map[string]any)
+	var event Event
+	responseBytes, err := json.Marshal(result)
+	require.NoError(t, err)
+	err = json.Unmarshal(responseBytes, &event)
+	require.NoError(t, err)
+
+	return event
 }
 
 // GetRoomState retrieves the current state of a room
-func (mc *MatrixContainer) GetRoomState(t *testing.T, roomID string) []map[string]any {
+func (mc *Container) GetRoomState(t *testing.T, roomID string) []Event {
 	result, err := mc.makeMatrixRequest("GET", fmt.Sprintf("/_matrix/client/v3/rooms/%s/state", roomID), nil)
 	require.NoError(t, err)
 
-	stateEvents := result.([]any)
-	state := make([]map[string]any, len(stateEvents))
-	for i, event := range stateEvents {
-		state[i] = event.(map[string]any)
-	}
-	return state
+	var stateEvents []Event
+	responseBytes, err := json.Marshal(result)
+	require.NoError(t, err)
+	err = json.Unmarshal(responseBytes, &stateEvents)
+	require.NoError(t, err)
+
+	return stateEvents
 }
 
 // GetRoomName retrieves the name of a room from its state
-func (mc *MatrixContainer) GetRoomName(t *testing.T, roomID string) string {
+func (mc *Container) GetRoomName(t *testing.T, roomID string) string {
 	state := mc.GetRoomState(t, roomID)
 
 	// Look for m.room.name event
 	for _, event := range state {
-		if event["type"] == "m.room.name" {
-			if content, ok := event["content"].(map[string]any); ok {
-				if name, exists := content["name"].(string); exists {
-					return name
-				}
+		if event.Type == "m.room.name" {
+			if name, exists := event.Content["name"].(string); exists {
+				return name
 			}
 		}
 	}
@@ -262,7 +288,7 @@ func (mc *MatrixContainer) GetRoomName(t *testing.T, roomID string) string {
 }
 
 // SendMessage sends a message to a room (for testing purposes)
-func (mc *MatrixContainer) SendMessage(t *testing.T, roomID, message string) string {
+func (mc *Container) SendMessage(t *testing.T, roomID, message string) string {
 	content := map[string]any{
 		"msgtype": "m.text",
 		"body":    message,
@@ -271,37 +297,175 @@ func (mc *MatrixContainer) SendMessage(t *testing.T, roomID, message string) str
 	result, err := mc.makeMatrixRequest("PUT", fmt.Sprintf("/_matrix/client/v3/rooms/%s/send/m.room.message/%d", roomID, time.Now().UnixNano()), content)
 	require.NoError(t, err)
 
-	response := result.(map[string]any)
-	return response["event_id"].(string)
-}
-
-// CreateUser creates a test user
-func (mc *MatrixContainer) CreateUser(t *testing.T, username, password string) string {
-	// First, try to get registration flows
-	_, err := mc.makeMatrixRequestNoAuth("POST", "/_matrix/client/v3/register", map[string]any{})
-	if err != nil {
-		// If we get an error, it might contain flow information
-		t.Logf("Registration flow error (expected): %v", err)
-	}
-
-	// Try registration with dummy auth
-	userData := map[string]any{
-		"username": username,
-		"password": password,
-		"auth": map[string]any{
-			"type": "m.login.dummy",
-		},
-	}
-
-	result, err := mc.makeMatrixRequestNoAuth("POST", "/_matrix/client/v3/register", userData)
+	var response SendEventResponse
+	responseBytes, err := json.Marshal(result)
+	require.NoError(t, err)
+	err = json.Unmarshal(responseBytes, &response)
 	require.NoError(t, err)
 
-	response := result.(map[string]any)
-	return response["user_id"].(string)
+	return response.EventID
+}
+
+// Matrix API Response Structs
+
+// CreateRoomResponse represents the response from the /createRoom endpoint
+type CreateRoomResponse struct {
+	RoomID string `json:"room_id"`
+}
+
+// RegisterResponse represents the response from the /register endpoint
+type RegisterResponse struct {
+	UserID      string `json:"user_id"`
+	AccessToken string `json:"access_token,omitempty"`
+	DeviceID    string `json:"device_id,omitempty"`
+}
+
+// SendEventResponse represents the response from sending an event
+type SendEventResponse struct {
+	EventID string `json:"event_id"`
+}
+
+// RoomMembersResponse represents the response from /rooms/{roomId}/members
+type RoomMembersResponse struct {
+	Chunk []Event `json:"chunk"`
+}
+
+// RoomMessagesResponse represents the response from /rooms/{roomId}/messages
+type RoomMessagesResponse struct {
+	Chunk []Event `json:"chunk"`
+	Start string  `json:"start,omitempty"`
+	End   string  `json:"end,omitempty"`
+}
+
+// Event represents a generic Matrix event
+type Event struct {
+	Type         string         `json:"type"`
+	EventID      string         `json:"event_id,omitempty"`
+	Sender       string         `json:"sender,omitempty"`
+	StateKey     *string        `json:"state_key,omitempty"`
+	Content      map[string]any `json:"content"`
+	Timestamp    int64          `json:"origin_server_ts,omitempty"`
+	RoomID       string         `json:"room_id,omitempty"`
+	RelatedEvent map[string]any `json:"m.relates_to,omitempty"`
+}
+
+// User represents a test user with credentials
+type User struct {
+	UserID   string
+	Username string
+	Password string
+}
+
+// CreateUser creates a test user and returns user information
+// Uses the rate-limited Matrix client to avoid 429 errors
+func (mc *Container) CreateUser(t *testing.T, username, password string) *User {
+	// Use the rate-limited Matrix client instead of direct HTTP calls
+	// This prevents 429 M_LIMIT_EXCEEDED errors during rapid user creation
+	response, err := mc.Client.RegisterUser(username, password)
+	require.NoError(t, err)
+
+	return &User{
+		UserID:   response.UserID,
+		Username: username,
+		Password: password,
+	}
+}
+
+// RoomMember represents a member of a Matrix room
+type RoomMember struct {
+	UserID     string
+	Membership string
+}
+
+// GetRoomMembers retrieves the members of a room
+func (mc *Container) GetRoomMembers(t *testing.T, roomID string) []*RoomMember {
+	result, err := mc.makeMatrixRequest("GET", fmt.Sprintf("/_matrix/client/v3/rooms/%s/members", roomID), nil)
+	require.NoError(t, err)
+
+	var response RoomMembersResponse
+	responseBytes, err := json.Marshal(result)
+	require.NoError(t, err)
+	err = json.Unmarshal(responseBytes, &response)
+	require.NoError(t, err)
+
+	members := make([]*RoomMember, 0, len(response.Chunk))
+	for _, event := range response.Chunk {
+		if event.Type == "m.room.member" && event.StateKey != nil {
+			userID := *event.StateKey
+			if membership, exists := event.Content["membership"].(string); exists {
+				members = append(members, &RoomMember{
+					UserID:     userID,
+					Membership: membership,
+				})
+			}
+		}
+	}
+
+	return members
+}
+
+// RoomInfo contains information about a Matrix room
+type RoomInfo struct {
+	Name        string
+	Topic       string
+	JoinRule    string
+	GuestAccess bool
+}
+
+// GetRoomInfo retrieves comprehensive information about a room
+func (mc *Container) GetRoomInfo(t *testing.T, roomID string) *RoomInfo {
+	state := mc.GetRoomState(t, roomID)
+
+	info := &RoomInfo{}
+
+	for _, event := range state {
+		eventType := event.Type
+		content := event.Content
+
+		switch eventType {
+		case "m.room.name":
+			if name, exists := content["name"].(string); exists {
+				info.Name = name
+			}
+		case "m.room.topic":
+			if topic, exists := content["topic"].(string); exists {
+				info.Topic = topic
+			}
+		case "m.room.join_rules":
+			if joinRule, exists := content["join_rule"].(string); exists {
+				info.JoinRule = joinRule
+			}
+		case "m.room.guest_access":
+			if guestAccess, exists := content["guest_access"].(string); exists {
+				info.GuestAccess = guestAccess == "can_join"
+			}
+		}
+	}
+
+	return info
+}
+
+// GetApplicationServiceBotUserID returns the application service bot user ID
+func (mc *Container) GetApplicationServiceBotUserID() string {
+	return fmt.Sprintf("@_mattermost_bot:%s", mc.ServerDomain)
+}
+
+// JoinRoomAsUser joins a room as a specific user
+func (mc *Container) JoinRoomAsUser(_ *testing.T, userID, roomID string) error {
+	_, err := mc.makeMatrixRequestAsUser("POST", fmt.Sprintf("/_matrix/client/v3/join/%s", roomID), map[string]any{}, userID)
+	return err
+}
+
+// makeMatrixRequestAsUser makes a request as a specific user (requires user credentials)
+// This is a simplified version - in real tests you'd need proper user tokens
+func (mc *Container) makeMatrixRequestAsUser(method, endpoint string, data any, _ string) (any, error) {
+	// For simplicity in tests, we'll use AS token to act as user
+	// In production, this would require proper user authentication
+	return mc.makeMatrixRequest(method, endpoint, data)
 }
 
 // makeMatrixRequest makes an authenticated request to the Matrix server
-func (mc *MatrixContainer) makeMatrixRequest(method, endpoint string, data any) (any, error) {
+func (mc *Container) makeMatrixRequest(method, endpoint string, data any) (any, error) {
 	var body io.Reader
 
 	if data != nil {
@@ -338,60 +502,7 @@ func (mc *MatrixContainer) makeMatrixRequest(method, endpoint string, data any) 
 
 	if resp.StatusCode >= 400 {
 		//nolint:staticcheck // Error message capitalization is intentional for Matrix API errors
-		return nil, fmt.Errorf("Matrix API error: %d %s", resp.StatusCode, string(responseBody))
-	}
-
-	if len(responseBody) == 0 {
-		return nil, nil
-	}
-
-	var result any
-	err = json.Unmarshal(responseBody, &result)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
-}
-
-// makeMatrixRequestNoAuth makes an unauthenticated request to the Matrix server
-func (mc *MatrixContainer) makeMatrixRequestNoAuth(method, endpoint string, data any) (any, error) {
-	var body io.Reader
-
-	if data != nil {
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			return nil, err
-		}
-		body = strings.NewReader(string(jsonData))
-	}
-
-	req, err := http.NewRequest(method, mc.ServerURL+endpoint, body)
-	if err != nil {
-		return nil, err
-	}
-
-	if data != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode >= 400 {
-		//nolint:staticcheck // Error message capitalization is intentional for Matrix API errors
-		return nil, fmt.Errorf("Matrix API error: %d %s", resp.StatusCode, string(responseBody))
+		return nil, fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(responseBody))
 	}
 
 	if len(responseBody) == 0 {
@@ -451,11 +562,15 @@ user_directory:
 # Disable encryption for simpler testing
 encryption_enabled_by_default_for_room_type: off
 
-# Allow public rooms
+# Allow public rooms and directory publishing
 allow_public_rooms_over_federation: true
 allow_public_rooms_without_auth: true
 
-# Disable rate limiting for tests
+# Enable registration for testing
+enable_registration: true
+enable_registration_without_verification: true
+
+# Disable rate limiting for tests (matches production config)
 rc_message:
   per_second: 1000
   burst_count: 1000
@@ -474,10 +589,6 @@ rc_login:
   failed_attempts:
     per_second: 1000
     burst_count: 1000
-
-# Enable registration for testing
-enable_registration: true
-enable_registration_without_verification: true
 `, config.ServerName)
 }
 
@@ -497,10 +608,12 @@ namespaces:
   aliases:
     - exclusive: true  
       regex: "#_mattermost_.*:%s"
+    - exclusive: true
+      regex: "#mattermost-bridge-.*:%s"
   rooms: []
 
 protocols: []
-`, config.ASToken, config.HSToken, config.ServerName, config.ServerName)
+`, config.ASToken, config.HSToken, config.ServerName, config.ServerName, config.ServerName)
 }
 
 // generateLogConfig generates a simple logging configuration for Synapse

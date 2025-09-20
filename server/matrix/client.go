@@ -3,6 +3,7 @@ package matrix
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,22 +17,71 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Error represents a Matrix API error response
+type Error struct {
+	ErrCode    string `json:"errcode"`
+	ErrMsg     string `json:"error"`
+	StatusCode int    `json:"-"`
+}
+
+// Error implements the error interface
+func (e *Error) Error() string {
+	return fmt.Sprintf("matrix API error: %d %s - %s", e.StatusCode, e.ErrCode, e.ErrMsg)
+}
+
+// IsAlreadyJoined checks if the error indicates the user is already in the room
+func (e *Error) IsAlreadyJoined() bool {
+	return e.ErrCode == "M_BAD_STATE" ||
+		strings.Contains(strings.ToLower(e.ErrMsg), "already joined") ||
+		strings.Contains(strings.ToLower(e.ErrMsg), "already in the room") ||
+		strings.Contains(e.ErrCode, "ALREADY_JOINED")
+}
+
+// parseMatrixError attempts to parse a Matrix error from response body
+func parseMatrixError(statusCode int, body []byte) *Error {
+	var mErr Error
+	mErr.StatusCode = statusCode
+
+	if err := json.Unmarshal(body, &mErr); err != nil {
+		// Fallback for non-JSON responses
+		mErr.ErrCode = "UNKNOWN"
+		mErr.ErrMsg = string(body)
+	}
+
+	return &mErr
+}
+
+// isForbiddenJoinError checks if an error indicates a forbidden join attempt
+func isForbiddenJoinError(err error) bool {
+	var matrixErr *Error
+	if errors.As(err, &matrixErr) {
+		return matrixErr.StatusCode == http.StatusForbidden ||
+			matrixErr.ErrCode == "M_FORBIDDEN" ||
+			strings.Contains(strings.ToLower(matrixErr.ErrMsg), "not invited")
+	}
+
+	// Fallback for legacy error types that aren't structured
+	return strings.Contains(err.Error(), "403") ||
+		strings.Contains(err.Error(), "M_FORBIDDEN") ||
+		strings.Contains(err.Error(), "not invited")
+}
+
 // Path traversal validation functions
 
-// validatePathComponent checks for path traversal sequences in URL path components
-func validatePathComponent(component string) error {
+// ValidatePathComponent checks for path traversal sequences in URL path components
+func ValidatePathComponent(component string) error {
 	if strings.Contains(component, "..") {
 		return errors.Errorf("path traversal detected in component: %s", component)
 	}
 	return nil
 }
 
-// buildSecureURL constructs URL paths with proper escaping and validation
-func buildSecureURL(baseURL string, pathComponents ...string) (string, error) {
+// BuildSecureURL constructs URL paths with proper escaping and validation
+func BuildSecureURL(baseURL string, pathComponents ...string) (string, error) {
 	var urlParts []string
 
 	for _, component := range pathComponents {
-		if err := validatePathComponent(component); err != nil {
+		if err := ValidatePathComponent(component); err != nil {
 			return "", err
 		}
 		urlParts = append(urlParts, url.PathEscape(component))
@@ -40,12 +90,12 @@ func buildSecureURL(baseURL string, pathComponents ...string) (string, error) {
 	return baseURL + strings.Join(urlParts, "/"), nil
 }
 
-// validateMXCComponents validates MXC URI components for path traversal attacks
-func validateMXCComponents(serverName, mediaID string) error {
-	if err := validatePathComponent(serverName); err != nil {
+// ValidateMXCComponents validates MXC URI components for path traversal attacks
+func ValidateMXCComponents(serverName, mediaID string) error {
+	if err := ValidatePathComponent(serverName); err != nil {
 		return errors.Wrap(err, "invalid server name in MXC URI")
 	}
-	if err := validatePathComponent(mediaID); err != nil {
+	if err := ValidatePathComponent(mediaID); err != nil {
 		return errors.Wrap(err, "invalid media ID in MXC URI")
 	}
 	return nil
@@ -136,6 +186,47 @@ type Client struct {
 	httpClient   *http.Client
 	logger       Logger
 	serverDomain string // explicit server domain for testing
+
+	// Rate limiting
+	rateLimitConfig     RateLimitConfig
+	roomCreationLimiter *TokenBucket
+	messageLimiter      *TokenBucket
+	inviteLimiter       *TokenBucket
+	registrationLimiter *TokenBucket
+	joinLimiter         *TokenBucket
+}
+
+// waitForRateLimit applies rate limiting for the specified operation
+func (c *Client) waitForRateLimit(limiter *TokenBucket, operation string) error {
+	if !c.rateLimitConfig.Enabled {
+		c.logger.LogDebug("Rate limiting disabled, proceeding without throttling", "operation", operation)
+		return nil
+	}
+
+	if limiter == nil {
+		c.logger.LogWarn("Rate limiter not initialized for operation", "operation", operation)
+		return nil
+	}
+
+	c.logger.LogDebug("Applying rate limiting", "operation", operation)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	startTime := time.Now()
+	if err := limiter.Wait(ctx); err != nil {
+		c.logger.LogWarn("Rate limiting failed", "operation", operation, "error", err, "waited_duration", time.Since(startTime))
+		return errors.Wrap(err, operation+" rate limited")
+	}
+
+	waitDuration := time.Since(startTime)
+	if waitDuration > 100*time.Millisecond {
+		c.logger.LogInfo("Rate limiting applied", "operation", operation, "waited_duration", waitDuration)
+	} else {
+		c.logger.LogDebug("Rate limiting completed (no wait required)", "operation", operation, "waited_duration", waitDuration)
+	}
+
+	return nil
 }
 
 // MessageContent represents the content structure for Matrix messages.
@@ -172,30 +263,42 @@ type SendEventResponse struct {
 	EventID string `json:"event_id"`
 }
 
-// NewClient creates a new Matrix client with the given server URL, application service token, and remote ID.
-func NewClient(serverURL, asToken, remoteID string, api plugin.API) *Client {
-	return &Client{
-		serverURL: serverURL,
-		asToken:   asToken,
-		remoteID:  remoteID,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		logger: NewAPILogger(api),
-	}
+// NewClientWithRateLimit creates a new Matrix client with custom rate limiting.
+func NewClientWithRateLimit(serverURL, asToken, remoteID string, api plugin.API, rateLimitConfig RateLimitConfig) *Client {
+	return NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, NewAPILogger(api), rateLimitConfig)
 }
 
-// NewClientWithLogger creates a new Matrix client with a custom logger (useful for testing).
-func NewClientWithLogger(serverURL, asToken, remoteID string, logger Logger) *Client {
-	return &Client{
+// NewClientWithLoggerAndRateLimit creates a new Matrix client with custom logger and rate limiting.
+func NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID string, logger Logger, rateLimitConfig RateLimitConfig) *Client {
+	client := &Client{
 		serverURL: serverURL,
 		asToken:   asToken,
 		remoteID:  remoteID,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		logger: logger,
+		logger:          logger,
+		rateLimitConfig: rateLimitConfig,
 	}
+
+	// Initialize rate limiters if enabled
+	if rateLimitConfig.Enabled {
+		logger.LogInfo("Initializing Matrix client with rate limiting enabled",
+			"room_creation_rate", rateLimitConfig.RoomCreation.Rate,
+			"room_creation_burst", rateLimitConfig.RoomCreation.BurstSize,
+			"message_rate", rateLimitConfig.Messages.Rate,
+			"message_burst", rateLimitConfig.Messages.BurstSize)
+
+		client.roomCreationLimiter = NewTokenBucket(rateLimitConfig.RoomCreation)
+		client.messageLimiter = NewTokenBucket(rateLimitConfig.Messages)
+		client.inviteLimiter = NewTokenBucket(rateLimitConfig.Invites)
+		client.registrationLimiter = NewTokenBucket(rateLimitConfig.Registration)
+		client.joinLimiter = NewTokenBucket(rateLimitConfig.Joins)
+	} else {
+		logger.LogWarn("Matrix client initialized with rate limiting DISABLED - may encounter 429 errors")
+	}
+
+	return client
 }
 
 // SetServerDomain sets an explicit server domain (used for testing)
@@ -203,10 +306,20 @@ func (c *Client) SetServerDomain(domain string) {
 	c.serverDomain = domain
 }
 
+// SetServerURL updates the server URL for the client
+func (c *Client) SetServerURL(serverURL string) {
+	c.serverURL = serverURL
+}
+
 // SendReactionAsGhost sends a reaction to a message as a ghost user
 func (c *Client) SendReactionAsGhost(roomID, eventID, emoji, ghostUserID string) (*SendEventResponse, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
+	}
+
+	// Apply rate limiting for reaction sending
+	if err := c.waitForRateLimit(c.messageLimiter, "Reaction sending"); err != nil {
+		return nil, err
 	}
 
 	// Matrix reaction content structure
@@ -227,11 +340,16 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 		return nil, errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for redaction operations
+	if err := c.waitForRateLimit(c.messageLimiter, "Event redaction"); err != nil {
+		return nil, err
+	}
+
 	// Empty content for redaction
 	content := map[string]any{}
 
 	txnID := uuid.New().String()
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "redact", eventID, txnID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "redact", eventID, txnID)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid room or event ID")
 	}
@@ -284,7 +402,7 @@ func (c *Client) GetEvent(roomID, eventID string) (map[string]any, error) {
 		return nil, errors.New("application service token not configured")
 	}
 
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "event", eventID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "event", eventID)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid room or event ID")
 	}
@@ -400,6 +518,11 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 		return errors.New("matrix client not configured")
 	}
 
+	// Apply rate limiting for room join operations (rc_joins)
+	if err := c.waitForRateLimit(c.joinLimiter, "Room join"); err != nil {
+		return err
+	}
+
 	// Use the unified join endpoint that supports both room IDs and aliases
 	encodedIdentifier := url.PathEscape(roomIdentifier)
 	requestURL := c.serverURL + "/_matrix/client/v3/join/" + encodedIdentifier
@@ -434,6 +557,11 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	if c.serverURL == "" || c.asToken == "" {
 		return errors.New("matrix client not configured")
+	}
+
+	// Apply rate limiting for room join operations (rc_joins)
+	if err := c.waitForRateLimit(c.joinLimiter, "Room join"); err != nil {
+		return err
 	}
 
 	// Use the unified join endpoint that supports both room IDs and aliases
@@ -471,11 +599,226 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	return nil
 }
 
+// InviteUserToRoom invites a user to a Matrix room
+func (c *Client) InviteUserToRoom(roomID, userID string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	// Apply rate limiting for room invite operations
+	if err := c.waitForRateLimit(c.inviteLimiter, "Room invite"); err != nil {
+		return err
+	}
+
+	c.logger.LogDebug("Inviting user to Matrix room", "room_id", roomID, "user_id", userID)
+
+	// Prepare invite request body
+	inviteData := map[string]string{
+		"user_id": userID,
+	}
+
+	jsonData, err := json.Marshal(inviteData)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal invite data")
+	}
+
+	// Use room invite endpoint
+	encodedRoomID := url.PathEscape(roomID)
+	requestURL := c.serverURL + "/_matrix/client/v3/rooms/" + encodedRoomID + "/invite"
+
+	req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return errors.Wrap(err, "failed to create invite request")
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send invite request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read invite response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		// Parse Matrix error response for better error handling
+		matrixErr := parseMatrixError(resp.StatusCode, body)
+
+		// Check for common "already joined" error cases to make this idempotent
+		if matrixErr.IsAlreadyJoined() {
+			c.logger.LogDebug("User already joined or invited to Matrix room, skipping", "room_id", roomID, "user_id", userID, "matrix_error", matrixErr.ErrCode)
+			return nil // Not an error - user is already in the room
+		}
+
+		c.logger.LogWarn("Failed to invite user to Matrix room", "status_code", resp.StatusCode, "matrix_error", matrixErr.ErrCode, "error_message", matrixErr.ErrMsg, "room_id", roomID, "user_id", userID)
+		return matrixErr
+	}
+
+	c.logger.LogDebug("Successfully invited user to Matrix room", "room_id", roomID, "user_id", userID)
+	return nil
+}
+
+// GetRoomJoinRule fetches the join rule for a Matrix room
+func (c *Client) GetRoomJoinRule(roomID string) (string, error) {
+	if c.serverURL == "" || c.asToken == "" {
+		return "", errors.New("matrix client not configured")
+	}
+
+	// Use the room state endpoint to get join rules
+	encodedRoomID := url.PathEscape(roomID)
+	requestURL := c.serverURL + "/_matrix/client/v3/rooms/" + encodedRoomID + "/state/m.room.join_rules/"
+
+	req, err := http.NewRequest("GET", requestURL, nil)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create join rules request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send join rules request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read join rules response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to get join rules: %d %s", resp.StatusCode, string(body))
+	}
+
+	var joinRuleEvent struct {
+		JoinRule string `json:"join_rule"`
+	}
+	if err := json.Unmarshal(body, &joinRuleEvent); err != nil {
+		return "", errors.Wrap(err, "failed to unmarshal join rules response")
+	}
+
+	return joinRuleEvent.JoinRule, nil
+}
+
+// InviteAndJoinGhostUser invites a ghost user to a room (via application service) and then joins them
+// This checks the room's join rules first to determine if invitation is required
+func (c *Client) InviteAndJoinGhostUser(roomIdentifier, ghostUserID string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	c.logger.LogDebug("Attempting to join ghost user to Matrix room", "room_identifier", roomIdentifier, "ghost_user_id", ghostUserID)
+
+	// Always resolve room alias to room ID for consistency
+	roomID, err := c.ResolveRoomAlias(roomIdentifier)
+	if err != nil {
+		return errors.Wrap(err, "failed to resolve room identifier")
+	}
+
+	c.logger.LogDebug("Resolved room identifier to room ID", "room_identifier", roomIdentifier, "room_id", roomID, "ghost_user_id", ghostUserID)
+
+	// Check the room's join rules first
+	joinRule, err := c.GetRoomJoinRule(roomID)
+	if err != nil {
+		c.logger.LogWarn("Failed to get room join rules, falling back to try-join approach", "room_id", roomID, "error", err)
+		// Fall back to the old approach if we can't determine join rules
+		return c.joinGhostUserWithFallback(roomID, ghostUserID)
+	}
+
+	c.logger.LogDebug("Determined room join rule", "room_id", roomID, "join_rule", joinRule)
+
+	// Handle based on join rule
+	switch joinRule {
+	case "public":
+		// Public room - can join directly
+		err := c.JoinRoomAsUser(roomID, ghostUserID)
+		if err != nil {
+			return errors.Wrap(err, "failed to join ghost user to public room")
+		}
+		c.logger.LogDebug("Successfully joined ghost user to public room", "room_id", roomID, "ghost_user_id", ghostUserID)
+		return nil
+
+	case "invite":
+		// Private/invite-only room - need to invite first
+		c.logger.LogDebug("Room requires invitation, inviting ghost user first", "room_id", roomID, "ghost_user_id", ghostUserID)
+
+		// Invite the ghost user to the room using application service bot
+		inviteErr := c.InviteUserToRoom(roomID, ghostUserID)
+		if inviteErr != nil {
+			return errors.Wrap(inviteErr, "failed to invite ghost user to private room")
+		}
+
+		// Now join after invitation
+		joinErr := c.JoinRoomAsUser(roomID, ghostUserID)
+		if joinErr != nil {
+			return errors.Wrap(joinErr, "failed to join ghost user to room after invitation")
+		}
+
+		c.logger.LogDebug("Successfully invited and joined ghost user to private room", "room_id", roomID, "ghost_user_id", ghostUserID)
+		return nil
+
+	default:
+		// Unknown or unsupported join rule (e.g., "knock", "restricted")
+		c.logger.LogWarn("Unknown join rule, falling back to try-join approach", "room_id", roomID, "join_rule", joinRule)
+		return c.joinGhostUserWithFallback(roomID, ghostUserID)
+	}
+}
+
+// joinGhostUserWithFallback is the fallback method that tries join first, then invite+join
+func (c *Client) joinGhostUserWithFallback(roomID, ghostUserID string) error {
+	// First try to join directly
+	err := c.JoinRoomAsUser(roomID, ghostUserID)
+	if err == nil {
+		c.logger.LogDebug("Successfully joined ghost user to room directly", "room_id", roomID, "ghost_user_id", ghostUserID)
+		return nil
+	}
+
+	// If join failed with a forbidden error, try invitation first
+	if isForbiddenJoinError(err) {
+		var matrixErr *Error
+		if errors.As(err, &matrixErr) {
+			c.logger.LogDebug("Direct join failed with forbidden error, attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "matrix_error", matrixErr.ErrCode)
+		} else {
+			// Fallback for legacy error types that aren't structured
+			c.logger.LogDebug("Direct join failed with forbidden error (legacy error), attempting invitation first", "room_id", roomID, "ghost_user_id", ghostUserID, "error", err.Error())
+		}
+	} else {
+		// For other errors, return the original join error
+		return errors.Wrap(err, "failed to join ghost user to room")
+	}
+
+	// Common invitation and join logic for both structured and legacy errors
+	// Invite the ghost user to the room using application service bot
+	inviteErr := c.InviteUserToRoom(roomID, ghostUserID)
+	if inviteErr != nil {
+		return errors.Wrap(inviteErr, "failed to invite ghost user to private room")
+	}
+
+	// Now try to join again after invitation
+	joinErr := c.JoinRoomAsUser(roomID, ghostUserID)
+	if joinErr != nil {
+		return errors.Wrap(joinErr, "failed to join ghost user to room after invitation")
+	}
+
+	c.logger.LogDebug("Successfully invited and joined ghost user to private room via fallback", "room_id", roomID, "ghost_user_id", ghostUserID)
+	return nil
+}
+
 // CreateRoom creates a new Matrix room with the specified name, topic, and settings.
 // Returns the room ID or alias on success.
 func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, mattermostChannelID string) (string, error) {
 	if c.serverURL == "" || c.asToken == "" {
 		return "", errors.New("matrix client not configured")
+	}
+
+	// Apply rate limiting for room creation
+	if err := c.waitForRateLimit(c.roomCreationLimiter, "Room creation"); err != nil {
+		return "", err
 	}
 
 	c.logger.LogDebug("Creating Matrix room", "name", name, "topic", topic, "server_domain", serverDomain)
@@ -489,11 +832,27 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 		roomAlias = "#_mattermost_" + alias + ":" + serverDomain
 	}
 
+	// Set room visibility and rules based on publish parameter
+	var preset, visibility, joinRule, historyVisibility, guestAccess string
+	if publish {
+		preset = "public_chat"
+		visibility = "public"
+		joinRule = "public"
+		historyVisibility = "world_readable"
+		guestAccess = "can_join"
+	} else {
+		preset = "private_chat"
+		visibility = "private"
+		joinRule = "invite"
+		historyVisibility = "invited"
+		guestAccess = "forbidden"
+	}
+
 	roomData := map[string]any{
 		"name":         name,
 		"topic":        topic,
-		"preset":       "public_chat",
-		"visibility":   "public",
+		"preset":       preset,
+		"visibility":   visibility,
 		"is_direct":    false, // Explicitly mark as not a direct message room
 		"room_version": "10",  // Explicitly set room version and directory visibility
 		"initial_state": []map[string]any{
@@ -501,21 +860,21 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 				"type":      "m.room.guest_access",
 				"state_key": "",
 				"content": map[string]any{
-					"guest_access": "can_join",
+					"guest_access": guestAccess,
 				},
 			},
 			{
 				"type":      "m.room.history_visibility",
 				"state_key": "",
 				"content": map[string]any{
-					"history_visibility": "world_readable",
+					"history_visibility": historyVisibility,
 				},
 			},
 			{
 				"type":      "m.room.join_rules",
 				"state_key": "",
 				"content": map[string]any{
-					"join_rule": "public",
+					"join_rule": joinRule,
 				},
 			},
 			{
@@ -564,8 +923,20 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		matrixErr := parseMatrixError(resp.StatusCode, body)
+
+		// Handle 429 Too Many Requests with specific logging
+		if IsRateLimitError(matrixErr) {
+			c.logger.LogWarn("Matrix room creation rate limited, server rejected request",
+				"status_code", resp.StatusCode,
+				"response", string(body),
+				"room_name", name,
+				"error_code", matrixErr.ErrCode)
+			return "", matrixErr
+		}
+
 		c.logger.LogError("Matrix room creation failed", "status_code", resp.StatusCode, "response", string(body), "room_name", name)
-		return "", fmt.Errorf("failed to create room: %d %s", resp.StatusCode, string(body))
+		return "", matrixErr
 	}
 
 	var response struct {
@@ -573,6 +944,15 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", errors.Wrap(err, "failed to unmarshal room creation response")
+	}
+
+	// Join the application service bot to the room immediately after creation
+	// This is required for the bot to query room state, invite users, etc.
+	if err := c.JoinRoom(response.RoomID); err != nil {
+		c.logger.LogWarn("Failed to join application service bot to created room", "room_id", response.RoomID, "error", err)
+		// Continue - the room was created successfully, but bot operations may fail
+	} else {
+		c.logger.LogDebug("Application service bot joined room", "room_id", response.RoomID)
 	}
 
 	// Publish to directory based on the publish parameter
@@ -624,6 +1004,11 @@ func (c *Client) CreateDirectRoom(ghostUserIDs []string, roomName string) (strin
 
 	if len(ghostUserIDs) < 2 {
 		return "", errors.New("direct room requires at least 2 users")
+	}
+
+	// Apply rate limiting for room creation operations
+	if err := c.waitForRateLimit(c.roomCreationLimiter, "Direct room creation"); err != nil {
+		return "", err
 	}
 
 	c.logger.LogDebug("Creating Matrix DM room", "users", ghostUserIDs)
@@ -790,6 +1175,11 @@ func (c *Client) CreateGhostUser(mattermostUserID, displayName string, avatarDat
 		return nil, errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for user creation operations
+	if err := c.waitForRateLimit(c.inviteLimiter, "Ghost user creation"); err != nil {
+		return nil, err
+	}
+
 	// Extract server domain from serverURL
 	serverDomain, err := c.extractServerDomain()
 	if err != nil {
@@ -896,6 +1286,11 @@ func (c *Client) SetDisplayName(userID, displayName string) error {
 		return errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for profile operations
+	if err := c.waitForRateLimit(c.inviteLimiter, "Display name setting"); err != nil {
+		return err
+	}
+
 	// Content for the display name event
 	content := map[string]any{
 		"displayname": displayName,
@@ -944,6 +1339,11 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 		return errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for profile operations
+	if err := c.waitForRateLimit(c.inviteLimiter, "Avatar URL setting"); err != nil {
+		return err
+	}
+
 	// Content for the avatar URL event
 	content := map[string]any{
 		"avatar_url": avatarURL,
@@ -990,6 +1390,11 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 func (c *Client) UploadMedia(data []byte, filename, contentType string) (string, error) {
 	if c.asToken == "" {
 		return "", errors.New("application service token not configured")
+	}
+
+	// Apply rate limiting for media upload operations
+	if err := c.waitForRateLimit(c.messageLimiter, "Media upload"); err != nil {
+		return "", err
 	}
 
 	// Use the media upload endpoint
@@ -1093,6 +1498,11 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 		return nil, errors.New("application service token not configured")
 	}
 
+	// Apply rate limiting for message edit operations
+	if err := c.waitForRateLimit(c.messageLimiter, "Message edit"); err != nil {
+		return nil, err
+	}
+
 	// Matrix edit event content structure
 	newContent := map[string]any{
 		"msgtype": "m.text",
@@ -1122,6 +1532,11 @@ func (c *Client) EditMessageAsGhost(roomID, eventID, newMessage, htmlMessage, gh
 func (c *Client) SendMessage(req MessageRequest) (*SendEventResponse, error) {
 	if c.asToken == "" {
 		return nil, errors.New("application service token not configured")
+	}
+
+	// Apply rate limiting for message sending
+	if err := c.waitForRateLimit(c.messageLimiter, "Message sending"); err != nil {
+		return nil, err
 	}
 
 	// Validate required fields
@@ -1284,7 +1699,7 @@ func (c *Client) sendFileMessage(req MessageRequest, file FileAttachment, rootEv
 // sendEventAsUser sends an event as a specific user (using application service impersonation)
 func (c *Client) sendEventAsUser(roomID, eventType string, content any, userID string) (*SendEventResponse, error) {
 	txnID := uuid.New().String()
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid room ID or event type")
 	}
@@ -1449,7 +1864,7 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	mediaID := parts[1]
 
 	// Validate MXC URI components for path traversal attacks
-	if err := validateMXCComponents(serverName, mediaID); err != nil {
+	if err := ValidateMXCComponents(serverName, mediaID); err != nil {
 		return nil, errors.Wrap(err, "invalid MXC URI components")
 	}
 
@@ -1458,14 +1873,14 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	var validationErrors []error
 
 	// NEW: Try client API endpoints first (newer Synapse versions use these)
-	url1, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", serverName, mediaID)
+	url1, err := BuildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url1)
 	} else {
 		validationErrors = append(validationErrors, errors.Wrap(err, "client v1 with server"))
 	}
 
-	url2, err := buildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", mediaID)
+	url2, err := BuildSecureURL(c.serverURL+"/_matrix/client/v1/media/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url2)
 	} else {
@@ -1473,7 +1888,7 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	}
 
 	// Standard Matrix media repository API v3
-	url3, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", serverName, mediaID)
+	url3, err := BuildSecureURL(c.serverURL+"/_matrix/media/v3/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url3)
 	} else {
@@ -1481,7 +1896,7 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	}
 
 	// Fallback to v1 API (some older servers)
-	url4, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", serverName, mediaID)
+	url4, err := BuildSecureURL(c.serverURL+"/_matrix/media/v1/download/", serverName, mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url4)
 	} else {
@@ -1489,14 +1904,14 @@ func (c *Client) DownloadFile(mxcURI string, maxSize int64, contentTypePrefix st
 	}
 
 	// Alternative endpoint without server name (some configurations)
-	url5, err := buildSecureURL(c.serverURL+"/_matrix/media/v3/download/", mediaID)
+	url5, err := BuildSecureURL(c.serverURL+"/_matrix/media/v3/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url5)
 	} else {
 		validationErrors = append(validationErrors, errors.Wrap(err, "media v3 media-only"))
 	}
 
-	url6, err := buildSecureURL(c.serverURL+"/_matrix/media/v1/download/", mediaID)
+	url6, err := BuildSecureURL(c.serverURL+"/_matrix/media/v1/download/", mediaID)
 	if err == nil {
 		downloadURLs = append(downloadURLs, url6)
 	} else {
@@ -1650,7 +2065,7 @@ func (c *Client) AddFileMetadataToMessage(roomID, messageEventID string, fileEve
 // sendCustomEventAsUser sends a custom event type as a specific user
 func (c *Client) sendCustomEventAsUser(roomID, eventType string, content any, userID string) error {
 	txnID := uuid.New().String()
-	endpoint, err := buildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
+	endpoint, err := BuildSecureURL("/_matrix/client/v3/rooms/", roomID, "send", eventType, txnID)
 	if err != nil {
 		return errors.Wrap(err, "invalid room ID or event type")
 	}
@@ -1890,6 +2305,108 @@ func (c *Client) GetServerInfo() (*ServerInfo, error) {
 	return serverInfo, nil
 }
 
+// RegisterUser creates a regular Matrix user (not a ghost user) with rate limiting
+func (c *Client) RegisterUser(username, password string) (*RegisterResponse, error) {
+	// Apply rate limiting for user registration operations (rc_registration)
+	if err := c.waitForRateLimit(c.registrationLimiter, "User registration"); err != nil {
+		return nil, err
+	}
+
+	// First, try to get registration flows
+	_, err := c.makeMatrixRequest("POST", "/_matrix/client/v3/register", map[string]any{}, "")
+	if err != nil {
+		// If we get an error, it might contain flow information - this is expected
+		c.logger.LogDebug("Registration flow error (expected)", "error", err)
+	}
+
+	// Try registration with dummy auth
+	userData := map[string]any{
+		"username": username,
+		"password": password,
+		"auth": map[string]any{
+			"type": "m.login.dummy",
+		},
+	}
+
+	result, err := c.makeMatrixRequest("POST", "/_matrix/client/v3/register", userData, "")
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to register user")
+	}
+
+	var response RegisterResponse
+	responseBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to marshal registration response")
+	}
+
+	err = json.Unmarshal(responseBytes, &response)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal registration response")
+	}
+
+	return &response, nil
+}
+
+// RegisterResponse represents the response from Matrix user registration
+type RegisterResponse struct {
+	UserID      string `json:"user_id"`
+	AccessToken string `json:"access_token"`
+	HomeServer  string `json:"home_server"`
+	DeviceID    string `json:"device_id"`
+}
+
+// makeMatrixRequest makes an HTTP request to Matrix without Application Service authentication
+func (c *Client) makeMatrixRequest(method, endpoint string, data any, token string) (any, error) {
+	var body io.Reader
+
+	if data != nil {
+		jsonData, err := json.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		body = strings.NewReader(string(jsonData))
+	}
+
+	requestURL := c.serverURL + endpoint
+	req, err := http.NewRequest(method, requestURL, body)
+	if err != nil {
+		return nil, err
+	}
+
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if data != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(responseBody))
+	}
+
+	if len(responseBody) == 0 {
+		return map[string]any{}, nil
+	}
+
+	var result any
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 // GetMattermostChannelID retrieves the Mattermost channel ID from the Matrix room's custom state.
 // Returns the channel ID if found, or empty string if not set.
 func (c *Client) GetMattermostChannelID(roomID string) (string, error) {
@@ -1936,4 +2453,36 @@ func (c *Client) GetMattermostChannelID(roomID string) (string, error) {
 	}
 
 	return stateContent.MattermostChannelID, nil
+}
+
+// RemoveMattermostChannelID removes the Mattermost channel ID from the Matrix room's custom state.
+// This prevents the room from being found during fallback lookups after unmapping.
+func (c *Client) RemoveMattermostChannelID(roomID string) error {
+	if c.serverURL == "" || c.asToken == "" {
+		return errors.New("matrix client not configured")
+	}
+
+	url := c.serverURL + "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/state/com.mattermost.bridge.channel/"
+
+	// Send an empty object to clear the state
+	body := strings.NewReader("{}")
+	req, err := http.NewRequest("PUT", url, body)
+	if err != nil {
+		return errors.Wrap(err, "failed to create room state removal request")
+	}
+
+	req.Header.Set("Authorization", "Bearer "+c.asToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send room state removal request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return errors.Errorf("failed to remove room state: HTTP %d", resp.StatusCode)
+	}
+
+	return nil
 }
