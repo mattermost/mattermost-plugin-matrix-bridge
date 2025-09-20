@@ -554,18 +554,22 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 	// Uninvite this plugin from the shared channel
 	uninviteErr := c.pluginAPI.UninviteRemoteFromChannel(args.ChannelId, c.plugin.GetRemoteID())
 
-	var uninviteStatus string
+	var responseIcon, responseTitle, uninviteStatus string
 	if uninviteErr != nil {
 		c.client.Log.Warn("Failed to uninvite plugin from shared channel", "error", uninviteErr, "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		responseIcon = "⚠️"
+		responseTitle = "**Mapping Partially Removed**"
 		uninviteStatus = "\n\n⚠️ **Note:** Failed to uninvite plugin from shared channel. The channel may still receive some sync events."
 	} else {
 		c.client.Log.Info("Successfully uninvited plugin from shared channel", "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		responseIcon = "✅"
+		responseTitle = "**Mapping Removed**"
 		uninviteStatus = "\n\n✅ **Plugin uninvited** from shared channel successfully!"
 	}
 
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
-		Text:         fmt.Sprintf("✅ **Mapping Removed**\n\n**Channel:** %s\n**Matrix Room:** `%s`%s", channelName, matrixRoomIdentifier, uninviteStatus),
+		Text:         fmt.Sprintf("%s %s\n\n**Channel:** %s\n**Matrix Room:** `%s`%s", responseIcon, responseTitle, channelName, matrixRoomIdentifier, uninviteStatus),
 	}
 }
 

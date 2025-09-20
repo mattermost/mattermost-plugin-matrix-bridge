@@ -303,7 +303,21 @@ func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.Ch
 		var appErr *model.AppError
 		user, appErr = p.API.GetUser(channelMember.UserId)
 		if appErr != nil {
-			p.logger.LogError("Failed to get user who joined channel", "error", appErr, "user_id", channelMember.UserId)
+			// Log the failure with context about both fallback methods
+			if actor == nil {
+				p.logger.LogError("Failed to get user who joined channel - no actor provided and GetUser API call failed",
+					"error", appErr,
+					"user_id", channelMember.UserId,
+					"channel_id", channelMember.ChannelId,
+					"troubleshooting", "both actor parameter and GetUser API call failed")
+			} else {
+				p.logger.LogError("Failed to get user who joined channel - actor provided but user ID mismatch, GetUser API call also failed",
+					"error", appErr,
+					"user_id", channelMember.UserId,
+					"actor_id", actor.Id,
+					"channel_id", channelMember.ChannelId,
+					"troubleshooting", "actor user ID did not match channel member user ID, and GetUser API call failed")
+			}
 			return
 		}
 	}
