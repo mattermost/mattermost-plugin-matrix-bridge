@@ -16,11 +16,11 @@ import (
 // UserRemoteDetectionIntegrationTestSuite tests real loop prevention logic with a Matrix server
 type UserRemoteDetectionIntegrationTestSuite struct {
 	suite.Suite
-	matrixContainer *matrixtest.MatrixContainer
+	matrixContainer *matrixtest.Container
 	plugin          *Plugin
 	testChannelID   string
 	testRoomID      string
-	validator       *matrixtest.MatrixEventValidation
+	validator       *matrixtest.EventValidation
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -42,7 +42,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 
 	// Set up test data
 	suite.testChannelID = model.NewId()
-	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), "Loop Prevention Test Room")
+	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Loop Prevention Test Room"))
 
 	// Create plugin instance
 	suite.plugin = &Plugin{
@@ -83,7 +83,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
-	suite.validator = matrixtest.NewMatrixEventValidation(
+	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
 		suite.plugin.remoteID,

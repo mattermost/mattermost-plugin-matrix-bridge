@@ -19,8 +19,11 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 
 	// Process user sync events first (display name changes, etc.)
 	for _, user := range msg.Users {
-		// Skip syncing users that originated from Matrix to prevent loops
 		if user.IsRemote() {
+			// This is a Matrix-originated user - invite them to the Matrix room if not already there
+			if err := p.inviteRemoteUserToMatrixRoom(user, msg.ChannelId); err != nil {
+				p.logger.LogError("Failed to invite remote user to Matrix room", "error", err, "user_id", user.Id, "username", user.Username, "channel_id", msg.ChannelId)
+			}
 			continue
 		}
 
@@ -114,7 +117,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 
 	// Get the Matrix room identifier for this channel
-	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.getMatrixRoomID(post.ChannelId)
+	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.GetMatrixRoomID(post.ChannelId)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for attachment")
 	}
@@ -162,7 +165,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 
 	// If not in pending files, the file was already posted to Matrix - need to delete from Matrix
 	// Get the Matrix room identifier for this channel
-	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.getMatrixRoomID(post.ChannelId)
+	matrixRoomIdentifier, err := p.mattermostToMatrixBridge.GetMatrixRoomID(post.ChannelId)
 	if err != nil {
 		return errors.Wrap(err, "failed to get Matrix room identifier for file deletion")
 	}
@@ -215,6 +218,44 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 	}
 
 	p.logger.LogDebug("Successfully deleted file attachment from Matrix", "filename", fi.Name, "file_id", fi.Id, "post_id", post.Id)
+	return nil
+}
+
+// inviteRemoteUserToMatrixRoom invites a Matrix user to their corresponding Matrix room when added to a shared channel
+func (p *Plugin) inviteRemoteUserToMatrixRoom(user *model.User, channelID string) error {
+	// Check if this channel is mapped to a Matrix room
+	matrixRoomID, err := p.mattermostToMatrixBridge.GetMatrixRoomID(channelID)
+	if err != nil {
+		p.logger.LogDebug("Channel not mapped to Matrix room, skipping remote user invite", "channel_id", channelID, "user_id", user.Id)
+		return nil // Not an error - channel might not be bridged
+	}
+
+	if matrixRoomID == "" {
+		p.logger.LogDebug("No Matrix room found for channel, skipping remote user invite", "channel_id", channelID, "user_id", user.Id)
+		return nil
+	}
+
+	// Get the original Matrix user ID for this remote Mattermost user
+	originalMatrixUserID, err := p.mattermostToMatrixBridge.GetMatrixUserIDFromMattermostUser(user.Id)
+	if err != nil {
+		p.logger.LogWarn("Failed to get original Matrix user ID for remote user", "error", err, "user_id", user.Id, "username", user.Username)
+		return errors.Wrap(err, "failed to get original Matrix user ID")
+	}
+
+	// Resolve room alias to room ID (handles both aliases and room IDs)
+	resolvedRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomID)
+	if err != nil {
+		p.logger.LogWarn("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomID)
+		return errors.Wrap(err, "failed to resolve Matrix room identifier")
+	}
+
+	// Invite the original Matrix user to the room
+	if err := p.matrixClient.InviteUserToRoom(resolvedRoomID, originalMatrixUserID); err != nil {
+		p.logger.LogWarn("Failed to invite Matrix user to room", "error", err, "matrix_user_id", originalMatrixUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id)
+		return errors.Wrap(err, "failed to invite Matrix user to room")
+	}
+
+	p.logger.LogInfo("Successfully invited Matrix user to room", "matrix_user_id", originalMatrixUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id, "username", user.Username, "channel_id", channelID)
 	return nil
 }
 
