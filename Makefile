@@ -319,7 +319,7 @@ detach: setup-attach
 .PHONY: test
 test: apply webapp/node_modules install-go-tools
 ifneq ($(HAS_SERVER),)
-	$(GOBIN)/gotestsum -- -v -count=1 -p 1 -timeout=20m ./...
+	$(GOBIN)/gotestsum -- -v -count=1 -p 2 -timeout=20m ./...
 endif
 ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test;
@@ -330,7 +330,7 @@ endif
 .PHONY: test-ci
 test-ci: apply webapp/node_modules install-go-tools
 ifneq ($(HAS_SERVER),)
-	$(GOBIN)/gotestsum --format standard-verbose --junitfile report.xml -- -p 1 ./...
+	$(GOBIN)/gotestsum --format standard-verbose --junitfile report.xml -- -p 2 ./...
 endif
 ifneq ($(HAS_WEBAPP),)
 	cd webapp && $(NPM) run test;
