@@ -42,15 +42,15 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *Container {
 	synapseConfig := generateSynapseConfig(config)
 	appServiceConfig := generateAppServiceConfig(config)
 
-	// Create container with Synapse using host networking to bypass VPN issues
+	// Create container with Synapse using bridge networking with dynamic port assignment
 	req := testcontainers.ContainerRequest{
-		Image:       "matrixdotorg/synapse:latest",
-		NetworkMode: "host", // Use host networking to bypass VPN conflicts
+		Image: "matrixdotorg/synapse:v1.119.0",
 		Env: map[string]string{
 			"SYNAPSE_SERVER_NAME":  config.ServerName,
 			"SYNAPSE_REPORT_STATS": "no",
 			"SYNAPSE_NO_TLS":       "true",
 		},
+		ExposedPorts: []string{"18008/tcp"}, // Expose port for dynamic assignment
 		Files: []testcontainers.ContainerFile{
 			{
 				HostFilePath:      "",
@@ -75,6 +75,7 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *Container {
 			"sh", "-c",
 			"python -m synapse.app.homeserver --config-path=/data/homeserver.yaml --generate-keys && python -m synapse.app.homeserver --config-path=/data/homeserver.yaml",
 		},
+		// Wait for Synapse to start (HTTP readiness checked after port mapping)
 		WaitingFor: wait.ForLog("SynapseSite starting on 18008").WithStartupTimeout(60 * time.Second),
 	}
 
@@ -84,9 +85,12 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *Container {
 	})
 	require.NoError(t, err)
 
-	// With host networking, use a different port to avoid conflicts
-	serverURL := "http://localhost:18008"
-	t.Logf("Using host networking: %s", serverURL)
+	// Get the dynamically assigned host port
+	hostPort, err := container.MappedPort(ctx, "18008")
+	require.NoError(t, err)
+
+	serverURL := fmt.Sprintf("http://localhost:%s", hostPort.Port())
+	t.Logf("Using dynamically assigned port: %s", serverURL)
 
 	mc := &Container{
 		Container:    container,
@@ -159,40 +163,57 @@ func CleanupAllContainers() {
 
 // waitForMatrixReady waits for Matrix server to be fully operational
 func (mc *Container) waitForMatrixReady(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	// Give extra time for server to fully start after log message
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second)
 
+	attempts := 0
+	var lastErr error
 	for {
 		select {
 		case <-ctx.Done():
-			t.Logf("Matrix server connectivity check timed out. VPN environments may interfere with container networking.")
-			t.Logf("Proceeding anyway since container is running and log shows server started.")
-			return // Don't fail - proceed with tests
+			if lastErr != nil {
+				t.Fatalf("Matrix server HTTP endpoint did not become ready within timeout at %s. Last error: %v", mc.ServerURL, lastErr)
+			} else {
+				t.Fatalf("Matrix server HTTP endpoint did not become ready within timeout at %s", mc.ServerURL)
+			}
+			return
 		default:
-			if mc.isMatrixReady() {
-				t.Logf("Matrix server is ready and responding")
+			ready, err := mc.isMatrixReady()
+			if err != nil {
+				lastErr = err
+				attempts++
+				// Log every 10 attempts to avoid spam
+				if attempts%10 == 1 {
+					t.Logf("Waiting for Matrix server at %s (attempt %d): %v", mc.ServerURL, attempts, err)
+				}
+			}
+			if ready {
+				t.Logf("Matrix server is ready and responding at %s after %d attempts", mc.ServerURL, attempts)
 				return
 			}
-			time.Sleep(1 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
 
 // isMatrixReady checks if Matrix server is responding properly
-func (mc *Container) isMatrixReady() bool {
+func (mc *Container) isMatrixReady() (bool, error) {
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 	}
 	resp, err := client.Get(mc.ServerURL + "/_matrix/client/versions")
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	return true, nil
 }
 
 // CreateRoom creates a test room and returns its room ID
