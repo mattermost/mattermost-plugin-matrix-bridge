@@ -447,7 +447,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 			"https://fake-matrix-server.invalid", // Fake URL - we're only testing empty token validation
 			"",                                   // Empty token
 			"test-remote-id",
-			"",                                   // No configured server name
+			"", // No configured server name
 			matrix.NewTestLogger(suite.T()),
 			matrix.TestRateLimitConfig(),
 		)

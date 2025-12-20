@@ -131,7 +131,7 @@ func TestServerDiscoveryWithWellKnown(t *testing.T) {
 			response := WellKnownResponse{
 				Server: "matrix.example.com:443",
 			}
-			json.NewEncoder(w).Encode(response)
+			_ = json.NewEncoder(w).Encode(response)
 			return
 		}
 		http.NotFound(w, r)
@@ -190,7 +190,7 @@ func TestTryWellKnownDiscovery(t *testing.T) {
 				response := WellKnownResponse{
 					Server: "matrix.example.com:8448",
 				}
-				json.NewEncoder(w).Encode(response)
+				_ = json.NewEncoder(w).Encode(response)
 				return
 			}
 			http.NotFound(w, r)
@@ -206,7 +206,9 @@ func TestTryWellKnownDiscovery(t *testing.T) {
 		// by calling the server directly
 		resp, err := discovery.httpClient.Get(server.URL + "/.well-known/matrix/server")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		var wellKnown WellKnownResponse
 		err = json.NewDecoder(resp.Body).Decode(&wellKnown)
@@ -227,9 +229,9 @@ func TestTryWellKnownDiscovery(t *testing.T) {
 
 	t.Run("Invalid JSON response", func(t *testing.T) {
 		// Create a test server that returns invalid JSON
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte("invalid json"))
+			_, _ = w.Write([]byte("invalid json"))
 		}))
 		defer server.Close()
 
@@ -240,7 +242,9 @@ func TestTryWellKnownDiscovery(t *testing.T) {
 		// This won't work in practice but tests the JSON parsing
 		resp, err := discovery.httpClient.Get(server.URL + "/.well-known/matrix/server")
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		var wellKnown WellKnownResponse
 		err = json.NewDecoder(resp.Body).Decode(&wellKnown)

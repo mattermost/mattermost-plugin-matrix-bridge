@@ -87,7 +87,9 @@ func (sd *ServerDiscovery) tryWellKnownDiscovery(hostname string) (string, error
 	if err != nil {
 		return "", errors.Wrap(err, "failed to fetch .well-known")
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
