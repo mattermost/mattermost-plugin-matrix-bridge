@@ -3,7 +3,6 @@ package command
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
@@ -17,6 +16,7 @@ import (
 // Configuration interface for accessing plugin configuration
 type Configuration interface {
 	GetMatrixServerURL() string
+	GetMatrixServerName() string
 	GetMatrixUsernamePrefixForServer(serverURL string) string
 }
 
@@ -900,20 +900,20 @@ func (c *Handler) extractServerDomain() string {
 		return "matrix.org"
 	}
 
-	// Parse the URL to extract the hostname
-	parsedURL, err := url.Parse(serverURL)
+	// Get the configured server name (if set)
+	configuredServerName := config.GetMatrixServerName()
+
+	// Use ServerDiscovery to determine the server name
+	// This will try: configured name -> .well-known discovery -> hostname fallback
+	logger := matrix.NewAPILogger(c.pluginAPI)
+	discovery := matrix.NewServerDiscovery(logger)
+	serverName, err := discovery.DiscoverServerName(serverURL, configuredServerName)
 	if err != nil {
-		c.client.Log.Warn("Failed to parse Matrix server URL", "url", serverURL, "error", err)
+		c.client.Log.Warn("Failed to discover Matrix server name", "url", serverURL, "error", err)
 		return "matrix.org"
 	}
 
-	hostname := parsedURL.Hostname()
-	if hostname == "" {
-		c.client.Log.Warn("Could not extract hostname from Matrix server URL", "url", serverURL)
-		return "matrix.org"
-	}
-
-	return hostname
+	return serverName
 }
 
 func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandResponse {

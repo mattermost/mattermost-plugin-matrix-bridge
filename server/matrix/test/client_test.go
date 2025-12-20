@@ -447,6 +447,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 			"https://fake-matrix-server.invalid", // Fake URL - we're only testing empty token validation
 			"",                                   // Empty token
 			"test-remote-id",
+			"", // No configured server name
 			matrix.NewTestLogger(suite.T()),
 			matrix.TestRateLimitConfig(),
 		)
@@ -463,6 +464,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 			"http://nonexistent.invalid:1234",
 			suite.matrixContainer.ASToken,
 			"test-remote-id",
+			"",
 			matrix.NewTestLogger(suite.T()),
 			matrix.TestRateLimitConfig(),
 		)
@@ -566,6 +568,7 @@ func (suite *MatrixClientTestSuite) TestMatrixClientErrorHandling() {
 			"http://localhost:99999", // Port that should be unused
 			suite.matrixContainer.ASToken,
 			"test-remote-id",
+			"",
 			matrix.NewTestLogger(suite.T()),
 			matrix.TestRateLimitConfig(),
 		)
@@ -1154,6 +1157,7 @@ func TestMXCURIValidationErrorReporting(t *testing.T) {
 		"https://matrix.example.com",
 		"test-token",
 		"test-remote-id",
+		"",
 		matrix.NewTestLogger(t),
 		matrix.TestRateLimitConfig(),
 	)
@@ -1199,6 +1203,7 @@ func TestMXCURIValidationErrorReportingWithBetterErrorMessages(t *testing.T) {
 		"https://matrix.example.com",
 		"test-token",
 		"test-remote-id",
+		"",
 		matrix.NewTestLogger(t),
 		matrix.TestRateLimitConfig(),
 	)

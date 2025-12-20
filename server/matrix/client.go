@@ -180,12 +180,14 @@ func (l *testLogger) LogError(message string, keyValuePairs ...any) {
 
 // Client represents a Matrix HTTP client for communicating with Matrix servers.
 type Client struct {
-	serverURL    string
-	asToken      string // Application Service token for all operations
-	remoteID     string // Plugin remote ID for metadata
-	httpClient   *http.Client
-	logger       Logger
-	serverDomain string // explicit server domain for testing
+	serverURL            string
+	asToken              string // Application Service token for all operations
+	remoteID             string // Plugin remote ID for metadata
+	httpClient           *http.Client
+	logger               Logger
+	serverDomain         string           // override server domain for testing
+	configuredServerName string           // configured Matrix server name from config
+	serverDiscovery      *ServerDiscovery // utility for server name discovery
 
 	// Rate limiting
 	rateLimitConfig     RateLimitConfig
@@ -264,21 +266,23 @@ type SendEventResponse struct {
 }
 
 // NewClientWithRateLimit creates a new Matrix client with custom rate limiting.
-func NewClientWithRateLimit(serverURL, asToken, remoteID string, api plugin.API, rateLimitConfig RateLimitConfig) *Client {
-	return NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, NewAPILogger(api), rateLimitConfig)
+func NewClientWithRateLimit(serverURL, asToken, remoteID, configuredServerName string, api plugin.API, rateLimitConfig RateLimitConfig) *Client {
+	return NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, configuredServerName, NewAPILogger(api), rateLimitConfig)
 }
 
 // NewClientWithLoggerAndRateLimit creates a new Matrix client with custom logger and rate limiting.
-func NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID string, logger Logger, rateLimitConfig RateLimitConfig) *Client {
+func NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, configuredServerName string, logger Logger, rateLimitConfig RateLimitConfig) *Client {
 	client := &Client{
-		serverURL: serverURL,
-		asToken:   asToken,
-		remoteID:  remoteID,
+		serverURL:            serverURL,
+		asToken:              asToken,
+		remoteID:             remoteID,
+		configuredServerName: configuredServerName,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		logger:          logger,
 		rateLimitConfig: rateLimitConfig,
+		serverDiscovery: NewServerDiscovery(logger),
 	}
 
 	// Initialize rate limiters if enabled
@@ -301,7 +305,7 @@ func NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID string, logger
 	return client
 }
 
-// SetServerDomain sets an explicit server domain (used for testing)
+// SetServerDomain sets an override server domain (used for testing)
 func (c *Client) SetServerDomain(domain string) {
 	c.serverDomain = domain
 }
@@ -1088,9 +1092,14 @@ func (c *Client) CreateDirectRoom(ghostUserIDs []string, roomName string) (strin
 	return response.RoomID, nil
 }
 
-// extractServerDomain extracts the hostname from the Matrix server URL
+// extractServerDomain extracts the Matrix server name (domain for Matrix IDs)
+// It uses the following chain:
+// 1. Override server domain (for testing)
+// 2. Configured server name from plugin config
+// 3. .well-known discovery
+// 4. Fallback to hostname extraction from server URL
 func (c *Client) extractServerDomain() (string, error) {
-	// Use explicit server domain if set (for testing)
+	// Use override server domain if set (for testing)
 	if c.serverDomain != "" {
 		return c.serverDomain, nil
 	}
@@ -1099,17 +1108,13 @@ func (c *Client) extractServerDomain() (string, error) {
 		return "", errors.New("server URL not configured")
 	}
 
-	parsedURL, err := url.Parse(c.serverURL)
+	// Use ServerDiscovery to determine the server name
+	serverName, err := c.serverDiscovery.DiscoverServerName(c.serverURL, c.configuredServerName)
 	if err != nil {
-		return "", errors.Wrap(err, "failed to parse server URL")
+		return "", errors.Wrap(err, "failed to discover server name")
 	}
 
-	hostname := parsedURL.Hostname()
-	if hostname == "" {
-		return "", errors.New("could not extract hostname from server URL")
-	}
-
-	return hostname, nil
+	return serverName, nil
 }
 
 // AddRoomAlias adds an additional alias to an existing Matrix room

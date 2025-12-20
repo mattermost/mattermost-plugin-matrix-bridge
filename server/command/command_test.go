@@ -26,6 +26,10 @@ func (m *mockConfiguration) GetMatrixServerURL() string {
 	return m.serverURL
 }
 
+func (m *mockConfiguration) GetMatrixServerName() string {
+	return "" // No configured server name in tests
+}
+
 func (m *mockConfiguration) GetMatrixUsernamePrefixForServer(_ string) string {
 	return "matrix" // Use default prefix for tests
 }

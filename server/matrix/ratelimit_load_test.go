@@ -91,7 +91,7 @@ func TestClient_MessageSpamLoad(t *testing.T) {
 	config := LoadTestRateLimitConfig()
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	req := MessageRequest{
 		RoomID:      "!spam-test:example.invalid",
@@ -184,7 +184,7 @@ func TestClient_RoomCreationSpamLoad(t *testing.T) {
 	config := LoadTestRateLimitConfig()
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	const numCreators = 10
 	const roomsPerCreator = 5
@@ -266,7 +266,7 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 	config := LoadTestRateLimitConfig()
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	const numWorkers = 15
 	const operationsPerWorker = 10
@@ -451,7 +451,7 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 	// Use standard test config which provides fast but consistent throttling validation
 	config := TestRateLimitConfig()
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	// Calculate expected timing thresholds from actual config
 	var expectedThrottleDelay time.Duration

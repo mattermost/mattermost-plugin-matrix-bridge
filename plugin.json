@@ -31,6 +31,14 @@
                 "default": ""
             },
             {
+                "key": "matrix_server_name",
+                "display_name": "Matrix Server Name (Optional)",
+                "type": "text",
+                "help_text": "The domain used in Matrix IDs (e.g., example.com). Leave empty to automatically detect via .well-known/matrix/server or derive from the server URL. Only set this if your Matrix server uses a different domain for Matrix IDs than the homeserver URL hostname.",
+                "placeholder": "example.com",
+                "default": ""
+            },
+            {
                 "key": "matrix_as_token",
                 "display_name": "Matrix Application Service Token",
                 "type": "generated",
