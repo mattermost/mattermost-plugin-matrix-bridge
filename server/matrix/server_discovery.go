@@ -12,6 +12,12 @@ import (
 	"github.com/pkg/errors"
 )
 
+const (
+	// maxWellKnownResponseSize is the maximum size in bytes for .well-known/matrix/server responses
+	// This prevents memory exhaustion from excessively large responses
+	maxWellKnownResponseSize = 10 * 1024 // 10KB
+)
+
 // WellKnownResponse represents the response from /.well-known/matrix/server
 type WellKnownResponse struct {
 	Server string `json:"m.server"`
@@ -97,7 +103,7 @@ func (sd *ServerDiscovery) tryWellKnownDiscovery(hostname string) (string, error
 	}
 
 	// Read and limit response body
-	limitedBody := io.LimitReader(resp.Body, 10*1024) // 10KB limit
+	limitedBody := io.LimitReader(resp.Body, maxWellKnownResponseSize)
 	body, err := io.ReadAll(limitedBody)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to read .well-known response")
