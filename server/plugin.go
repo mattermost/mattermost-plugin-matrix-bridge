@@ -151,7 +151,14 @@ func (p *Plugin) initMatrixClient() {
 	config := p.getConfiguration()
 	rateLimitMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
 	rateLimitConfig := matrix.GetRateLimitConfigByMode(rateLimitMode)
-	p.matrixClient = matrix.NewClientWithRateLimit(config.MatrixServerURL, config.MatrixASToken, p.remoteID, p.API, rateLimitConfig)
+	p.matrixClient = matrix.NewClientWithRateLimit(
+		config.MatrixServerURL,
+		config.MatrixASToken,
+		p.remoteID,
+		config.MatrixServerName,
+		p.API,
+		rateLimitConfig,
+	)
 }
 
 func (p *Plugin) initBridges() {
