@@ -459,9 +459,18 @@ func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername str
 	discovery := matrix.NewServerDiscovery(logger)
 	serverName, err := discovery.DiscoverServerName(serverURL, configuredServerName)
 	if err != nil {
-		s.logger.LogWarn("Failed to discover server name, falling back to hostname extraction", "error", err)
-		// Fallback to simple hostname extraction
-		serverName, _ = matrix.ExtractServerDomain(serverURL)
+		s.logger.LogWarn("Failed to discover server name; cannot reconstruct Matrix user ID",
+			"error", err,
+			"server_url", serverURL,
+			"mattermost_username", mattermostUsername)
+		return ""
+	}
+
+	if serverName == "" {
+		s.logger.LogWarn("Empty server name after discovery; cannot reconstruct Matrix user ID",
+			"server_url", serverURL,
+			"mattermost_username", mattermostUsername)
+		return ""
 	}
 
 	// Reconstruct the full Matrix user ID
