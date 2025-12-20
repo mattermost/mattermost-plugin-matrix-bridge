@@ -4,6 +4,11 @@
 
 A bidirectional bridge that connects Mattermost and Matrix, enabling real-time message synchronization between platforms.
 
+## Requires
+
+- Mattermost server v10.7.1 or newer, with Pro, Enterprise or higher license
+- A Matrix server, such as [Synapse](https://github.com/element-hq/synapse) v1.119
+
 ## Features
 
 - **Bidirectional Sync**: Messages, reactions, and edits sync automatically in both directions
