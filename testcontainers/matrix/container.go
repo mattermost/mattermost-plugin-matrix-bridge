@@ -108,6 +108,7 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *Container {
 		serverURL,
 		config.ASToken,
 		"test-remote-id",
+		"", // No configured server name - will be set via SetServerDomain for testing
 		matrix.NewTestLogger(t),
 		matrix.TestRateLimitConfig(),
 	)

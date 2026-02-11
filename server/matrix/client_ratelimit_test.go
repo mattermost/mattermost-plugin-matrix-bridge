@@ -24,7 +24,7 @@ func TestClient_SendMessage_RateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	req := MessageRequest{
 		RoomID:      "!test:example.invalid",
@@ -66,7 +66,7 @@ func TestClient_CreateRoom_RateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	// First room creation should succeed quickly
 	start := time.Now()
@@ -101,7 +101,7 @@ func TestClient_ConcurrentMessageSending_RateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	req := MessageRequest{
 		RoomID:      "!test:example.invalid",
@@ -155,7 +155,7 @@ func TestClient_RateLimiting_Disabled(t *testing.T) {
 	config := GetRateLimitConfigByMode(RateLimitDisabled)
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	req := MessageRequest{
 		RoomID:      "!test:example.invalid",
@@ -188,7 +188,7 @@ func TestClient_RateLimiting_ContextTimeout(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	req := MessageRequest{
 		RoomID:      "!test:example.invalid",
@@ -233,7 +233,7 @@ func TestClient_TokenBucketBurstBehavior(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	req := MessageRequest{
 		RoomID:      "!test:example.invalid",
@@ -279,7 +279,7 @@ func TestClient_MixedOperations_IndependentRateLimiting(t *testing.T) {
 	}
 
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	// Send message (consumes message rate limit)
 	start := time.Now()
@@ -324,7 +324,7 @@ func TestClient_RateLimitError_Detection(t *testing.T) {
 
 	config := UnitTestRateLimitConfig() // Use unit test config with predictable values
 	logger := NewTestLogger(t)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	// Verify that rate limiters are properly initialized
 	assert.NotNil(t, client.messageLimiter, "Message limiter should be initialized")
@@ -422,7 +422,7 @@ func BenchmarkClient_SendMessage_WithRateLimit(b *testing.B) {
 	config := GetRateLimitConfigByMode(RateLimitDisabled)
 
 	logger := NewTestLogger(b)
-	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", logger, config)
+	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	req := MessageRequest{
 		RoomID:      "!test:example.invalid",

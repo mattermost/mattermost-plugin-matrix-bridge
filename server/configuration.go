@@ -24,6 +24,7 @@ const DefaultMatrixUsernamePrefix = "matrix"
 // copy appropriate for your types.
 type configuration struct {
 	MatrixServerURL      string `json:"matrix_server_url"`
+	MatrixServerName     string `json:"matrix_server_name"`
 	MatrixASToken        string `json:"matrix_as_token"`
 	MatrixHSToken        string `json:"matrix_hs_token"`
 	EnableSync           bool   `json:"enable_sync"`
@@ -122,12 +123,27 @@ func (p *Plugin) validateConfiguration(config *configuration) error {
 	parsedMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
 	config.RateLimitingMode = string(parsedMode)
 
+	// Validate and normalize MatrixServerName if provided
+	if config.MatrixServerName != "" {
+		normalized, err := matrix.NormalizeServerName(config.MatrixServerName)
+		if err != nil {
+			return errors.Wrap(err, "invalid Matrix Server Name")
+		}
+		config.MatrixServerName = normalized
+	}
+
 	return nil
 }
 
 // GetMatrixServerURL implements the Configuration interface for command package
 func (c *configuration) GetMatrixServerURL() string {
 	return c.MatrixServerURL
+}
+
+// GetMatrixServerName returns the configured Matrix server name (domain for Matrix IDs)
+// If not set, this should be derived via server discovery
+func (c *configuration) GetMatrixServerName() string {
+	return c.MatrixServerName
 }
 
 // GetMatrixUsernamePrefix returns the username prefix to use for Matrix-originated users

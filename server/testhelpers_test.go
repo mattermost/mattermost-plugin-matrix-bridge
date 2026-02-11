@@ -84,7 +84,7 @@ func setupPluginForTestWithLogger(t *testing.T, api plugin.API) *Plugin {
 // createMatrixClientWithTestLogger creates a matrix client with test logger and rate limiting for testing
 func createMatrixClientWithTestLogger(t *testing.T, serverURL, asToken, remoteID string) *matrix.Client {
 	testLogger := matrix.NewTestLogger(t)
-	return matrix.NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, testLogger, matrix.TestRateLimitConfig())
+	return matrix.NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, "", testLogger, matrix.TestRateLimitConfig())
 }
 
 // TestMatrixClientTestLogger verifies that matrix client uses test logger correctly

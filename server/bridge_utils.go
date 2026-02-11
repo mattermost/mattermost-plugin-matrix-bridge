@@ -451,16 +451,28 @@ func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername str
 		return "" // Empty username
 	}
 
-	// Extract server domain from Matrix server URL
+	// Extract server domain using ServerDiscovery
 	serverURL := config.GetMatrixServerURL()
-	serverDomain := strings.TrimPrefix(serverURL, "https://")
-	serverDomain = strings.TrimPrefix(serverDomain, "http://")
+	configuredServerName := config.GetMatrixServerName()
 
-	// Remove any path components (e.g., "server.com:8008/_matrix" -> "server.com:8008")
-	if idx := strings.Index(serverDomain, "/"); idx != -1 {
-		serverDomain = serverDomain[:idx]
+	logger := matrix.NewAPILogger(s.API)
+	discovery := matrix.NewServerDiscovery(logger)
+	serverName, err := discovery.DiscoverServerName(serverURL, configuredServerName)
+	if err != nil {
+		s.logger.LogWarn("Failed to discover server name; cannot reconstruct Matrix user ID",
+			"error", err,
+			"server_url", serverURL,
+			"mattermost_username", mattermostUsername)
+		return ""
+	}
+
+	if serverName == "" {
+		s.logger.LogWarn("Empty server name after discovery; cannot reconstruct Matrix user ID",
+			"server_url", serverURL,
+			"mattermost_username", mattermostUsername)
+		return ""
 	}
 
 	// Reconstruct the full Matrix user ID
-	return "@" + matrixUsername + ":" + serverDomain
+	return "@" + matrixUsername + ":" + serverName
 }
