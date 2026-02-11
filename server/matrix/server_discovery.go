@@ -2,8 +2,8 @@ package matrix
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -72,7 +72,7 @@ func (sd *ServerDiscovery) DiscoverServerName(serverURL, configuredServerName st
 
 	// Log discovery failure but continue with fallback
 	if err != nil {
-		sd.logger.LogDebug("Failed to discover server name via .well-known, using hostname fallback", "hostname", hostname, "error", err.Error())
+		sd.logger.LogWarn("Failed to discover server name via .well-known, using hostname fallback", "hostname", hostname, "error", err.Error())
 	}
 
 	// 4. Fall back to using hostname as server name
@@ -84,7 +84,11 @@ func (sd *ServerDiscovery) DiscoverServerName(serverURL, configuredServerName st
 // Returns the server name if discovery succeeds, empty string and error otherwise
 func (sd *ServerDiscovery) tryWellKnownDiscovery(hostname string) (string, error) {
 	// Construct .well-known URL
-	wellKnownURL := fmt.Sprintf("https://%s/.well-known/matrix/server", hostname)
+	wellKnownURL := (&url.URL{
+		Scheme: "https",
+		Host:   hostname,
+		Path:   "/.well-known/matrix/server",
+	}).String()
 
 	sd.logger.LogDebug("Attempting .well-known server discovery", "url", wellKnownURL)
 
@@ -128,8 +132,10 @@ func (sd *ServerDiscovery) tryWellKnownDiscovery(hostname string) (string, error
 	return hostname, nil
 }
 
-// ExtractServerDomain is a utility function that extracts the server domain from a server URL
-// This is used as a fallback when no manual configuration or discovery is available
+// ExtractServerDomain extracts the hostname from a fully-qualified server URL
+// (e.g., "https://matrix.example.com:8008/path" -> "matrix.example.com").
+// This expects a proper URL with a scheme and is used as a fallback when no
+// manual configuration or .well-known discovery is available.
 func ExtractServerDomain(serverURL string) (string, error) {
 	if serverURL == "" {
 		return "", errors.New("server URL not configured")
@@ -148,17 +154,23 @@ func ExtractServerDomain(serverURL string) (string, error) {
 	return hostname, nil
 }
 
-// NormalizeServerName ensures the server name is in the correct format
-// Removes any protocol prefixes and trailing slashes
-func NormalizeServerName(serverName string) string {
+// NormalizeServerName sanitizes a user-provided server name for use in Matrix IDs.
+// Unlike ExtractServerDomain which expects a full URL with scheme, this handles
+// bare server names that may have been entered with accidental protocol prefixes,
+// trailing slashes, or port numbers (e.g., "https://example.com:8008/" -> "example.com").
+func NormalizeServerName(serverName string) (string, error) {
 	serverName = strings.TrimPrefix(serverName, "https://")
 	serverName = strings.TrimPrefix(serverName, "http://")
 	serverName = strings.TrimSuffix(serverName, "/")
 
 	// Remove port if present (Matrix IDs don't include ports)
-	if idx := strings.Index(serverName, ":"); idx != -1 {
-		serverName = serverName[:idx]
+	if host, _, err := net.SplitHostPort(serverName); err == nil {
+		serverName = host
 	}
 
-	return serverName
+	if serverName == "" {
+		return "", errors.New("server name is empty after normalization")
+	}
+
+	return serverName, nil
 }

@@ -12,9 +12,10 @@ import (
 
 func TestNormalizeServerName(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		expected string
+		name        string
+		input       string
+		expected    string
+		expectError bool
 	}{
 		{
 			name:     "Clean domain",
@@ -51,12 +52,27 @@ func TestNormalizeServerName(t *testing.T) {
 			input:    "https://example.com:8008/",
 			expected: "example.com",
 		},
+		{
+			name:        "Empty string returns error",
+			input:       "",
+			expectError: true,
+		},
+		{
+			name:        "Only protocol returns error",
+			input:       "https://",
+			expectError: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := NormalizeServerName(tt.input)
-			assert.Equal(t, tt.expected, result)
+			result, err := NormalizeServerName(tt.input)
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, result)
+			}
 		})
 	}
 }

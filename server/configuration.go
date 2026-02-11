@@ -125,13 +125,11 @@ func (p *Plugin) validateConfiguration(config *configuration) error {
 
 	// Validate and normalize MatrixServerName if provided
 	if config.MatrixServerName != "" {
-		// Normalize the server name (remove protocol, trailing slashes, etc.)
-		config.MatrixServerName = matrix.NormalizeServerName(config.MatrixServerName)
-
-		// Basic validation: should not be empty after normalization
-		if config.MatrixServerName == "" {
-			return errors.New("Matrix Server Name is invalid after normalization")
+		normalized, err := matrix.NormalizeServerName(config.MatrixServerName)
+		if err != nil {
+			return errors.Wrap(err, "invalid Matrix Server Name")
 		}
+		config.MatrixServerName = normalized
 	}
 
 	return nil
