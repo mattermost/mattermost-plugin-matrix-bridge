@@ -197,13 +197,10 @@ func (p *Plugin) extractMattermostUserIDFromGhost(ghostUserID string) string {
 	withoutPrefix := ghostUserID[len(ghostUserPrefix):]
 
 	// Find the colon that separates user ID from server domain
-	colonIndex := strings.Index(withoutPrefix, ":")
-	if colonIndex == -1 {
+	mattermostUserID, _, ok := strings.Cut(withoutPrefix, ":")
+	if !ok {
 		return ""
 	}
-
-	// Extract the Mattermost user ID
-	mattermostUserID := withoutPrefix[:colonIndex]
 
 	if mattermostUserID == "" {
 		return ""

@@ -114,17 +114,15 @@ func TestClient_ConcurrentMessageSending_RateLimiting(t *testing.T) {
 	results := make(chan time.Duration, numMessages)
 
 	// Send multiple messages concurrently
-	for i := 0; i < numMessages; i++ {
-		wg.Add(1)
-		go func(_ int) {
-			defer wg.Done()
+	for range numMessages {
+		wg.Go(func() {
 			start := time.Now()
 			_, err := client.SendMessage(req)
 			elapsed := time.Since(start)
 			// We expect network errors, but we care about timing
 			assert.Error(t, err)
 			results <- elapsed
-		}(i)
+		})
 	}
 
 	wg.Wait()
@@ -164,7 +162,7 @@ func TestClient_RateLimiting_Disabled(t *testing.T) {
 	}
 
 	// Multiple rapid messages should all be immediate when rate limiting is disabled
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		start := time.Now()
 		_, err := client.SendMessage(req)
 		elapsed := time.Since(start)
@@ -242,7 +240,7 @@ func TestClient_TokenBucketBurstBehavior(t *testing.T) {
 	}
 
 	// First 3 messages should be immediate (burst)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		start := time.Now()
 		_, err := client.SendMessage(req)
 		elapsed := time.Since(start)
@@ -377,7 +375,7 @@ func TestNewTokenBucket_ConfigValidation(t *testing.T) {
 
 			if tt.config.Interval == 0 && tt.config.Rate == 0 {
 				// Disabled case - should always allow
-				for i := 0; i < 10; i++ {
+				for range 10 {
 					assert.True(t, tb.Allow(), "Disabled rate limiting should always allow")
 				}
 			} else {

@@ -5,10 +5,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // FileTracker interface for dependency injection
@@ -570,12 +571,9 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 	if err != nil {
 		b.logger.LogWarn("Failed to fetch current Matrix event for comparison", "error", err, "event_id", eventID)
 		// Continue with update if we can't fetch current content
-	} else {
-		// Compare content and file attachments to see if anything actually changed
-		if b.isMatrixContentIdentical(currentEvent, finalPlainText, finalHTMLContent, matrixRoomID, eventID, currentFiles) {
-			b.logger.LogDebug("Matrix message content and attachments unchanged, skipping edit", "post_id", post.Id, "matrix_event_id", eventID)
-			return nil
-		}
+	} else if b.isMatrixContentIdentical(currentEvent, finalPlainText, finalHTMLContent, matrixRoomID, eventID, currentFiles) {
+		b.logger.LogDebug("Matrix message content and attachments unchanged, skipping edit", "post_id", post.Id, "matrix_event_id", eventID)
+		return nil
 	}
 
 	// Send edit as ghost user with proper HTML formatting support

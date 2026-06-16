@@ -3,6 +3,7 @@ package matrix
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -440,12 +441,7 @@ func ValidateRateLimitingMode(mode RateLimitingMode) bool {
 		RateLimitRestricted,
 	}
 
-	for _, validMode := range validModes {
-		if mode == validMode {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(validModes, mode)
 }
 
 // ParseRateLimitingMode parses a string to RateLimitingMode with automatic default fallback

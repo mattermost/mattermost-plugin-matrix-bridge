@@ -5,11 +5,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 var (
@@ -317,13 +318,10 @@ func (s *BridgeUtils) extractMattermostUserIDFromGhost(ghostUserID string) strin
 	withoutPrefix := ghostUserID[len(ghostUserPrefix):]
 
 	// Find the colon that separates user ID from server domain
-	colonIndex := strings.Index(withoutPrefix, ":")
-	if colonIndex == -1 {
+	mattermostUserID, _, ok := strings.Cut(withoutPrefix, ":")
+	if !ok {
 		return ""
 	}
-
-	// Extract the Mattermost user ID
-	mattermostUserID := withoutPrefix[:colonIndex]
 
 	if mattermostUserID == "" {
 		return ""

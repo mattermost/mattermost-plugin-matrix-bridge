@@ -5,12 +5,13 @@ import (
 	"testing"
 	"time"
 
-	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // PluginIntegrationTestSuite contains integration tests for plugin-level Matrix operations
@@ -335,11 +336,12 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 		asBotCount := 0
 
 		for _, member := range members {
-			if suite.plugin.mattermostToMatrixBridge.isGhostUser(member.UserID) {
+			switch {
+			case suite.plugin.mattermostToMatrixBridge.isGhostUser(member.UserID):
 				ghostUserCount++
-			} else if member.UserID == suite.matrixContainer.GetApplicationServiceBotUserID() {
+			case member.UserID == suite.matrixContainer.GetApplicationServiceBotUserID():
 				asBotCount++
-			} else {
+			default:
 				originalUserCount++
 			}
 		}

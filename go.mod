@@ -1,8 +1,6 @@
 module github.com/mattermost/mattermost-plugin-matrix-bridge
 
-go 1.23.0
-
-toolchain go1.23.9
+go 1.25
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0

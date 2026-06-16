@@ -44,7 +44,7 @@ func TestTokenBucket_Allow_TokenBased(t *testing.T) {
 	tb := NewTokenBucket(config)
 
 	// Should allow burst size number of calls immediately
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		assert.True(t, tb.Allow(), "Burst call %d should be allowed", i+1)
 	}
 
@@ -97,7 +97,7 @@ func TestTokenBucket_Wait_TokenBased(t *testing.T) {
 	ctx := context.Background()
 
 	// First two calls should succeed immediately (burst)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		start := time.Now()
 		err := tb.Wait(ctx)
 		elapsed := time.Since(start)
@@ -159,18 +159,16 @@ func TestTokenBucket_ConcurrentAccess(t *testing.T) {
 	results := make(chan time.Duration, numGoroutines*callsPerGoroutine)
 
 	// Launch multiple goroutines that all try to call Wait()
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < callsPerGoroutine; j++ {
+	for range numGoroutines {
+		wg.Go(func() {
+			for range callsPerGoroutine {
 				start := time.Now()
 				err := tb.Wait(ctx)
 				elapsed := time.Since(start)
 				require.NoError(t, err)
 				results <- elapsed
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

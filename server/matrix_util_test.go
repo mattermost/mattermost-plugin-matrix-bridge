@@ -5,8 +5,9 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
 )
 
 const (

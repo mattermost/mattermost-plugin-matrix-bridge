@@ -3,10 +3,11 @@ package main
 import (
 	"testing"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 func TestExtractMatrixMessageContent(t *testing.T) {
@@ -687,6 +688,74 @@ func TestReplaceMatrixMentionHTML(t *testing.T) {
 			if result != tt.expected {
 				t.Errorf("replaceMatrixMentionHTML() = %q, want %q", result, tt.expected)
 			}
+		})
+	}
+}
+
+func TestBridgeUtils_ExtractMattermostUserIDFromGhost(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("LogDebug", mock.Anything, mock.Anything).Maybe()
+	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+
+	logger := &testLogger{t: t}
+	kvstore := NewMemoryKVStore()
+	matrixClient := matrix.NewClientWithLoggerAndRateLimit("https://test.example.com", "test_token", "test_remote", "", matrix.NewTestLogger(t), matrix.UnitTestRateLimitConfig())
+
+	config := BridgeUtilsConfig{
+		Logger:       logger,
+		API:          api,
+		KVStore:      kvstore,
+		MatrixClient: matrixClient,
+		RemoteID:     "test-remote",
+	}
+	bridgeUtils := NewBridgeUtils(config)
+
+	tests := []struct {
+		name        string
+		ghostUserID string
+		expected    string
+	}{
+		{
+			name:        "valid ghost user ID",
+			ghostUserID: "@_mattermost_yeqo3irkujdstfmbnkx46bbhuw:synapse-mydomain.com",
+			expected:    "yeqo3irkujdstfmbnkx46bbhuw",
+		},
+		{
+			name:        "another valid ghost user ID",
+			ghostUserID: "@_mattermost_user123:matrix.example.com",
+			expected:    "user123",
+		},
+		{
+			name:        "not a ghost user - regular Matrix user",
+			ghostUserID: "@alice:example.com",
+			expected:    "",
+		},
+		{
+			name:        "not a ghost user - wrong prefix",
+			ghostUserID: "@wrong_prefix_user123:example.com",
+			expected:    "",
+		},
+		{
+			name:        "malformed ghost user - no colon separator",
+			ghostUserID: "@_mattermost_user123",
+			expected:    "",
+		},
+		{
+			name:        "malformed ghost user - empty user ID after prefix",
+			ghostUserID: "@_mattermost_:example.com",
+			expected:    "",
+		},
+		{
+			name:        "ghost user with complex server domain including port",
+			ghostUserID: "@_mattermost_abc123:matrix.subdomain.example.com:8448",
+			expected:    "abc123",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := bridgeUtils.extractMattermostUserIDFromGhost(tt.ghostUserID)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

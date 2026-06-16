@@ -4,8 +4,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 func TestRunKVStoreMigrations(t *testing.T) {
@@ -168,7 +169,7 @@ func TestMigrateUserMappings(t *testing.T) {
 
 		// Add more than one batch worth of keys to test pagination
 		// Add user mappings
-		for i := 0; i < MigrationBatchSize+100; i++ {
+		for i := range MigrationBatchSize + 100 {
 			userKey := "matrix_user_@user" + strconv.Itoa(i) + ":matrix.org"
 			mattermostUserID := "user" + strconv.Itoa(i)
 			err := plugin.kvstore.Set(userKey, []byte(mattermostUserID))
@@ -176,7 +177,7 @@ func TestMigrateUserMappings(t *testing.T) {
 		}
 
 		// Add some non-user keys
-		for i := 0; i < 50; i++ {
+		for i := range 50 {
 			otherKey := "other_key_" + strconv.Itoa(i)
 			err := plugin.kvstore.Set(otherKey, []byte("value"+strconv.Itoa(i)))
 			assert.NoError(t, err)
@@ -187,7 +188,7 @@ func TestMigrateUserMappings(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Verify all reverse mappings were created
-		for i := 0; i < MigrationBatchSize+100; i++ {
+		for i := range MigrationBatchSize + 100 {
 			mattermostUserID := "user" + strconv.Itoa(i)
 			expectedMatrixUserID := "@user" + strconv.Itoa(i) + ":matrix.org"
 
@@ -313,7 +314,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// Add more than one batch worth of channel mappings to test pagination
-		for i := 0; i < MigrationBatchSize+50; i++ {
+		for i := range MigrationBatchSize + 50 {
 			channelKey := "channel_mapping_channel" + strconv.Itoa(i)
 			roomID := "!room" + strconv.Itoa(i) + ":matrix.org"
 			err := plugin.kvstore.Set(channelKey, []byte(roomID))
@@ -325,7 +326,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Verify all reverse mappings were created
-		for i := 0; i < MigrationBatchSize+50; i++ {
+		for i := range MigrationBatchSize + 50 {
 			channelID := "channel" + strconv.Itoa(i)
 			roomID := "!room" + strconv.Itoa(i) + ":matrix.org"
 
