@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.6.0
-	github.com/golang/mock v1.6.0
+	github.com/mattermost/logr/v2 v2.0.22
 	github.com/mattermost/mattermost/server/public v0.4.2
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.11.1
@@ -43,6 +43,7 @@ require (
 	github.com/lufia/plan9stats v0.0.0-20260330125221-c963978e514e // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
 	github.com/mattermost/gosaml2 v0.10.0 // indirect
+	github.com/mattermost/ldap v0.0.0-20231116144001-0f480c025956 // indirect
 	github.com/mattermost/xml-roundtrip-validator v0.1.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.2.0 // indirect
@@ -86,8 +87,6 @@ require (
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/lib/pq v1.12.3 // indirect
 	github.com/mattermost/go-i18n v1.11.1-0.20211013152124-5c415071e404 // indirect
-	github.com/mattermost/ldap v0.0.0-20231116144001-0f480c025956 // indirect
-	github.com/mattermost/logr/v2 v2.0.22
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/oklog/run v1.2.0 // indirect

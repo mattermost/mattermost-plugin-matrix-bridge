@@ -44,11 +44,13 @@ func CreateTransactionLogger() (logr.Logger, error) {
 		if relDir != "" {
 			fsRoot, openErr := os.OpenRoot(fsRootPath)
 			if openErr != nil {
+				_ = logger.Shutdown()
 				return logr.Logger{}, openErr
 			}
 			mkdirErr := fsRoot.MkdirAll(relDir, 0o750)
 			_ = fsRoot.Close()
 			if mkdirErr != nil {
+				_ = logger.Shutdown()
 				return logr.Logger{}, mkdirErr
 			}
 		}
@@ -74,6 +76,7 @@ func CreateTransactionLogger() (logr.Logger, error) {
 
 	// Add target with JSON formatter
 	if err := logger.AddTarget(fileTarget, "matrix-transactions", filter, jsonFormatter, 100); err != nil {
+		_ = logger.Shutdown()
 		return logr.Logger{}, err
 	}
 
