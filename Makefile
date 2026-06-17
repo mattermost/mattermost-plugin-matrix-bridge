@@ -433,7 +433,7 @@ help:
 
 mock:
 ifneq ($(HAS_SERVER),)
-	go install go.uber.org/mock/mockgen@v0.6.0
+	$(GO) install go.uber.org/mock/mockgen@v0.6.0
 	$(GOBIN)/mockgen -destination=server/command/mocks/mock_commands.go -package=mocks github.com/mattermost/mattermost-plugin-matrix-bridge/server/command Command
 	$(GOBIN)/mockgen -destination=server/mocks/mock_plugin_api.go -package=mocks github.com/mattermost/mattermost/server/public/plugin API
 	$(GOBIN)/mockgen -destination=server/mocks/mock_kvstore.go -package=mocks github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore KVStore

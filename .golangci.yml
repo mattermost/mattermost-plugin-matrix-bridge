@@ -41,7 +41,7 @@ linters:
   exclusions:
     paths:
       - webapp
-      - mock.*
+      - .*/mocks/.*
     rules:
       - path: server/configuration.go
         linters:
