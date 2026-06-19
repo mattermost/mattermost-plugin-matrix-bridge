@@ -839,7 +839,18 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 	}
 	alias = strings.Trim(validAlias.String(), "-")
 	if alias == "" {
-		alias = "room"
+		fallback := strings.ToLower(mattermostChannelID)
+		var fb strings.Builder
+		for _, r := range fallback {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				fb.WriteRune(r)
+			}
+		}
+		fallback = strings.Trim(fb.String(), "-")
+		if fallback == "" {
+			fallback = "room"
+		}
+		alias = "room-" + fallback
 	}
 	// Use _mattermost_ prefix for namespace reservation
 	roomAlias := ""
