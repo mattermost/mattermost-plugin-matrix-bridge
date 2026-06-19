@@ -830,6 +830,17 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 	// Create room alias using reserved Application Service namespace
 	alias := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
 	alias = strings.ReplaceAll(alias, "_", "-")
+	// Keep only characters valid in Matrix room alias local parts (alphanumeric and hyphens)
+	var validAlias strings.Builder
+	for _, r := range alias {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			validAlias.WriteRune(r)
+		}
+	}
+	alias = strings.Trim(validAlias.String(), "-")
+	if alias == "" {
+		alias = "room"
+	}
 	// Use _mattermost_ prefix for namespace reservation
 	roomAlias := ""
 	if serverDomain != "" {

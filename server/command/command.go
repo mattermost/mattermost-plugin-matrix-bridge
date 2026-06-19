@@ -821,6 +821,8 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 			}
 		}
 
+		// Strip surrounding quotes that users may add around room names
+		roomName = strings.Trim(roomName, "\"'")
 		return c.executeCreateRoomCommand(args, roomName, publish)
 	case "map":
 		if len(fields) < 3 {

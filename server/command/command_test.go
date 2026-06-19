@@ -216,6 +216,22 @@ func TestMatrixCreateCommandParsing(t *testing.T) {
 			shouldCallCreate: true,
 			description:      "should use multi-word room name and not publish",
 		},
+		{
+			name:             "create with double-quoted room name",
+			command:          `/matrix create "connected-channel-1c"`,
+			expectedRoomName: "connected-channel-1c",
+			expectedPublish:  false,
+			shouldCallCreate: true,
+			description:      "should strip surrounding double quotes from room name",
+		},
+		{
+			name:             "create with single-quoted room name",
+			command:          `/matrix create 'my room'`,
+			expectedRoomName: "my room",
+			expectedPublish:  false,
+			shouldCallCreate: true,
+			description:      "should strip surrounding single quotes from room name",
+		},
 	}
 
 	for _, tt := range tests {
@@ -335,6 +351,9 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 				roomName = strings.Join(fields[2:], " ")
 			}
 		}
+
+		// Strip surrounding quotes that users may add around room names
+		roomName = strings.Trim(roomName, "\"'")
 
 		if t.onCreateRoom != nil {
 			t.onCreateRoom(roomName, publish)
