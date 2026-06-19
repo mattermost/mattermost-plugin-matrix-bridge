@@ -85,7 +85,7 @@ func (p *Plugin) setConfiguration(configuration *configuration) {
 func (p *Plugin) OnConfigurationChange() error {
 	configuration := new(configuration)
 
-	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels != nil && *p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels {
+	if p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels == nil || !*p.GetPluginAPI().GetConfig().ConnectedWorkspacesSettings.EnableSharedChannels {
 		return fmt.Errorf("shared Channels is required but currently not enabled")
 	}
 
