@@ -1,3 +1,5 @@
+# Development environment only — not intended for production use.
+# Security hardening (pinned image versions, stricter permissions, healthchecks, etc.) is intentionally omitted.
 services:
     synapse-init:
         image: alpine:latest
