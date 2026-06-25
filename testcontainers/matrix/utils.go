@@ -14,7 +14,7 @@ func FindEventByPostID(events []Event, postID string) *Event {
 
 // FindLatestMessageEvent finds the most recent m.room.message event
 func FindLatestMessageEvent(events []Event) *Event {
-	var latestEventIndex = -1
+	latestEventIndex := -1
 	var latestTimestamp int64
 
 	for i, event := range events {

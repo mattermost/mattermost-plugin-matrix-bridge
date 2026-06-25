@@ -3,8 +3,9 @@ package test
 import (
 	"testing"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 func TestIsRateLimitError(t *testing.T) {

@@ -6,10 +6,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // MatrixToMattermostBridge handles syncing FROM Matrix TO Mattermost

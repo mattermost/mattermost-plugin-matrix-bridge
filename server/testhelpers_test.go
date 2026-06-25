@@ -9,14 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
-	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // testLogger implements Logger interface for testing
@@ -309,10 +310,7 @@ func (m *MemoryKVStore) ListKeys(page, perPage int) ([]string, error) {
 		return []string{}, nil
 	}
 
-	end := start + perPage
-	if end > len(keys) {
-		end = len(keys)
-	}
+	end := min(start+perPage, len(keys))
 
 	return keys[start:end], nil
 }
@@ -339,10 +337,7 @@ func (m *MemoryKVStore) ListKeysWithPrefix(page, perPage int, prefix string) ([]
 		return []string{}, nil
 	}
 
-	end := start + perPage
-	if end > len(keys) {
-		end = len(keys)
-	}
+	end := min(start+perPage, len(keys))
 
 	return keys[start:end], nil
 }

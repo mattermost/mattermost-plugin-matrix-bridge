@@ -25,12 +25,34 @@ func CreateTransactionLogger() (logr.Logger, error) {
 		return logger.NewLogger(), nil
 	}
 
-	// Extract path from filespec
-	filepath := filepath.Dir(filespec)
-	if filepath != "" && filepath != "." {
-		// Ensure log directory exists
-		if err := os.MkdirAll(filepath, 0755); err != nil {
-			return logr.Logger{}, err
+	cleanedFilespec := filepath.Clean(filespec)
+	logDir := filepath.Dir(cleanedFilespec)
+
+	if logDir != "." {
+		// Use os.OpenRoot so Root.MkdirAll rejects any ".." components at the
+		// OS level. Absolute paths are anchored to the filesystem root; relative
+		// paths are anchored to the current working directory.
+		var fsRootPath, relDir string
+		if filepath.IsAbs(logDir) {
+			fsRootPath = filepath.VolumeName(logDir) + string(filepath.Separator)
+			relDir = logDir[len(fsRootPath):]
+		} else {
+			fsRootPath = "."
+			relDir = logDir
+		}
+
+		if relDir != "" {
+			fsRoot, openErr := os.OpenRoot(fsRootPath)
+			if openErr != nil {
+				_ = logger.Shutdown()
+				return logr.Logger{}, openErr
+			}
+			mkdirErr := fsRoot.MkdirAll(relDir, 0o750)
+			_ = fsRoot.Close()
+			if mkdirErr != nil {
+				_ = logger.Shutdown()
+				return logr.Logger{}, mkdirErr
+			}
 		}
 	}
 
@@ -41,7 +63,7 @@ func CreateTransactionLogger() (logr.Logger, error) {
 
 	// Create file target with rotation options
 	fileOptions := targets.FileOptions{
-		Filename:   filespec,
+		Filename:   cleanedFilespec,
 		MaxSize:    100, // 100MB
 		MaxBackups: 5,
 		MaxAge:     5, // 5 days
@@ -54,6 +76,7 @@ func CreateTransactionLogger() (logr.Logger, error) {
 
 	// Add target with JSON formatter
 	if err := logger.AddTarget(fileTarget, "matrix-transactions", filter, jsonFormatter, 100); err != nil {
+		_ = logger.Shutdown()
 		return logr.Logger{}, err
 	}
 

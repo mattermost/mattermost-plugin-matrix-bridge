@@ -33,23 +33,23 @@ func TestClient_SendMessage_RateLimiting(t *testing.T) {
 	}
 
 	// First message should succeed quickly
-	start := time.Now()
+	firstStart := time.Now()
 	_, err := client.SendMessage(req)
-	elapsed := time.Since(start)
 
 	// We expect this to fail with a network error since we're not actually connecting
 	// But we want to verify the rate limiting timing, not the network call
 	assert.Error(t, err, "Expected network error")
-	assert.Less(t, elapsed, 50*time.Millisecond, "First message should not be rate limited")
+	assert.Less(t, time.Since(firstStart), 50*time.Millisecond, "First message should not be rate limited")
 
-	// Second message should be rate limited
-	start = time.Now()
+	// Second message should be rate limited.
+	// Measure from firstStart because the rate limiter's clock started there;
+	// the second call only needs to wait (interval - firstCallDuration).
 	_, err = client.SendMessage(req)
-	elapsed = time.Since(start)
+	totalElapsed := time.Since(firstStart)
 
 	assert.Error(t, err, "Expected network error")
-	assert.GreaterOrEqual(t, elapsed, 90*time.Millisecond, "Second message should be rate limited")
-	assert.Less(t, elapsed, 150*time.Millisecond, "Rate limiting should not be excessive")
+	assert.GreaterOrEqual(t, totalElapsed, 90*time.Millisecond, "Two messages should span at least the rate limit interval")
+	assert.Less(t, totalElapsed, 200*time.Millisecond, "Rate limiting should not be excessive")
 }
 
 func TestClient_CreateRoom_RateLimiting(t *testing.T) {
@@ -69,22 +69,21 @@ func TestClient_CreateRoom_RateLimiting(t *testing.T) {
 	client := NewClientWithLoggerAndRateLimit("http://localhost:1", "test_token", "test_remote", "", logger, config)
 
 	// First room creation should succeed quickly
-	start := time.Now()
+	firstStart := time.Now()
 	_, err := client.CreateRoom("Test Room 1", "", "test.example.invalid", true, "")
-	elapsed := time.Since(start)
 
 	// We expect this to fail with a network error since we're not actually connecting
 	assert.Error(t, err, "Expected network error")
-	assert.Less(t, elapsed, 50*time.Millisecond, "First room creation should not be rate limited")
+	assert.Less(t, time.Since(firstStart), 50*time.Millisecond, "First room creation should not be rate limited")
 
-	// Second room creation should be rate limited
-	start = time.Now()
+	// Second room creation should be rate limited.
+	// Measure from firstStart — the rate limiter's clock started there.
 	_, err = client.CreateRoom("Test Room 2", "", "test.example.invalid", true, "")
-	elapsed = time.Since(start)
+	totalElapsed := time.Since(firstStart)
 
 	assert.Error(t, err, "Expected network error")
-	assert.GreaterOrEqual(t, elapsed, 90*time.Millisecond, "Second room creation should be rate limited")
-	assert.Less(t, elapsed, 150*time.Millisecond, "Rate limiting should not be excessive")
+	assert.GreaterOrEqual(t, totalElapsed, 90*time.Millisecond, "Two room creations should span at least the rate limit interval")
+	assert.Less(t, totalElapsed, 200*time.Millisecond, "Rate limiting should not be excessive")
 }
 
 func TestClient_ConcurrentMessageSending_RateLimiting(t *testing.T) {
@@ -114,17 +113,15 @@ func TestClient_ConcurrentMessageSending_RateLimiting(t *testing.T) {
 	results := make(chan time.Duration, numMessages)
 
 	// Send multiple messages concurrently
-	for i := 0; i < numMessages; i++ {
-		wg.Add(1)
-		go func(_ int) {
-			defer wg.Done()
+	for range numMessages {
+		wg.Go(func() {
 			start := time.Now()
 			_, err := client.SendMessage(req)
 			elapsed := time.Since(start)
 			// We expect network errors, but we care about timing
 			assert.Error(t, err)
 			results <- elapsed
-		}(i)
+		})
 	}
 
 	wg.Wait()
@@ -164,7 +161,7 @@ func TestClient_RateLimiting_Disabled(t *testing.T) {
 	}
 
 	// Multiple rapid messages should all be immediate when rate limiting is disabled
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		start := time.Now()
 		_, err := client.SendMessage(req)
 		elapsed := time.Since(start)
@@ -242,7 +239,7 @@ func TestClient_TokenBucketBurstBehavior(t *testing.T) {
 	}
 
 	// First 3 messages should be immediate (burst)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		start := time.Now()
 		_, err := client.SendMessage(req)
 		elapsed := time.Since(start)
@@ -377,7 +374,7 @@ func TestNewTokenBucket_ConfigValidation(t *testing.T) {
 
 			if tt.config.Interval == 0 && tt.config.Rate == 0 {
 				// Disabled case - should always allow
-				for i := 0; i < 10; i++ {
+				for range 10 {
 					assert.True(t, tb.Allow(), "Disabled rate limiting should always allow")
 				}
 			} else {

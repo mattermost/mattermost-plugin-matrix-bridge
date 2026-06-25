@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // Configuration interface for accessing plugin configuration
@@ -469,12 +470,13 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		memberSyncStatus = roomMemberSyncFailed
 	} else {
 		// Generate appropriate status message based on sync results
-		if joinedCount == 0 {
+		switch {
+		case joinedCount == 0:
 			memberSyncStatus = ""
-		} else if joinedCount == 1 && totalMembers == 1 {
+		case joinedCount == 1 && totalMembers == 1:
 			// Only one member (likely the command issuer) in a single-member channel
 			memberSyncStatus = roomCreatorWithUserReady
-		} else {
+		default:
 			// Multiple members were synced
 			memberSyncStatus = fmt.Sprintf("\n\n✅ **All channel members synced to Matrix** - %d of %d users joined the room.", joinedCount, totalMembers)
 		}
@@ -619,12 +621,13 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		joinStatus = roomMemberSyncFailed
 	} else {
 		// Generate appropriate status message based on sync results
-		if joinedCount == 0 {
+		switch {
+		case joinedCount == 0:
 			joinStatus = roomCreatorJoined
-		} else if joinedCount == 1 && totalMembers == 1 {
+		case joinedCount == 1 && totalMembers == 1:
 			// Only one member (likely the command issuer) in a single-member channel
 			joinStatus = roomCreatorWithUserReady
-		} else {
+		default:
 			// Multiple members were synced
 			joinStatus = fmt.Sprintf("\n\n✅ **All channel members synced to Matrix** - %d of %d users joined the room.", joinedCount, totalMembers)
 		}
@@ -782,17 +785,17 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 		// /matrix create "room name" true/false
 		// /matrix create "room name" publish=true/false
 
-		if len(fields) == 2 {
+		switch {
+		case len(fields) == 2:
 			// Just "/matrix create" - use channel name, no publish
 			roomName = ""
-		} else if len(fields) == 3 {
+		case len(fields) == 3:
 			// Check if it's a publish parameter or room name
 			arg := fields[2]
 			if arg == "true" || arg == "false" || strings.HasPrefix(arg, "publish=") {
 				// It's a publish parameter, use channel name for room
 				roomName = ""
-				if strings.HasPrefix(arg, "publish=") {
-					publishValue := strings.TrimPrefix(arg, "publish=")
+				if publishValue, ok := strings.CutPrefix(arg, "publish="); ok {
 					publish = publishValue == "true"
 				} else {
 					publish = arg == "true"
@@ -801,12 +804,11 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 				// It's a room name
 				roomName = arg
 			}
-		} else {
+		default:
 			// Multiple arguments - check if last is publish parameter
 			lastField := fields[len(fields)-1]
 			if lastField == "true" || lastField == "false" || strings.HasPrefix(lastField, "publish=") {
-				if strings.HasPrefix(lastField, "publish=") {
-					publishValue := strings.TrimPrefix(lastField, "publish=")
+				if publishValue, ok := strings.CutPrefix(lastField, "publish="); ok {
 					publish = publishValue == "true"
 				} else {
 					publish = lastField == "true"
@@ -819,6 +821,8 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 			}
 		}
 
+		// Strip surrounding quotes that users may add around room names
+		roomName = strings.Trim(roomName, "\"'")
 		return c.executeCreateRoomCommand(args, roomName, publish)
 	case "map":
 		if len(fields) < 3 {

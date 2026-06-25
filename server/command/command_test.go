@@ -4,13 +4,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 type env struct {
@@ -215,6 +216,22 @@ func TestMatrixCreateCommandParsing(t *testing.T) {
 			shouldCallCreate: true,
 			description:      "should use multi-word room name and not publish",
 		},
+		{
+			name:             "create with double-quoted room name",
+			command:          `/matrix create "connected-channel-1c"`,
+			expectedRoomName: "connected-channel-1c",
+			expectedPublish:  false,
+			shouldCallCreate: true,
+			description:      "should strip surrounding double quotes from room name",
+		},
+		{
+			name:             "create with single-quoted room name",
+			command:          `/matrix create 'my room'`,
+			expectedRoomName: "my room",
+			expectedPublish:  false,
+			shouldCallCreate: true,
+			description:      "should strip surrounding single quotes from room name",
+		},
 	}
 
 	for _, tt := range tests {
@@ -306,14 +323,14 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 		var roomName string
 		publish := false
 
-		if len(fields) == 2 {
+		switch {
+		case len(fields) == 2:
 			roomName = ""
-		} else if len(fields) == 3 {
+		case len(fields) == 3:
 			arg := fields[2]
 			if arg == "true" || arg == "false" || strings.HasPrefix(arg, "publish=") {
 				roomName = ""
-				if strings.HasPrefix(arg, "publish=") {
-					publishValue := strings.TrimPrefix(arg, "publish=")
+				if publishValue, ok := strings.CutPrefix(arg, "publish="); ok {
 					publish = publishValue == "true"
 				} else {
 					publish = arg == "true"
@@ -321,11 +338,10 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 			} else {
 				roomName = arg
 			}
-		} else {
+		default:
 			lastField := fields[len(fields)-1]
 			if lastField == "true" || lastField == "false" || strings.HasPrefix(lastField, "publish=") {
-				if strings.HasPrefix(lastField, "publish=") {
-					publishValue := strings.TrimPrefix(lastField, "publish=")
+				if publishValue, ok := strings.CutPrefix(lastField, "publish="); ok {
 					publish = publishValue == "true"
 				} else {
 					publish = lastField == "true"
@@ -335,6 +351,9 @@ func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResp
 				roomName = strings.Join(fields[2:], " ")
 			}
 		}
+
+		// Strip surrounding quotes that users may add around room names
+		roomName = strings.Trim(roomName, "\"'")
 
 		if t.onCreateRoom != nil {
 			t.onCreateRoom(roomName, publish)

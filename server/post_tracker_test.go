@@ -51,7 +51,7 @@ func TestPostTracker_MaxEntries(t *testing.T) {
 	tracker := NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Add exactly 10,000 entries (should not trigger capacity check)
-	for i := 0; i < 10000; i++ {
+	for i := range 10000 {
 		postID := fmt.Sprintf("test_post_%d", i)
 		updateAt := time.Now().UnixMilli()
 		err := tracker.Put(postID, updateAt)
@@ -99,7 +99,7 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	}
 
 	// Trigger cleanup by doing many puts
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		postID := fmt.Sprintf("trigger_cleanup_%d", i)
 		updateAt := time.Now().UnixMilli()
 		err := tracker.Put(postID, updateAt)
@@ -127,7 +127,7 @@ func TestPostTracker_CustomMaxEntries(t *testing.T) {
 	tracker := NewPostTracker(customLimit)
 
 	// Add entries up to the limit
-	for i := 0; i < customLimit; i++ {
+	for i := range customLimit {
 		postID := fmt.Sprintf("test_post_%d", i)
 		updateAt := time.Now().UnixMilli()
 		err := tracker.Put(postID, updateAt)

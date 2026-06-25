@@ -12,8 +12,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/mattermost/logr/v2"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // MatrixEvent represents a Matrix event received via Application Service webhook
@@ -305,15 +306,16 @@ func (p *Plugin) handleMatrixMemberDM(event MatrixEvent) (string, error) {
 
 	// Check if either user is one of our ghost users
 	var ghostUserID, matrixUserID string
-	if p.isGhostUser(targetUserID) {
+	switch {
+	case p.isGhostUser(targetUserID):
 		ghostUserID = targetUserID
 		matrixUserID = actingUserID
 		p.logger.LogDebug("Detected ghost user as target", "room_id", event.RoomID, "ghost_user", ghostUserID, "matrix_user", matrixUserID, "membership", membership)
-	} else if p.isGhostUser(actingUserID) {
+	case p.isGhostUser(actingUserID):
 		ghostUserID = actingUserID
 		matrixUserID = targetUserID
 		p.logger.LogDebug("Detected ghost user as actor", "room_id", event.RoomID, "ghost_user", ghostUserID, "matrix_user", matrixUserID, "membership", membership)
-	} else {
+	default:
 		// Neither user is a ghost user - not a DM we care about
 		p.logger.LogDebug("Neither user is a ghost user", "room_id", event.RoomID, "target_user", targetUserID, "acting_user", actingUserID, "membership", membership)
 		return "", nil

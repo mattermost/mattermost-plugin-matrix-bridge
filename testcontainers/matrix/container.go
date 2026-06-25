@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 // Global container registry for cleanup
@@ -55,19 +56,19 @@ func StartMatrixContainer(t *testing.T, config MatrixTestConfig) *Container {
 			{
 				HostFilePath:      "",
 				ContainerFilePath: "/data/homeserver.yaml",
-				FileMode:          0644,
+				FileMode:          0o644,
 				Reader:            strings.NewReader(synapseConfig),
 			},
 			{
 				HostFilePath:      "",
 				ContainerFilePath: "/data/appservice.yaml",
-				FileMode:          0644,
+				FileMode:          0o644,
 				Reader:            strings.NewReader(appServiceConfig),
 			},
 			{
 				HostFilePath:      "",
 				ContainerFilePath: "/data/log.config",
-				FileMode:          0644,
+				FileMode:          0o644,
 				Reader:            strings.NewReader(generateLogConfig()),
 			},
 		},

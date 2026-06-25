@@ -5,8 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // MigrationResult holds the results of a migration operation

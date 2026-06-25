@@ -4,9 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/golang/mock/gomock"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
 )
 
 const (

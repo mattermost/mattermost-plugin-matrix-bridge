@@ -40,11 +40,11 @@ func TestTokenBucket_HighTrafficLoad(t *testing.T) {
 	startTime := time.Now()
 
 	// Launch workers that hammer the rate limiter
-	for i := 0; i < numWorkers; i++ {
+	for i := range numWorkers {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			for j := 0; j < requestsPerWorker; j++ {
+			for range requestsPerWorker {
 				atomic.AddInt64(&totalRequests, 1)
 
 				// Try to get permission
@@ -116,10 +116,8 @@ func TestClient_MessageSpamLoad(t *testing.T) {
 	defer cancel()
 
 	// Launch spammer goroutines
-	for i := 0; i < numSpammers; i++ {
-		wg.Add(1)
-		go func(_ int) {
-			defer wg.Done()
+	for range numSpammers {
+		wg.Go(func() {
 			for j := 0; j < messagesPerSpammer && ctx.Err() == nil; j++ {
 				atomic.AddInt64(&totalAttempts, 1)
 
@@ -140,7 +138,7 @@ func TestClient_MessageSpamLoad(t *testing.T) {
 				// Small delay to prevent busy spinning
 				time.Sleep(time.Millisecond)
 			}
-		}(i)
+		})
 	}
 
 	wg.Wait()
@@ -202,10 +200,8 @@ func TestClient_RoomCreationSpamLoad(t *testing.T) {
 	defer cancel()
 
 	// Launch room creator goroutines
-	for i := 0; i < numCreators; i++ {
-		wg.Add(1)
-		go func(_ int) {
-			defer wg.Done()
+	for range numCreators {
+		wg.Go(func() {
 			for j := 0; j < roomsPerCreator && ctx.Err() == nil; j++ {
 				atomic.AddInt64(&totalAttempts, 1)
 
@@ -228,7 +224,7 @@ func TestClient_RoomCreationSpamLoad(t *testing.T) {
 				// Small delay
 				time.Sleep(10 * time.Millisecond)
 			}
-		}(i)
+		})
 	}
 
 	wg.Wait()
@@ -285,11 +281,8 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 	defer cancel()
 
 	// Launch mixed operation workers
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(_ int) {
-			defer wg.Done()
-
+	for range numWorkers {
+		wg.Go(func() {
 			for j := 0; j < operationsPerWorker && ctx.Err() == nil; j++ {
 				// Alternate between messages and room creation
 				if j%3 == 0 {
@@ -321,7 +314,7 @@ func TestClient_MixedOperationLoad(t *testing.T) {
 				// Brief pause
 				time.Sleep(20 * time.Millisecond)
 			}
-		}(i)
+		})
 	}
 
 	wg.Wait()
@@ -386,12 +379,9 @@ func TestTokenBucket_StressTest(t *testing.T) {
 	startTime := time.Now()
 
 	// Launch stress test goroutines
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func(_ int) {
-			defer wg.Done()
-
-			for j := 0; j < operationsPerGoroutine; j++ {
+	for range numGoroutines {
+		wg.Go(func() {
+			for range operationsPerGoroutine {
 				if ctx.Err() != nil {
 					break
 				}
@@ -413,7 +403,7 @@ func TestTokenBucket_StressTest(t *testing.T) {
 				// Brief pause to avoid busy spinning
 				time.Sleep(time.Microsecond * 100)
 			}
-		}(i)
+		})
 	}
 
 	wg.Wait()
@@ -477,7 +467,7 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 	}
 
 	var messageDurations []time.Duration
-	for i := 0; i < rapidOperations; i++ {
+	for range rapidOperations {
 		start := time.Now()
 		_, err := client.SendMessage(messageReq)
 		duration := time.Since(start)

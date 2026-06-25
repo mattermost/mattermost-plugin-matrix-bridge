@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // MatrixClientTestSuite contains integration tests for Matrix client operations.

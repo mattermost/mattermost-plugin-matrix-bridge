@@ -44,12 +44,17 @@ endif
 # Used for semver bumping
 PROTECTED_BRANCH := master
 APP_NAME    := $(shell basename -s .git `git config --get remote.origin.url`)
-CURRENT_VERSION := $(shell git describe --abbrev=0 --tags 2>/dev/null || echo "v0.0.0")
+CURRENT_VERSION := $(strip $(shell git describe --abbrev=0 --tags))
+LATEST_RELEASE_TAG_RAW := $(shell git tag -l "v*" --sort=-v:refname | grep -v '\-rc' | head -n 1 || true)
+LATEST_RELEASE_TAG := $(strip $(LATEST_RELEASE_TAG_RAW))
+ifeq ($(LATEST_RELEASE_TAG),)
+LATEST_RELEASE_TAG := $(CURRENT_VERSION)
+endif
 VERSION_PARTS := $(subst ., ,$(subst v,,$(subst -rc, ,$(CURRENT_VERSION))))
 MAJOR := $(word 1,$(VERSION_PARTS))
 MINOR := $(word 2,$(VERSION_PARTS))
 PATCH := $(word 3,$(VERSION_PARTS))
-RC := $(shell echo $(CURRENT_VERSION) | grep -oE 'rc[0-9]+' | sed 's/rc//' || echo "0")
+RC := $(shell echo $(CURRENT_VERSION) | grep -oE 'rc[0-9]+' | sed 's/rc//')
 # Check if current branch is protected
 define check_protected_branch
 	@current_branch=$$(git rev-parse --abbrev-ref HEAD); \
@@ -82,6 +87,11 @@ endef
 patch: ## to bump patch version (semver)
 	$(call check_protected_branch)
 	$(call check_pending_pulls)
+	@$(eval BASE_VERSION := $(strip $(LATEST_RELEASE_TAG)))
+	@$(eval BASE_VERSION_PARTS := $(subst ., ,$(subst v,,$(subst -rc, ,$(BASE_VERSION)))))
+	@$(eval MAJOR := $(word 1,$(BASE_VERSION_PARTS)))
+	@$(eval MINOR := $(word 2,$(BASE_VERSION_PARTS)))
+	@$(eval PATCH := $(word 3,$(BASE_VERSION_PARTS)))
 	@$(eval PATCH := $(shell echo $$(($(PATCH)+1))))
 	$(call prompt_approval,$(MAJOR).$(MINOR).$(PATCH))
 	@echo Bumping $(APP_NAME) to Patch version $(MAJOR).$(MINOR).$(PATCH)
@@ -92,6 +102,11 @@ patch: ## to bump patch version (semver)
 minor: ## to bump minor version (semver)
 	$(call check_protected_branch)
 	$(call check_pending_pulls)
+	@$(eval BASE_VERSION := $(strip $(LATEST_RELEASE_TAG)))
+	@$(eval BASE_VERSION_PARTS := $(subst ., ,$(subst v,,$(subst -rc, ,$(BASE_VERSION)))))
+	@$(eval MAJOR := $(word 1,$(BASE_VERSION_PARTS)))
+	@$(eval MINOR := $(word 2,$(BASE_VERSION_PARTS)))
+	@$(eval PATCH := $(word 3,$(BASE_VERSION_PARTS)))
 	@$(eval MINOR := $(shell echo $$(($(MINOR)+1))))
 	@$(eval PATCH := 0)
 	$(call prompt_approval,$(MAJOR).$(MINOR).$(PATCH))
@@ -103,6 +118,11 @@ minor: ## to bump minor version (semver)
 major: ## to bump major version (semver)
 	$(call check_protected_branch)
 	$(call check_pending_pulls)
+	@$(eval BASE_VERSION := $(strip $(LATEST_RELEASE_TAG)))
+	@$(eval BASE_VERSION_PARTS := $(subst ., ,$(subst v,,$(subst -rc, ,$(BASE_VERSION)))))
+	@$(eval MAJOR := $(word 1,$(BASE_VERSION_PARTS)))
+	@$(eval MINOR := $(word 2,$(BASE_VERSION_PARTS)))
+	@$(eval PATCH := $(word 3,$(BASE_VERSION_PARTS)))
 	$(eval MAJOR := $(shell echo $$(($(MAJOR)+1))))
 	$(eval MINOR := 0)
 	$(eval PATCH := 0)
@@ -164,8 +184,8 @@ apply:
 ## Install go tools
 install-go-tools:
 	@echo Installing go tools
-	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
-	$(GO) install gotest.tools/gotestsum@v1.7.0
+	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+	$(GO) install gotest.tools/gotestsum@v1.13.0
 
 ## Runs eslint and golangci-lint
 .PHONY: check-style
@@ -193,6 +213,7 @@ ifneq ($(HAS_SERVER),)
 ifneq ($(MM_DEBUG),)
 	$(info DEBUG mode is on; to disable, unset MM_DEBUG)
 endif
+	rm -rf server/dist;
 	mkdir -p server/dist;
 ifneq ($(MM_SERVICESETTINGS_ENABLEDEVELOPER),)
 	@echo Building plugin only for $(DEFAULT_GOOS)-$(DEFAULT_GOARCH) because MM_SERVICESETTINGS_ENABLEDEVELOPER is enabled
@@ -412,7 +433,7 @@ help:
 
 mock:
 ifneq ($(HAS_SERVER),)
-	go install github.com/golang/mock/mockgen@v1.6.0
+	$(GO) install go.uber.org/mock/mockgen@v0.6.0
 	$(GOBIN)/mockgen -destination=server/command/mocks/mock_commands.go -package=mocks github.com/mattermost/mattermost-plugin-matrix-bridge/server/command Command
 	$(GOBIN)/mockgen -destination=server/mocks/mock_plugin_api.go -package=mocks github.com/mattermost/mattermost/server/public/plugin API
 	$(GOBIN)/mockgen -destination=server/mocks/mock_kvstore.go -package=mocks github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore KVStore

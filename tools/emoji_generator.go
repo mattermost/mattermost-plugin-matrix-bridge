@@ -23,7 +23,7 @@ func main() {
 	// Ensure the output directory exists
 	outputDir := strings.TrimSuffix(outputFile, "/"+strings.Split(outputFile, "/")[len(strings.Split(outputFile, "/"))-1])
 	if outputDir != outputFile {
-		err := os.MkdirAll(outputDir, 0755)
+		err := os.MkdirAll(outputDir, 0o750)
 		if err != nil {
 			fmt.Printf("Error creating output directory: %v\n", err)
 			os.Exit(1)
@@ -43,7 +43,7 @@ func main() {
 	content, err := io.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Printf("Error reading response: %v\n", err)
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic
 	}
 
 	// Parse the mappings
@@ -117,7 +117,7 @@ func parseEmojiMappings(content string) (map[string]int, map[int]string) {
 }
 
 func generateGoFile(filename string, aliasToIndex map[string]int, indexToUnicode map[int]string) error {
-	file, err := os.Create(filename)
+	file, err := os.Create(filename) //nolint:gosec
 	if err != nil {
 		return err
 	}
