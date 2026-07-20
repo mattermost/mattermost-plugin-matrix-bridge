@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
@@ -93,7 +94,8 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Mention Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))
+			mv, _ := kvstore.BuildSingleChannelMapping(testServerID, freshRoomID)
+			_ = setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mv)
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
@@ -293,7 +295,8 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Edge Case Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))
+			mv, _ := kvstore.BuildSingleChannelMapping(testServerID, freshRoomID)
+			_ = setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mv)
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)

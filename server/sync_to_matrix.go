@@ -45,7 +45,7 @@ func NewMattermostToMatrixBridge(utils *BridgeUtils, fileTracker FileTracker, po
 // MattermostToMatrix-specific utility methods
 
 func (b *MattermostToMatrixBridge) getGhostUser(userID string) (string, bool) {
-	ghostUserKey := kvstore.BuildGhostUserKey(userID)
+	ghostUserKey := kvstore.BuildGhostUserKey(b.serverID, userID)
 	ghostUserIDBytes, err := b.kvstore.Get(ghostUserKey)
 	if err == nil && len(ghostUserIDBytes) > 0 {
 		return string(ghostUserIDBytes), true
@@ -91,7 +91,7 @@ func (b *MattermostToMatrixBridge) CreateOrGetGhostUser(userID string) (string, 
 	}
 
 	// Cache the ghost user ID
-	ghostUserKey := kvstore.BuildGhostUserKey(userID)
+	ghostUserKey := kvstore.BuildGhostUserKey(b.serverID, userID)
 	err = b.kvstore.Set(ghostUserKey, []byte(ghostUser.UserID))
 	if err != nil {
 		b.logger.LogWarn("Failed to cache ghost user ID", "error", err, "ghost_user_id", ghostUser.UserID)
@@ -108,7 +108,7 @@ func (b *MattermostToMatrixBridge) CreateOrGetGhostUser(userID string) (string, 
 
 func (b *MattermostToMatrixBridge) ensureGhostUserInRoom(ghostUserID, roomID, userID string) error {
 	// Check if we've already confirmed this ghost user is in this room
-	roomMembershipKey := kvstore.BuildGhostRoomKey(userID, roomID)
+	roomMembershipKey := kvstore.BuildGhostRoomKey(b.serverID, userID, roomID)
 	membershipBytes, err := b.kvstore.Get(roomMembershipKey)
 	if err == nil && len(membershipBytes) > 0 && string(membershipBytes) == "joined" {
 		// Already confirmed this user is in the room
@@ -1281,7 +1281,7 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 // If KV lookup fails, attempts to reconstruct the Matrix user ID from the username
 func (b *MattermostToMatrixBridge) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Use Mattermost user ID as key: mattermost_user_<mattermostUserID> -> matrixUserID
-	mattermostUserKey := kvstore.BuildMattermostUserKey(mattermostUserID)
+	mattermostUserKey := kvstore.BuildMattermostUserKey(b.serverID, mattermostUserID)
 	matrixUserIDBytes, err := b.kvstore.Get(mattermostUserKey)
 	if err == nil && len(matrixUserIDBytes) > 0 {
 		return string(matrixUserIDBytes), nil

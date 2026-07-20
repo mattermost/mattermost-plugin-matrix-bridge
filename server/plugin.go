@@ -37,8 +37,17 @@ type Plugin struct {
 	// commandClient is the client used to register and execute slash commands.
 	commandClient command.Command
 
-	// matrixClient is the client used to communicate with Matrix servers.
-	matrixClient *matrix.Client
+	// matrixClients holds one Matrix client per configured server, keyed by
+	// serverID. It currently contains exactly one entry. Guarded by
+	// matrixClientsLock together with serverID.
+	matrixClients map[string]*matrix.Client
+
+	// serverID is the cached serverID of the single configured Matrix server,
+	// populated by reconcileServerConfig.
+	serverID string
+
+	// matrixClientsLock synchronizes access to matrixClients and serverID.
+	matrixClientsLock sync.RWMutex
 
 	// postTracker tracks post creation timestamps to detect redundant edits
 	postTracker *PostTracker
@@ -97,7 +106,9 @@ func (p *Plugin) OnActivate() error {
 	p.maxProfileImageSize = DefaultMaxProfileImageSize
 	p.maxFileSize = DefaultMaxFileSize
 
-	p.initMatrixClient()
+	if err := p.initMatrixClient(); err != nil {
+		return errors.Wrap(err, "failed to initialize Matrix client")
+	}
 
 	// Run KV store migrations before initializing bridges
 	if err := p.runKVStoreMigrations(); err != nil {
@@ -107,6 +118,14 @@ func (p *Plugin) OnActivate() error {
 	// Register for shared channels first to get remote ID
 	if err := p.registerForSharedChannels(); err != nil {
 		p.logger.LogWarn("Failed to register for shared channels", "error", err)
+	}
+
+	// registerForSharedChannels assigns p.remoteID, but the earlier
+	// initMatrixClient built the clients (and reconciled the registry) before it
+	// was known. Reinitialize so both the registry's RemoteID and every Matrix
+	// client carry the assigned remote ID instead of the initial empty value.
+	if err := p.initMatrixClient(); err != nil {
+		p.logger.LogWarn("Failed to reinitialize Matrix clients with remote ID", "error", err)
 	}
 
 	// Initialize bridge components after getting remote ID
@@ -148,18 +167,51 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	return response, nil
 }
 
-func (p *Plugin) initMatrixClient() {
+func (p *Plugin) initMatrixClient() error {
+	// OnConfigurationChange can run before OnActivate initializes the KV store.
+	// The registry lives in the KV store, so defer client setup until it exists;
+	// OnActivate calls initMatrixClient again once the store is ready.
+	if p.kvstore == nil {
+		return nil
+	}
+
+	// Reconcile the flat plugin.json config into the managed server registry
+	// first; this mints/keeps the stable serverID that keys the client map.
+	servers, err := p.reconcileServerConfig()
+	if err != nil {
+		// Surface the failure to the caller rather than leaving the client map
+		// silently stale/empty; a failed reconcile must not look like success.
+		return errors.Wrap(err, "failed to reconcile server configuration")
+	}
+
 	config := p.getConfiguration()
 	rateLimitMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
 	rateLimitConfig := matrix.GetRateLimitConfigByMode(rateLimitMode)
-	p.matrixClient = matrix.NewClientWithRateLimit(
-		config.MatrixServerURL,
-		config.MatrixASToken,
-		p.remoteID,
-		config.MatrixServerName,
-		p.API,
-		rateLimitConfig,
-	)
+
+	clients := make(map[string]*matrix.Client, len(servers))
+	for _, server := range servers {
+		clients[server.ServerID] = matrix.NewClientWithRateLimit(
+			server.ServerURL,
+			server.ASToken,
+			p.remoteID,
+			server.ServerName,
+			p.API,
+			rateLimitConfig,
+		)
+	}
+
+	p.matrixClientsLock.Lock()
+	p.matrixClients = clients
+	p.matrixClientsLock.Unlock()
+	return nil
+}
+
+// getMatrixClient returns the Matrix client for the given serverID, or nil if
+// none is registered.
+func (p *Plugin) getMatrixClient(serverID string) *matrix.Client {
+	p.matrixClientsLock.RLock()
+	defer p.matrixClientsLock.RUnlock()
+	return p.matrixClients[serverID]
 }
 
 func (p *Plugin) initBridges() {
@@ -168,7 +220,8 @@ func (p *Plugin) initBridges() {
 		Logger:              p.logger,
 		API:                 p.API,
 		KVStore:             p.kvstore,
-		MatrixClient:        p.matrixClient,
+		MatrixClient:        p.GetMatrixClient(),
+		ServerID:            p.getSingleServerID(),
 		RemoteID:            p.remoteID,
 		MaxProfileImageSize: p.maxProfileImageSize,
 		MaxFileSize:         p.maxFileSize,
@@ -220,9 +273,14 @@ func (p *Plugin) registerForSharedChannels() error {
 
 // PluginAccessor interface implementation for command handlers
 
-// GetMatrixClient returns the Matrix client instance
+// GetMatrixClient returns the Matrix client for the single configured server.
 func (p *Plugin) GetMatrixClient() *matrix.Client {
-	return p.matrixClient
+	return p.getMatrixClient(p.getSingleServerID())
+}
+
+// GetServerID returns the serverID of the single configured Matrix server.
+func (p *Plugin) GetServerID() string {
+	return p.getSingleServerID()
 }
 
 // GetKVStore returns the KV store instance
@@ -289,7 +347,8 @@ func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.Ch
 		return
 	}
 
-	if p.matrixClient == nil {
+	matrixClient := p.GetMatrixClient()
+	if matrixClient == nil {
 		p.logger.LogError("Matrix client not initialized")
 		return
 	}
@@ -351,14 +410,14 @@ func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.Ch
 		}
 
 		// Resolve room alias to room ID if needed
-		resolvedRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomID)
+		resolvedRoomID, err := matrixClient.ResolveRoomAlias(matrixRoomID)
 		if err != nil {
 			p.logger.LogError("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomID)
 			return
 		}
 
 		// Try to join the ghost user to the Matrix room (handles both public and private rooms)
-		if err := p.matrixClient.InviteAndJoinGhostUser(resolvedRoomID, ghostUserID); err != nil {
+		if err := matrixClient.InviteAndJoinGhostUser(resolvedRoomID, ghostUserID); err != nil {
 			p.logger.LogError("Failed to join ghost user to Matrix room", "error", err, "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id)
 		} else {
 			p.logger.LogInfo("Successfully joined ghost user to Matrix room", "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id, "username", user.Username)

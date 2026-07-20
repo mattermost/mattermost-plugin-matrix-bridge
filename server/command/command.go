@@ -18,7 +18,6 @@ import (
 type Configuration interface {
 	GetMatrixServerURL() string
 	GetMatrixServerName() string
-	GetMatrixUsernamePrefixForServer(serverURL string) string
 }
 
 // MigrationResult holds the results of a migration operation
@@ -53,6 +52,9 @@ type PluginAccessor interface {
 
 	// Shared channel access
 	GetRemoteID() string
+
+	// Server registry access
+	GetServerID() string
 
 	// Migration access
 	RunKVStoreMigrations() error
@@ -388,8 +390,12 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	}
 
 	// Save both directions of the mapping
+	serverID := c.plugin.GetServerID()
 	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
-	err := c.kvstore.Set(mappingKey, []byte(roomIdentifier))
+	mappingValue, err := kvstore.BuildSingleChannelMapping(serverID, roomIdentifier)
+	if err == nil {
+		err = c.kvstore.Set(mappingKey, mappingValue)
+	}
 	if err != nil {
 		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
 		return &model.CommandResponse{
@@ -398,8 +404,8 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		}
 	}
 
-	// Store reverse mapping: room_mapping_<roomIdentifier> -> channelID
-	roomMappingKey := kvstore.BuildRoomMappingKey(roomIdentifier)
+	// Store reverse mapping: room_mapping_<serverID>_<roomIdentifier> -> channelID
+	roomMappingKey := kvstore.BuildRoomMappingKey(serverID, roomIdentifier)
 	err = c.kvstore.Set(roomMappingKey, []byte(args.ChannelId))
 	if err != nil {
 		c.client.Log.Error("Failed to save room mapping", "error", err, "room_identifier", roomIdentifier, "channel_id", args.ChannelId)
@@ -409,7 +415,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	// If roomIdentifier is an alias, also resolve to room ID and store that mapping
 	if strings.HasPrefix(roomIdentifier, "#") {
 		if resolvedRoomID, err := matrixClient.ResolveRoomAlias(roomIdentifier); err == nil {
-			roomIDMappingKey := kvstore.BuildRoomMappingKey(resolvedRoomID)
+			roomIDMappingKey := kvstore.BuildRoomMappingKey(serverID, resolvedRoomID)
 			if err := c.kvstore.Set(roomIDMappingKey, []byte(args.ChannelId)); err != nil {
 				c.client.Log.Error("Failed to save room ID mapping", "error", err, "room_id", resolvedRoomID, "channel_id", args.ChannelId)
 			}
@@ -503,17 +509,35 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 	}
 
 	// Check if this channel has a Matrix room mapping
+	serverID := c.plugin.GetServerID()
 	channelMappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
 	roomIDBytes, err := c.kvstore.Get(channelMappingKey)
-	if err != nil {
+
+	// A corrupt (unparseable) value is distinct from an unmapped channel. Clear
+	// the bad record so the admin can recover with /matrix map, rather than being
+	// told the channel is not mapped with no way to fix it.
+	if err == nil && len(roomIDBytes) > 0 {
+		if _, parseErr := kvstore.ParseChannelServerMappings(roomIDBytes); parseErr != nil {
+			c.client.Log.Error("Corrupt channel mapping value; clearing it", "error", parseErr, "channel_id", args.ChannelId)
+			if delErr := c.kvstore.Delete(channelMappingKey); delErr != nil {
+				c.client.Log.Error("Failed to clear corrupt channel mapping", "error", delErr, "channel_id", args.ChannelId)
+			}
+			return &model.CommandResponse{
+				ResponseType: model.CommandResponseTypeEphemeral,
+				Text:         fmt.Sprintf("⚠️ **Corrupt Mapping Cleared**\n\nChannel `%s` had an unreadable Matrix room mapping, which has been removed. Use `/matrix map` to remap it if needed.", channelName),
+			}
+		}
+	}
+
+	mappings, _ := kvstore.ParseChannelServerMappings(roomIDBytes)
+	matrixRoomIdentifier := kvstore.RoomIDForServer(mappings, serverID)
+	if err != nil || matrixRoomIdentifier == "" {
 		// Key not found is expected for unmapped channels
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         fmt.Sprintf("❌ **No Mapping Found**\n\nChannel `%s` is not currently mapped to any Matrix room.", channelName),
 		}
 	}
-
-	matrixRoomIdentifier := string(roomIDBytes)
 
 	// Clear the Matrix room state to prevent fallback lookups - this is critical
 	matrixClient := c.plugin.GetMatrixClient()
@@ -545,7 +569,7 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 	}
 
 	// Remove the room->channel mapping
-	roomMappingKey := kvstore.BuildRoomMappingKey(matrixRoomIdentifier)
+	roomMappingKey := kvstore.BuildRoomMappingKey(serverID, matrixRoomIdentifier)
 	if err := c.kvstore.Delete(roomMappingKey); err != nil {
 		c.client.Log.Warn("Failed to remove room mapping", "error", err, "room_identifier", matrixRoomIdentifier, "channel_id", args.ChannelId)
 		// Continue - the main mapping was removed
@@ -634,17 +658,22 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	}
 
 	// Automatically map the created room to this channel (both directions)
+	serverID := c.plugin.GetServerID()
 	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
-	if err := c.kvstore.Set(mappingKey, []byte(roomID)); err != nil {
-		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId, "room_id", roomID)
+	mappingValue, mErr := kvstore.BuildSingleChannelMapping(serverID, roomID)
+	if mErr == nil {
+		mErr = c.kvstore.Set(mappingKey, mappingValue)
+	}
+	if mErr != nil {
+		c.client.Log.Error("Failed to save channel mapping", "error", mErr, "channel_id", args.ChannelId, "room_id", roomID)
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         fmt.Sprintf("✅ **Matrix Room Created:** `%s`\n\n❌ Failed to save channel mapping. Use `/matrix map %s` to map manually.", roomID, roomID),
 		}
 	}
 
-	// Store reverse mapping: room_mapping_<roomID> -> channelID
-	roomMappingKey := kvstore.BuildRoomMappingKey(roomID)
+	// Store reverse mapping: room_mapping_<serverID>_<roomID> -> channelID
+	roomMappingKey := kvstore.BuildRoomMappingKey(serverID, roomID)
 	if err := c.kvstore.Set(roomMappingKey, []byte(args.ChannelId)); err != nil {
 		c.client.Log.Error("Failed to save room mapping", "error", err, "room_id", roomID, "channel_id", args.ChannelId)
 		// Continue anyway - the forward mapping was saved successfully
@@ -672,6 +701,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
 
 	// Get channel mapping keys using efficient prefix filtering
+	serverID := c.plugin.GetServerID()
 	mappings := make(map[string]string)
 	channelMappingPrefix := kvstore.KeyPrefixChannelMapping
 	page := 0
@@ -696,8 +726,16 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 		for _, key := range keys {
 			channelID := strings.TrimPrefix(key, channelMappingPrefix)
 			roomIDBytes, err := c.kvstore.Get(key)
-			if err == nil && len(roomIDBytes) > 0 {
-				mappings[channelID] = string(roomIDBytes)
+			if err != nil || len(roomIDBytes) == 0 {
+				continue
+			}
+			channelMappings, parseErr := kvstore.ParseChannelServerMappings(roomIDBytes)
+			if parseErr != nil {
+				c.client.Log.Warn("Failed to parse channel mapping value", "channel_id", channelID, "error", parseErr)
+				continue
+			}
+			if roomID := kvstore.RoomIDForServer(channelMappings, serverID); roomID != "" {
+				mappings[channelID] = roomID
 			}
 		}
 

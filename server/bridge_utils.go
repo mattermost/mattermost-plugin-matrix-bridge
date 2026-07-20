@@ -37,6 +37,7 @@ type BridgeUtilsConfig struct {
 	API                 plugin.API
 	KVStore             kvstore.KVStore
 	MatrixClient        *matrix.Client
+	ServerID            string
 	RemoteID            string
 	MaxProfileImageSize int64
 	MaxFileSize         int64
@@ -49,6 +50,7 @@ type BridgeUtils struct {
 	API                 plugin.API
 	kvstore             kvstore.KVStore
 	matrixClient        *matrix.Client
+	serverID            string
 	remoteID            string
 	maxProfileImageSize int64
 	maxFileSize         int64
@@ -62,6 +64,7 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 		API:                 config.API,
 		kvstore:             config.KVStore,
 		matrixClient:        config.MatrixClient,
+		serverID:            config.ServerID,
 		remoteID:            config.RemoteID,
 		maxProfileImageSize: config.MaxProfileImageSize,
 		maxFileSize:         config.MaxFileSize,
@@ -71,17 +74,33 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 
 // Shared utility methods that both bridge types need
 
-// GetMatrixRoomID retrieves the Matrix room ID for a given Mattermost channel ID
+// GetMatrixRoomID retrieves the Matrix room ID for a given Mattermost channel ID.
+// An unmapped channel yields ("", nil): the plugin KV API returns no error for a
+// missing key, so the value is simply empty. A real KV read failure or a corrupt
+// (unparseable) value is returned as an error rather than being masked as
+// unmapped, which would silently mis-route or drop messages.
 func (s *BridgeUtils) GetMatrixRoomID(channelID string) (string, error) {
-	roomID, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
+	data, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
 	if err != nil {
-		// KV store error (typically key not found) - unmapped channels are expected
-		return "", nil
+		return "", errors.Wrap(err, "failed to read channel mapping")
 	}
-	return string(roomID), nil
+	mappings, err := kvstore.ParseChannelServerMappings(data)
+	if err != nil {
+		// After the v3 migration every stored value is well-formed JSON, so a
+		// parse failure here is a corrupt record, not an unmapped channel.
+		return "", errors.Wrapf(err, "corrupt channel mapping value for channel %s", channelID)
+	}
+	return kvstore.RoomIDForServer(mappings, s.serverID), nil
 }
 
 func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier string) error {
+	// Guard against persisting a mapping with an empty serverID, which would be
+	// unroutable and would corrupt the room_mapping_ reverse key. This should not
+	// happen once the registry is reconciled, but fail loudly rather than write it.
+	if s.serverID == "" {
+		return errors.New("cannot store channel mapping: server ID not initialized")
+	}
+
 	// Always resolve to room ID for consistent forward mapping storage
 	var roomID string
 	var err error
@@ -94,14 +113,29 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 		roomID = matrixRoomIdentifier
 	}
 
-	// Store forward mapping: channel_mapping_<channelID> -> room_id (always room ID)
-	err = s.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), []byte(roomID))
+	// Store forward mapping: channel_mapping_<channelID> -> [{serverID, room_id}].
+	// Upsert only this server's entry so a channel bridged to multiple homeservers
+	// keeps the others' mappings intact.
+	existingData, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
+	if err != nil {
+		return errors.Wrap(err, "failed to read existing channel room mapping")
+	}
+	mappings, err := kvstore.ParseChannelServerMappings(existingData)
+	if err != nil {
+		return errors.Wrap(err, "failed to parse existing channel room mapping")
+	}
+	mappings = kvstore.UpsertChannelServerMapping(mappings, s.serverID, roomID)
+	mappingValue, err := kvstore.MarshalChannelServerMappings(mappings)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal channel room mapping")
+	}
+	err = s.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingValue)
 	if err != nil {
 		return errors.Wrap(err, "failed to store channel room mapping")
 	}
 
 	// Store reverse mapping for the room ID
-	err = s.kvstore.Set(kvstore.BuildRoomMappingKey(roomID), []byte(channelID))
+	err = s.kvstore.Set(kvstore.BuildRoomMappingKey(s.serverID, roomID), []byte(channelID))
 	if err != nil {
 		return errors.Wrap(err, "failed to store reverse room mapping")
 	}
@@ -109,7 +143,7 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	// If we started with an alias, also create reverse mapping for the alias
 	// This allows lookups by both alias and room ID
 	if strings.HasPrefix(matrixRoomIdentifier, "#") && roomID != matrixRoomIdentifier {
-		err = s.kvstore.Set(kvstore.BuildRoomMappingKey(matrixRoomIdentifier), []byte(channelID))
+		err = s.kvstore.Set(kvstore.BuildRoomMappingKey(s.serverID, matrixRoomIdentifier), []byte(channelID))
 		if err != nil {
 			s.logger.LogWarn("Failed to create alias reverse mapping", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "error", err)
 		} else {
@@ -122,6 +156,35 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 
 func (s *BridgeUtils) getConfiguration() *configuration {
 	return s.configGetter.getConfiguration()
+}
+
+// matrixUsernamePrefix returns the username prefix for this bridge's Matrix
+// server, resolved from the managed server registry, which is the source of
+// truth for per-server settings. reconcileServerConfig always populates each
+// entry's prefix (defaulting to DefaultMatrixUsernamePrefix) before bridges run,
+// so a configured server always resolves here. The static default is only for
+// the degenerate case of no registered server (e.g. before the first reconcile).
+// The registry is read live so prefix changes take effect without recreating the
+// bridge.
+func (s *BridgeUtils) matrixUsernamePrefix() string {
+	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
+	if err != nil {
+		// A transient registry read failure must not silently change the prefix:
+		// a wrong prefix splits Matrix-user identity (ghosts created and matched
+		// under a different prefix). Surface it loudly, mirroring GetMatrixRoomID.
+		s.logger.LogError("Failed to read server registry for username prefix; using default", "server_id", s.serverID, "error", err)
+		return DefaultMatrixUsernamePrefix
+	}
+	servers, err := kvstore.ParseServersConfig(data)
+	if err != nil {
+		s.logger.LogError("Corrupt server registry; using default username prefix", "server_id", s.serverID, "error", err)
+		return DefaultMatrixUsernamePrefix
+	}
+	if server, ok := kvstore.ServerConfigForID(servers, s.serverID); ok && server.UsernamePrefix != "" {
+		return server.UsernamePrefix
+	}
+	// No registry yet (before the first reconcile) or no entry for this server.
+	return DefaultMatrixUsernamePrefix
 }
 
 func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {
@@ -284,7 +347,7 @@ func (s *BridgeUtils) getMattermostUsernameFromMatrix(matrixUserID string) strin
 		mattermostUserID = ghostMattermostUserID
 	} else {
 		// Check if we have a mapping for this regular Matrix user
-		userMapKey := "matrix_user_" + matrixUserID
+		userMapKey := kvstore.BuildMatrixUserKey(s.serverID, matrixUserID)
 		userIDBytes, err := s.kvstore.Get(userMapKey)
 		if err != nil || len(userIDBytes) == 0 {
 			s.logger.LogDebug("No Mattermost user found for Matrix mention", "matrix_user_id", matrixUserID)
@@ -435,7 +498,7 @@ func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername str
 	// We need to reverse this to get "@username:server.com"
 
 	config := s.configGetter.getConfiguration()
-	prefix := config.GetMatrixUsernamePrefixForServer(config.GetMatrixServerURL())
+	prefix := s.matrixUsernamePrefix()
 
 	// Check if username has the expected prefix
 	expectedPrefix := prefix + ":"

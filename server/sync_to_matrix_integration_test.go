@@ -66,14 +66,14 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Create Matrix client pointing to test container
-	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+	setTestMatrixClient(suite.plugin, createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		suite.plugin.remoteID,
-	)
+	))
 	// Set explicit server domain for testing
-	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	suite.plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
 	config := &configuration{

@@ -57,13 +57,13 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Create Matrix client
-	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+	setTestMatrixClient(suite.plugin, createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		suite.plugin.remoteID,
-	)
-	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	))
+	suite.plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
 	config := &configuration{
@@ -73,6 +73,10 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 		MatrixUsernamePrefix: "testmatrix", // Use different prefix to prove configurability
 	}
 	suite.plugin.configuration = config
+
+	// Project the flat config into the server registry, as reconcileServerConfig
+	// does at activation, so the per-server username prefix resolves to "testmatrix".
+	seedTestServerConfig(suite.plugin)
 
 	// Initialize the logger (required before initBridges)
 	suite.plugin.logger = &testLogger{t: suite.T()}
@@ -197,7 +201,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 	t.Logf("✓ Created ghost user: %s", ghostUserID)
 
 	// Join the test room as the ghost user
-	err = suite.plugin.matrixClient.JoinRoomAsUser(suite.testRoomID, ghostUserID)
+	err = suite.plugin.GetMatrixClient().JoinRoomAsUser(suite.testRoomID, ghostUserID)
 	assert.NoError(t, err, "Ghost user should be able to join room")
 
 	// Send a message as the ghost user to demonstrate real Matrix operations
@@ -206,14 +210,14 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 		GhostUserID: ghostUserID,
 		Message:     "Hello from ghost user for loop prevention test",
 	}
-	response, err := suite.plugin.matrixClient.SendMessage(messageReq)
+	response, err := suite.plugin.GetMatrixClient().SendMessage(messageReq)
 	assert.NoError(t, err, "Should be able to send message as ghost user")
 	assert.NotEmpty(t, response.EventID, "Should receive event ID")
 
 	t.Logf("✓ Ghost user %s sent message with event ID: %s", ghostUserID, response.EventID)
 
 	// Test: Get the ghost user's profile to simulate what the bridge would do
-	profile, err := suite.plugin.matrixClient.GetUserProfile(ghostUserID)
+	profile, err := suite.plugin.GetMatrixClient().GetUserProfile(ghostUserID)
 	assert.NoError(t, err, "Should be able to get ghost user profile")
 	assert.NotNil(t, profile, "Profile should not be nil")
 
@@ -374,12 +378,6 @@ func TestDefaultUsernamePrefix(t *testing.T) {
 
 	t.Logf("✓ Default prefix: %s", DefaultMatrixUsernamePrefix)
 	t.Logf("✓ Custom prefix: %s", prefix)
-
-	// Test server-specific prefix method (for future extensibility)
-	serverPrefix := config.GetMatrixUsernamePrefixForServer("https://matrix.example.com")
-	assert.Equal(t, "customprefix", serverPrefix, "Server-specific prefix should return same as global for now")
-
-	t.Logf("✓ Server-specific prefix: %s", serverPrefix)
 }
 
 // TestBasicRemoteDetectionLogic tests the basic logic without requiring Matrix server

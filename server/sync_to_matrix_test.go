@@ -19,7 +19,7 @@ func TestCompareTextContent(t *testing.T) {
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.client = pluginapi.NewClient(plugin.API, nil)
 	plugin.kvstore = kvstore.NewKVStore(plugin.client)
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
 	// Initialize bridges for testing
 	plugin.initBridges()
 

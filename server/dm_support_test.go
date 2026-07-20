@@ -6,6 +6,8 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 func TestDMChannelDetection(t *testing.T) {
@@ -16,8 +18,7 @@ func TestDMChannelDetection(t *testing.T) {
 	plugin.maxFileSize = DefaultMaxFileSize
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
 	// Initialize bridges for testing
 	plugin.initBridges()
 
@@ -111,7 +112,7 @@ func TestDMRoomMapping(t *testing.T) {
 	plugin.maxFileSize = DefaultMaxFileSize
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
 	plugin.kvstore = NewMemoryKVStore() // Initialize KV store for tests
 
 	// Initialize bridges for testing
@@ -131,7 +132,7 @@ func TestDMRoomMapping(t *testing.T) {
 		assert.Equal(t, matrixRoomID, retrievedRoomID)
 
 		// Test reverse mapping (Matrix -> Mattermost)
-		roomMappingKey := "room_mapping_" + matrixRoomID
+		roomMappingKey := kvstore.BuildRoomMappingKey(testServerID, matrixRoomID)
 		channelIDBytes, err := plugin.kvstore.Get(roomMappingKey)
 		assert.NoError(t, err)
 		assert.Equal(t, channelID, string(channelIDBytes))

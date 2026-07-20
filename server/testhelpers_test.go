@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -88,6 +89,45 @@ func createMatrixClientWithTestLogger(t *testing.T, serverURL, asToken, remoteID
 	return matrix.NewClientWithLoggerAndRateLimit(serverURL, asToken, remoteID, "", testLogger, matrix.TestRateLimitConfig())
 }
 
+// testServerID is the deterministic serverID used to namespace per-server KV keys
+// in tests. Using a fixed value keeps seeded keys and assertions predictable.
+const testServerID = "testserveridtestserverid00"
+
+// setTestMatrixClient registers a Matrix client as the single server's client and
+// caches the deterministic testServerID, so p.GetMatrixClient() and
+// p.getSingleServerID() behave as they would after initMatrixClient.
+func setTestMatrixClient(p *Plugin, client *matrix.Client) {
+	p.matrixClientsLock.Lock()
+	defer p.matrixClientsLock.Unlock()
+	p.serverID = testServerID
+	if p.matrixClients == nil {
+		p.matrixClients = make(map[string]*matrix.Client)
+	}
+	p.matrixClients[testServerID] = client
+}
+
+// seedTestServerConfig writes a servers_config registry entry with the
+// deterministic testServerID and caches it, so migrations and bridge KV
+// operations use a predictable serverID. It mirrors what reconcileServerConfig
+// does in production by projecting the plugin's flat configuration (when set)
+// into the registry entry, so per-server reads such as the username prefix
+// resolve to the configured values.
+func seedTestServerConfig(p *Plugin) {
+	entry := kvstore.ServerConfig{ServerID: testServerID, Enabled: true, RemoteID: p.remoteID}
+	if cfg := p.configuration; cfg != nil {
+		entry.ServerURL = cfg.MatrixServerURL
+		entry.ServerName = cfg.MatrixServerName
+		entry.ASToken = cfg.MatrixASToken
+		entry.HSToken = cfg.MatrixHSToken
+		entry.UsernamePrefix = cfg.GetMatrixUsernamePrefix()
+	}
+	data, _ := json.Marshal([]kvstore.ServerConfig{entry})
+	_ = p.kvstore.Set(kvstore.KeyServersConfig, data)
+	p.matrixClientsLock.Lock()
+	p.serverID = testServerID
+	p.matrixClientsLock.Unlock()
+}
+
 // TestMatrixClientTestLogger verifies that matrix client uses test logger correctly
 func TestMatrixClientTestLogger(t *testing.T) {
 	// Create a matrix client with test logger
@@ -124,8 +164,9 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Reuse the container's Matrix client to share rate limiting state
-	// This prevents rate limit conflicts between container setup and plugin operations
-	plugin.matrixClient = matrixContainer.Client
+	// This prevents rate limit conflicts between container setup and plugin operations.
+	// This also caches the deterministic testServerID used to namespace KV keys.
+	setTestMatrixClient(plugin, matrixContainer.Client)
 
 	config := &configuration{
 		MatrixServerURL: matrixContainer.ServerURL,
@@ -186,9 +227,10 @@ func setupBasicMocks(api *plugintest.API, testUserID string) {
 }
 
 // setupTestKVData sets up initial test data in the KV store
-func setupTestKVData(kvstore kvstore.KVStore, testChannelID, testRoomID string) {
-	// Set up channel mapping
-	_ = kvstore.Set("channel_mapping_"+testChannelID, []byte(testRoomID))
+func setupTestKVData(store kvstore.KVStore, testChannelID, testRoomID string) {
+	// Set up channel mapping in the server-scoped value shape used since v3
+	mappingValue, _ := kvstore.BuildSingleChannelMapping(testServerID, testRoomID)
+	_ = store.Set(kvstore.BuildChannelMappingKey(testChannelID), mappingValue)
 
 	// Ghost users and ghost rooms are intentionally not set up here
 	// to trigger creation during tests, which validates the creation logic
@@ -266,7 +308,11 @@ func (m *MemoryKVStore) Get(key string) ([]byte, error) {
 		copy(result, data)
 		return result, nil
 	}
-	return nil, errors.New("key not found")
+	// Match the production plugin KV API: a missing key returns (nil, nil), not an
+	// error. Only real backend failures produce an error. Callers distinguish
+	// "absent" via empty data, and code like getServers relies on this to tell a
+	// missing registry apart from a genuine read failure.
+	return nil, nil
 }
 
 // Set stores a key-value pair in the KV store.
@@ -376,10 +422,14 @@ func TestMemoryKVStore(t *testing.T) {
 		t.Errorf("Expected 'test-value', got '%s'", string(value))
 	}
 
-	// Test Get non-existent key
-	_, err = store.Get("non-existent")
-	if err == nil {
-		t.Error("Expected error for non-existent key")
+	// Test Get non-existent key: matches the production plugin KV API, which
+	// returns (nil, nil) for a missing key rather than an error.
+	value, err = store.Get("non-existent")
+	if err != nil {
+		t.Errorf("Expected no error for missing key, got %v", err)
+	}
+	if len(value) != 0 {
+		t.Errorf("Expected empty value for missing key, got '%s'", string(value))
 	}
 
 	// Test Delete
@@ -388,9 +438,12 @@ func TestMemoryKVStore(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	_, err = store.Get("test-key")
-	if err == nil {
-		t.Error("Expected error for deleted key")
+	value, err = store.Get("test-key")
+	if err != nil {
+		t.Errorf("Expected no error for deleted key, got %v", err)
+	}
+	if len(value) != 0 {
+		t.Errorf("Expected empty value for deleted key, got '%s'", string(value))
 	}
 }
 

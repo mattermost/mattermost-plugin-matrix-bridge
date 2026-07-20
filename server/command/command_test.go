@@ -1,6 +1,7 @@
 package command
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
@@ -29,10 +32,6 @@ func (m *mockConfiguration) GetMatrixServerURL() string {
 
 func (m *mockConfiguration) GetMatrixServerName() string {
 	return "" // No configured server name in tests
-}
-
-func (m *mockConfiguration) GetMatrixUsernamePrefixForServer(_ string) string {
-	return "matrix" // Use default prefix for tests
 }
 
 // mockPlugin implements the PluginAccessor interface for testing
@@ -71,6 +70,10 @@ func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client {
 
 func (m *mockPlugin) GetRemoteID() string {
 	return "test-remote-id"
+}
+
+func (m *mockPlugin) GetServerID() string {
+	return "test-server-id"
 }
 
 func (m *mockPlugin) RunKVStoreMigrations() error {
@@ -611,4 +614,114 @@ func TestChannelNameFallback(t *testing.T) {
 		// The actual room name resolution happens in executeCreateRoomCommand
 		assert.Equal("", capturedRoomName)
 	}
+}
+
+// memKV is a minimal in-memory kvstore.KVStore for exercising command handlers
+// directly (the main package's MemoryKVStore is not importable here).
+type memKV struct{ m map[string][]byte }
+
+func newMemKV() *memKV { return &memKV{m: map[string][]byte{}} }
+
+func (s *memKV) GetTemplateData(string) (string, error) { return "", nil }
+func (s *memKV) Get(k string) ([]byte, error)           { return s.m[k], nil }
+func (s *memKV) Set(k string, v []byte) error           { s.m[k] = v; return nil }
+func (s *memKV) Delete(k string) error                  { delete(s.m, k); return nil }
+func (s *memKV) ListKeys(int, int) ([]string, error)    { return nil, nil }
+
+func (s *memKV) ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error) {
+	var keys []string
+	for k := range s.m {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	start := page * perPage
+	if start >= len(keys) {
+		return nil, nil
+	}
+	end := min(start+perPage, len(keys))
+	return keys[start:end], nil
+}
+
+func newUnmapTestHandler(env *env, store kvstore.KVStore) *Handler {
+	return &Handler{
+		plugin: &mockPlugin{
+			client:    env.client,
+			kvstore:   store,
+			config:    &mockConfiguration{serverURL: "http://test.com"},
+			pluginAPI: env.api,
+		},
+		client:    env.client,
+		kvstore:   store,
+		pluginAPI: env.api,
+	}
+}
+
+func TestExecuteUnmapCommand(t *testing.T) {
+	// Note: mockPlugin.GetServerID() returns "test-server-id".
+
+	t.Run("ClearsCorruptMapping", func(t *testing.T) {
+		env := setupTest()
+		env.api.On("GetChannel", "chanX").Return(&model.Channel{Id: "chanX", Name: "chanx"}, nil)
+		env.api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
+
+		store := newMemKV()
+		key := kvstore.BuildChannelMappingKey("chanX")
+		require.NoError(t, store.Set(key, []byte("!not-json:server")))
+
+		h := newUnmapTestHandler(env, store)
+		resp := h.executeUnmapCommand(&model.CommandArgs{ChannelId: "chanX"})
+
+		assert.Contains(t, resp.Text, "Corrupt Mapping Cleared")
+		v, _ := store.Get(key)
+		assert.Empty(t, v, "corrupt mapping should be deleted so the admin can recover")
+	})
+
+	t.Run("OtherServerMappingTreatedAsUnmappedAndNotDeleted", func(t *testing.T) {
+		env := setupTest()
+		env.api.On("GetChannel", "chanY").Return(&model.Channel{Id: "chanY", Name: "chany"}, nil)
+
+		store := newMemKV()
+		key := kvstore.BuildChannelMappingKey("chanY")
+		val, err := kvstore.BuildSingleChannelMapping("some-other-server", "!room:server")
+		require.NoError(t, err)
+		require.NoError(t, store.Set(key, val))
+
+		h := newUnmapTestHandler(env, store)
+		resp := h.executeUnmapCommand(&model.CommandArgs{ChannelId: "chanY"})
+
+		assert.Contains(t, resp.Text, "No Mapping Found")
+		v, _ := store.Get(key)
+		assert.NotEmpty(t, v, "a valid mapping for another server must not be deleted")
+	})
+}
+
+func TestExecuteListMappingsCommand(t *testing.T) {
+	// mockPlugin.GetServerID() returns "test-server-id"; only mappings for that
+	// server must be listed.
+	env := setupTest()
+	env.api.On("GetChannel", "chanA").Return(&model.Channel{Id: "chanA", Name: "chan-a"}, nil).Maybe()
+	env.api.On("GetChannel", mock.AnythingOfType("string")).Return(&model.Channel{Id: "x", Name: "x"}, nil).Maybe()
+	env.api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
+
+	store := newMemKV()
+	// Mapping for THIS server.
+	valA, err := kvstore.BuildSingleChannelMapping("test-server-id", "!roomA:server")
+	require.NoError(t, err)
+	require.NoError(t, store.Set(kvstore.BuildChannelMappingKey("chanA"), valA))
+	// Mapping for a DIFFERENT server — must be filtered out.
+	valB, err := kvstore.BuildSingleChannelMapping("other-server", "!roomB:server")
+	require.NoError(t, err)
+	require.NoError(t, store.Set(kvstore.BuildChannelMappingKey("chanB"), valB))
+	// A corrupt value — must be skipped without aborting the listing.
+	require.NoError(t, store.Set(kvstore.BuildChannelMappingKey("chanC"), []byte("!corrupt")))
+
+	h := newUnmapTestHandler(env, store)
+	resp := h.executeListMappingsCommand(&model.CommandArgs{ChannelId: "chanZ"})
+
+	assert.Contains(t, resp.Text, "!roomA:server", "this server's mapping should be listed")
+	assert.Contains(t, resp.Text, "1 total", "only the matching-server mapping should be counted")
+	assert.NotContains(t, resp.Text, "!roomB:server", "another server's mapping must not be listed")
+	assert.NotContains(t, resp.Text, "chanC", "a corrupt mapping must be skipped, not crash the listing")
 }

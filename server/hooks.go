@@ -12,7 +12,7 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 		return model.SyncResponse{}, nil
 	}
 
-	if p.matrixClient == nil {
+	if p.GetMatrixClient() == nil {
 		p.logger.LogError("Matrix client not initialized")
 		return model.SyncResponse{}, errors.New("matrix client not initialized")
 	}
@@ -73,14 +73,15 @@ func (p *Plugin) OnSharedChannelsPing(_ *model.RemoteCluster) bool {
 	}
 
 	// If Matrix client is not configured, we're not healthy
-	if p.matrixClient == nil {
+	matrixClient := p.GetMatrixClient()
+	if matrixClient == nil {
 		p.logger.LogWarn("Ping failed - Matrix client not initialized")
 		return false
 	}
 
 	// Test Matrix connection health
 	if config.MatrixServerURL != "" && config.MatrixASToken != "" {
-		if err := p.matrixClient.TestConnection(); err != nil {
+		if err := matrixClient.TestConnection(); err != nil {
 			p.logger.LogWarn("Ping failed - Matrix connection test failed", "error", err)
 			return false
 		}
@@ -100,7 +101,8 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 		return nil
 	}
 
-	if p.matrixClient == nil {
+	matrixClient := p.GetMatrixClient()
+	if matrixClient == nil {
 		return errors.New("matrix client not initialized")
 	}
 
@@ -134,7 +136,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 	}
 
 	// Upload file to Matrix but don't post it yet - just store the mxc:// URI
-	mxcURI, err := p.matrixClient.UploadMedia(fileData, fi.Name, fi.MimeType)
+	mxcURI, err := matrixClient.UploadMedia(fileData, fi.Name, fi.MimeType)
 	if err != nil {
 		return errors.Wrap(err, "failed to upload file to Matrix")
 	}
@@ -176,7 +178,7 @@ func (p *Plugin) deleteFileFromMatrix(fi *model.FileInfo, post *model.Post) erro
 	}
 
 	// Resolve room alias to room ID if needed
-	matrixRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	matrixRoomID, err := p.GetMatrixClient().ResolveRoomAlias(matrixRoomIdentifier)
 	if err != nil {
 		return errors.Wrap(err, "failed to resolve Matrix room identifier for file deletion")
 	}
@@ -243,14 +245,15 @@ func (p *Plugin) inviteRemoteUserToMatrixRoom(user *model.User, channelID string
 	}
 
 	// Resolve room alias to room ID (handles both aliases and room IDs)
-	resolvedRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomID)
+	matrixClient := p.GetMatrixClient()
+	resolvedRoomID, err := matrixClient.ResolveRoomAlias(matrixRoomID)
 	if err != nil {
 		p.logger.LogWarn("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomID)
 		return errors.Wrap(err, "failed to resolve Matrix room identifier")
 	}
 
 	// Invite the original Matrix user to the room
-	if err := p.matrixClient.InviteUserToRoom(resolvedRoomID, originalMatrixUserID); err != nil {
+	if err := matrixClient.InviteUserToRoom(resolvedRoomID, originalMatrixUserID); err != nil {
 		p.logger.LogWarn("Failed to invite Matrix user to room", "error", err, "matrix_user_id", originalMatrixUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id)
 		return errors.Wrap(err, "failed to invite Matrix user to room")
 	}
@@ -266,7 +269,8 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, _ *model.
 		return nil
 	}
 
-	if p.matrixClient == nil {
+	matrixClient := p.GetMatrixClient()
+	if matrixClient == nil {
 		return errors.New("matrix client not initialized")
 	}
 
@@ -299,7 +303,7 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, _ *model.
 	}
 
 	// Update the avatar for the ghost user (upload and set)
-	err := p.matrixClient.UpdateGhostUserAvatar(ghostUserID, avatarData, "image/png")
+	err := matrixClient.UpdateGhostUserAvatar(ghostUserID, avatarData, "image/png")
 	if err != nil {
 		p.logger.LogError("Failed to update ghost user avatar", "error", err, "user_id", user.Id, "ghost_user_id", ghostUserID)
 		return errors.Wrap(err, "failed to update ghost user avatar on Matrix")

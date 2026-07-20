@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
@@ -104,13 +105,13 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Initialize Matrix client
-	plugin.matrixClient = createMatrixClientWithTestLogger(
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		plugin.remoteID,
-	)
-	plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	))
+	plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
 	config := &configuration{
@@ -124,7 +125,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 	plugin.initBridges()
 
 	// Store reverse mapping for the Matrix user (simulating existing mapping)
-	err := plugin.kvstore.Set("mattermost_user_"+matrixUserID, []byte("@alice:"+suite.matrixContainer.ServerDomain))
+	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(testServerID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
 	require.NoError(suite.T(), err)
 
 	// Create a test post from the Mattermost user to the Matrix user in the DM channel
@@ -245,13 +246,13 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Initialize Matrix client
-	plugin.matrixClient = createMatrixClientWithTestLogger(
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		plugin.remoteID,
-	)
-	plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	))
+	plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
 	config := &configuration{
@@ -265,7 +266,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 	plugin.initBridges()
 
 	// Store reverse mapping for the Matrix user
-	err := plugin.kvstore.Set("mattermost_user_"+matrixUserID, []byte("@alice:"+suite.matrixContainer.ServerDomain))
+	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(testServerID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
 	require.NoError(suite.T(), err)
 
 	// Create a test post from the first Mattermost user in the group DM
@@ -370,13 +371,13 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Initialize Matrix client
-	plugin.matrixClient = createMatrixClientWithTestLogger(
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		plugin.remoteID,
-	)
-	plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	))
+	plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
 	config := &configuration{
@@ -390,7 +391,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 	plugin.initBridges()
 
 	// Store reverse mapping for the Matrix user
-	err := plugin.kvstore.Set("mattermost_user_"+matrixUserID, []byte("@alice:"+suite.matrixContainer.ServerDomain))
+	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(testServerID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
 	require.NoError(suite.T(), err)
 
 	// Create a test post from the (unavailable) Mattermost user

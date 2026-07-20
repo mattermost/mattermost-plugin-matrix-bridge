@@ -15,7 +15,7 @@ func setupGetPostIDTest(t *testing.T) (*MatrixToMattermostBridge, kvstore.KVStor
 	plugin := setupPluginForTest()
 	plugin.client = pluginapi.NewClient(plugin.API, nil)
 	plugin.kvstore = NewMemoryKVStore()
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
 	plugin.initBridges()
 
 	return plugin.matrixToMattermostBridge, plugin.kvstore
@@ -68,7 +68,7 @@ func TestGetPostIDFromMatrixEvent_KVStorePath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup: Store mapping if needed
 			if tc.shouldStore {
-				mappingKey := kvstore.BuildMatrixEventPostKey(tc.eventID)
+				mappingKey := kvstore.BuildMatrixEventPostKey(testServerID, tc.eventID)
 				err := store.Set(mappingKey, []byte(tc.storedPostID))
 				assert.NoError(t, err)
 			}
@@ -89,7 +89,7 @@ func TestGetPostIDFromMatrixEvent_MixedEventTypes(t *testing.T) {
 	// Test: Matrix-originated event (should use KV store)
 	matrixEventID := "$matrix_originated_event"
 	matrixPostID := "post_matrix_123"
-	mappingKey := kvstore.BuildMatrixEventPostKey(matrixEventID)
+	mappingKey := kvstore.BuildMatrixEventPostKey(testServerID, matrixEventID)
 
 	err := store.Set(mappingKey, []byte(matrixPostID))
 	assert.NoError(t, err)
@@ -101,9 +101,10 @@ func TestGetPostIDFromMatrixEvent_MixedEventTypes(t *testing.T) {
 	mattermostEventID := "$mattermost_originated_event"
 
 	// Verify no KV mapping exists
-	mappingKey2 := kvstore.BuildMatrixEventPostKey(mattermostEventID)
-	_, err = store.Get(mappingKey2)
-	assert.Error(t, err, "Should not have KV mapping for Mattermost event")
+	mappingKey2 := kvstore.BuildMatrixEventPostKey(testServerID, mattermostEventID)
+	missing, err := store.Get(mappingKey2)
+	assert.NoError(t, err)
+	assert.Empty(t, missing, "Should not have KV mapping for Mattermost event")
 
 	result2 := bridge.getPostIDFromMatrixEvent(mattermostEventID, "channel_123")
 	assert.Equal(t, "", result2, "Mattermost-originated event should fall back to Matrix API")
@@ -115,7 +116,7 @@ func TestGetPostIDFromMatrixEvent_KVStoreUpdates(t *testing.T) {
 
 	eventID := "$matrix_event_update"
 	channelID := "channel_123"
-	mappingKey := kvstore.BuildMatrixEventPostKey(eventID)
+	mappingKey := kvstore.BuildMatrixEventPostKey(testServerID, eventID)
 
 	// Initially no mapping
 	result1 := bridge.getPostIDFromMatrixEvent(eventID, channelID)
@@ -152,7 +153,7 @@ func TestGetPostIDFromMatrixEvent_EdgeCases(t *testing.T) {
 	eventID := "$event_with_empty_channel"
 	expectedPostID := "post_123"
 
-	mappingKey := kvstore.BuildMatrixEventPostKey(eventID)
+	mappingKey := kvstore.BuildMatrixEventPostKey(testServerID, eventID)
 	err := store.Set(mappingKey, []byte(expectedPostID))
 	assert.NoError(t, err)
 
@@ -169,9 +170,10 @@ func TestGetPostIDFromMatrixEvent_MatrixAPIFallback(t *testing.T) {
 	channelID := "channel_123"
 
 	// Verify no KV mapping exists
-	mappingKey := kvstore.BuildMatrixEventPostKey(eventID)
-	_, err := store.Get(mappingKey)
-	assert.Error(t, err, "Should not have KV store mapping")
+	mappingKey := kvstore.BuildMatrixEventPostKey(testServerID, eventID)
+	missing, err := store.Get(mappingKey)
+	assert.NoError(t, err)
+	assert.Empty(t, missing, "Should not have KV store mapping")
 
 	// Call function - should fall back to Matrix API and return empty (since we don't have a real Matrix server)
 	result := bridge.getPostIDFromMatrixEvent(eventID, channelID)

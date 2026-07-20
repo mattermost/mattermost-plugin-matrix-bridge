@@ -101,7 +101,9 @@ func (p *Plugin) OnConfigurationChange() error {
 
 	p.setConfiguration(configuration)
 
-	p.initMatrixClient()
+	if err := p.initMatrixClient(); err != nil {
+		return errors.Wrap(err, "failed to initialize Matrix client")
+	}
 
 	return nil
 }
@@ -153,12 +155,4 @@ func (c *configuration) GetMatrixUsernamePrefix() string {
 		return DefaultMatrixUsernamePrefix
 	}
 	return c.MatrixUsernamePrefix
-}
-
-// GetMatrixUsernamePrefixForServer returns the username prefix for a specific Matrix server
-// This allows for future extensibility to support different prefixes per server
-func (c *configuration) GetMatrixUsernamePrefixForServer(_ string) string {
-	// For now, return the global prefix
-	// In the future, this could check a map of server-specific prefixes
-	return c.GetMatrixUsernamePrefix()
 }

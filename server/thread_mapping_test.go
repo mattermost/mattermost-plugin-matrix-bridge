@@ -152,13 +152,13 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Create Matrix client
-	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+	setTestMatrixClient(suite.plugin, createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
 		suite.plugin.remoteID,
-	)
-	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	))
+	suite.plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
 	config := &configuration{

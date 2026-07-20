@@ -220,7 +220,7 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 // getChannelIDFromMatrixRoom finds the Mattermost channel ID for a Matrix room ID
 func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
 	// First check KV store mapping (trusted source): room_mapping_<roomID> -> channelID
-	roomMappingKey := kvstore.BuildRoomMappingKey(roomID)
+	roomMappingKey := kvstore.BuildRoomMappingKey(p.getSingleServerID(), roomID)
 	channelIDBytes, err := p.kvstore.Get(roomMappingKey)
 	if err == nil && len(channelIDBytes) > 0 {
 		channelID := string(channelIDBytes)
@@ -229,8 +229,9 @@ func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
 	}
 
 	// Fallback: get channel ID from Matrix room state (for race condition during room creation)
-	if p.matrixClient != nil {
-		channelID, err := p.matrixClient.GetMattermostChannelID(roomID)
+	matrixClient := p.GetMatrixClient()
+	if matrixClient != nil {
+		channelID, err := matrixClient.GetMattermostChannelID(roomID)
 		if err != nil {
 			p.logger.LogDebug("Failed to get channel ID from room state", "room_id", roomID, "error", err)
 		} else if channelID != "" {
@@ -345,7 +346,7 @@ func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID s
 	}
 
 	// Verify that this ghost user exists in our KV store (meaning we created it)
-	ghostUserKey := kvstore.BuildGhostUserKey(mattermostUserID)
+	ghostUserKey := kvstore.BuildGhostUserKey(p.getSingleServerID(), mattermostUserID)
 	ghostUserData, err := p.kvstore.Get(ghostUserKey)
 	if err != nil || len(ghostUserData) == 0 {
 		p.logger.LogDebug("Rejecting DM creation for unrecognized ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
@@ -370,7 +371,8 @@ func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID s
 		Logger:       p.logger,
 		API:          p.API,
 		KVStore:      p.kvstore,
-		MatrixClient: p.matrixClient,
+		MatrixClient: p.GetMatrixClient(),
+		ServerID:     p.getSingleServerID(),
 		RemoteID:     p.remoteID,
 		ConfigGetter: p,
 	})

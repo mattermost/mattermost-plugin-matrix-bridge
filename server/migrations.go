@@ -68,6 +68,14 @@ func (p *Plugin) runKVStoreMigrationsWithResults() (*MigrationResult, error) {
 			result.ReverseDMMappingsCreated += v2Result.ReverseDMMappingsCreated
 		}
 
+		if currentVersion < 3 {
+			v3Result, err := p.runMigrationToVersion3WithResults()
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to migrate to version 3")
+			}
+			result.ChannelMappingsCreated += v3Result.ChannelMappingsCreated
+		}
+
 		// Update version marker
 		if err := p.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(kvstore.CurrentKVStoreVersion))); err != nil {
 			return nil, errors.Wrap(err, "failed to update KV store version")
@@ -110,6 +118,9 @@ func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Migrating user mappings to add reverse lookups")
 
 	userMappingPrefix := kvstore.KeyPrefixMatrixUser
+	// Keys already namespaced by v3 must be skipped so this legacy repair is a
+	// no-op when re-run over migrated data (e.g. via the /matrix migrate command).
+	namespace := p.serverIDNamespace()
 	totalMigratedCount := 0
 	page := 0
 
@@ -142,8 +153,18 @@ func (p *Plugin) migrateUserMappingsWithResults() (*MigrationResult, error) {
 				mattermostUserID := string(mattermostUserIDBytes)
 				matrixUserID := strings.TrimPrefix(key, userMappingPrefix)
 
-				// Create reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID
-				reverseKey := kvstore.BuildMattermostUserKey(mattermostUserID)
+				// Skip keys already namespaced by v3; deriving a reverse mapping from
+				// them would embed the serverID in the value and corrupt the record.
+				if namespace != "" && strings.HasPrefix(matrixUserID, namespace) {
+					continue
+				}
+
+				// Create reverse mapping: mattermost_user_<mattermostUserID> -> matrixUserID.
+				// v1/v2 reconstruct the historical (un-namespaced) key layout; the v3
+				// migration is the single authority that namespaces legacy keys by
+				// serverID. (New runtime writes are namespaced directly by the key
+				// builders in the kvstore package.)
+				reverseKey := kvstore.KeyPrefixMattermostUser + mattermostUserID
 
 				// Check if reverse mapping already exists with correct value
 				existingData, err := p.kvstore.Get(reverseKey)
@@ -217,11 +238,18 @@ func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 					continue
 				}
 
+				// Skip values already converted to the v3 []ChannelServerMapping shape;
+				// treating that JSON as a room identifier would create a garbage reverse
+				// mapping. Keeps this legacy repair a no-op when re-run over migrated data.
+				if mappings, perr := kvstore.ParseChannelServerMappings(roomIdentifierBytes); perr == nil && len(mappings) > 0 {
+					continue
+				}
+
 				roomIdentifier := string(roomIdentifierBytes)
 				channelID := strings.TrimPrefix(key, channelMappingPrefix)
 
 				// Create reverse mapping: room_mapping_<roomIdentifier> -> channelID
-				reverseKey := kvstore.BuildRoomMappingKey(roomIdentifier)
+				reverseKey := kvstore.KeyPrefixRoomMapping + roomIdentifier
 
 				// Check if reverse mapping already exists with correct value
 				existingData, err := p.kvstore.Get(reverseKey)
@@ -242,9 +270,10 @@ func (p *Plugin) migrateChannelMappingsWithResults() (*MigrationResult, error) {
 				}
 
 				// Always try room ID mapping for aliases, regardless of reverse mapping result
-				if strings.HasPrefix(roomIdentifier, "#") && p.matrixClient != nil {
-					if resolvedRoomID, resolveErr := p.matrixClient.ResolveRoomAlias(roomIdentifier); resolveErr == nil {
-						roomIDKey := kvstore.BuildRoomMappingKey(resolvedRoomID)
+				matrixClient := p.GetMatrixClient()
+				if strings.HasPrefix(roomIdentifier, "#") && matrixClient != nil {
+					if resolvedRoomID, resolveErr := matrixClient.ResolveRoomAlias(roomIdentifier); resolveErr == nil {
+						roomIDKey := kvstore.KeyPrefixRoomMapping + resolvedRoomID
 
 						// Always update room ID mapping to match alias mapping
 						if err := p.kvstore.Set(roomIDKey, []byte(channelID)); err != nil {
@@ -344,7 +373,7 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 			}
 
 			// Also create reverse mapping for room_mapping_ if it doesn't exist
-			reverseKey := kvstore.BuildRoomMappingKey(matrixRoomID)
+			reverseKey := kvstore.KeyPrefixRoomMapping + matrixRoomID
 			existingReverse, err := p.kvstore.Get(reverseKey)
 			if err != nil || len(existingReverse) == 0 {
 				if err := p.kvstore.Set(reverseKey, []byte(channelID)); err != nil {
@@ -406,7 +435,7 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 			matrixRoomID := strings.TrimPrefix(key, matrixDMMappingPrefix)
 
 			// Create unified reverse mapping: room_mapping_<matrixRoomID> -> channelID
-			unifiedReverseKey := kvstore.BuildRoomMappingKey(matrixRoomID)
+			unifiedReverseKey := kvstore.KeyPrefixRoomMapping + matrixRoomID
 
 			// Check if unified reverse mapping already exists
 			existingReverseData, err := p.kvstore.Get(unifiedReverseKey)
@@ -443,4 +472,195 @@ func (p *Plugin) migrateDMMappingsWithResults() (*MigrationResult, error) {
 
 	p.logger.LogInfo("DM mapping migration completed", "total_migrated", totalMigratedCount, "total_reverse_migrated", totalReverseMigratedCount, "pages_processed", page+1)
 	return &MigrationResult{DMMappingsCreated: totalMigratedCount, ReverseDMMappingsCreated: totalReverseMigratedCount}, nil
+}
+
+// Migration invariant (important for adding future versions):
+//   - v1/v2 always (re)produce the historical UN-namespaced key layout; they
+//     deliberately hand-build legacy keys (e.g. KeyPrefixMattermostUser + id)
+//     rather than the serverID key builders, and skip keys already namespaced.
+//   - v3 is the SOLE authority that adds the serverID namespace, and its rekey /
+//     value-conversion steps are idempotent, so re-running the whole chain (e.g.
+//     via the /matrix migrate command) is a no-op on already-migrated data.
+// A future v4 must preserve this: legacy steps stay un-namespaced, and the
+// namespacing/idempotency guards must account for the v3 layout.
+
+// v3NamespacedPrefixes are the per-server KV key prefixes that gain a serverID
+// dimension in version 3. channel_mapping_ is intentionally excluded: its key
+// stays server-agnostic and only its value shape changes (see below).
+var v3NamespacedPrefixes = []string{
+	kvstore.KeyPrefixMatrixUser,
+	kvstore.KeyPrefixMattermostUser,
+	kvstore.KeyPrefixGhostUser,
+	kvstore.KeyPrefixGhostRoom,
+	kvstore.KeyPrefixMatrixEventPost,
+	kvstore.KeyPrefixMatrixReaction,
+	kvstore.KeyPrefixRoomMapping,
+}
+
+// runMigrationToVersion3WithResults migrates to version 3: namespaces every
+// per-server KV key by the single server's serverID and converts each
+// channel_mapping_ value from a bare room ID string into a []ChannelServerMapping
+// JSON array. It is deterministic and idempotent: keys already namespaced and
+// values already converted are skipped, so a direct re-run is a no-op.
+func (p *Plugin) runMigrationToVersion3WithResults() (*MigrationResult, error) {
+	p.logger.LogInfo("Running migration to version 3: namespacing keys by serverID")
+
+	// The server registry (and thus the serverID) is established by
+	// reconcileServerConfig during initMatrixClient, which runs before
+	// migrations. Reconcile again defensively in case migrations run first.
+	serverID := p.getSingleServerID()
+	if serverID == "" {
+		if _, err := p.reconcileServerConfig(); err != nil {
+			return nil, errors.Wrap(err, "failed to establish server registry for v3 migration")
+		}
+		serverID = p.getSingleServerID()
+	}
+	if serverID == "" {
+		// No Matrix server is configured yet (e.g. a fresh install with sync
+		// disabled and no server URL). There are no per-server keys to namespace,
+		// so the v3 layout is trivially satisfied. The registry entry and its
+		// namespaced keys are created later, once a server URL is configured and
+		// reconcileServerConfig derives the serverID.
+		p.logger.LogInfo("v3 migration: no Matrix server configured; nothing to namespace")
+		return &MigrationResult{}, nil
+	}
+
+	result := &MigrationResult{}
+
+	for _, prefix := range v3NamespacedPrefixes {
+		migrated, err := p.rekeyPrefixWithServerID(prefix, serverID)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to namespace keys for prefix %q", prefix)
+		}
+		p.logger.LogDebug("Namespaced keys for prefix", "prefix", prefix, "migrated", migrated)
+	}
+
+	converted, err := p.convertChannelMappingsToServerScoped(serverID)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to convert channel mappings")
+	}
+	result.ChannelMappingsCreated = converted
+
+	p.logger.LogInfo("Version 3 migration completed", "server_id", serverID, "channel_mappings_converted", converted)
+	return result, nil
+}
+
+// rekeyPrefixWithServerID rewrites every key under the given prefix from
+// "<prefix><id>" to "<prefix><serverID>_<id>". Existing keys are fully
+// enumerated before any writes so newly namespaced keys (which share the prefix)
+// are not re-processed, and keys already carrying the serverID namespace are
+// skipped for idempotency.
+func (p *Plugin) rekeyPrefixWithServerID(prefix, serverID string) (int, error) {
+	keys, err := p.listAllKeysWithPrefix(prefix)
+	if err != nil {
+		return 0, err
+	}
+
+	namespace := serverID + "_"
+	migrated := 0
+	failures := 0
+	for _, oldKey := range keys {
+		id := strings.TrimPrefix(oldKey, prefix)
+		if strings.HasPrefix(id, namespace) {
+			continue // already namespaced (idempotent re-run)
+		}
+
+		value, err := p.kvstore.Get(oldKey)
+		if err != nil {
+			p.logger.LogWarn("Failed to read key during v3 namespacing", "key", oldKey, "error", err)
+			failures++
+			continue
+		}
+
+		newKey := prefix + namespace + id
+		if err := p.kvstore.Set(newKey, value); err != nil {
+			p.logger.LogWarn("Failed to write namespaced key during v3 migration", "key", newKey, "error", err)
+			failures++
+			continue
+		}
+		// A failed Delete only leaves an orphaned legacy key; the namespaced key
+		// is written, so reads succeed. Treat it as non-fatal.
+		if err := p.kvstore.Delete(oldKey); err != nil {
+			p.logger.LogWarn("Failed to delete legacy key during v3 migration", "key", oldKey, "error", err)
+		}
+		migrated++
+	}
+
+	if failures > 0 {
+		// Return an error so the version marker is not advanced to 3 and the
+		// migration retries on the next activation. Otherwise a transient KV
+		// failure would leave some mappings in the legacy namespace forever.
+		return migrated, errors.Errorf("failed to namespace %d key(s) for prefix %q", failures, prefix)
+	}
+	return migrated, nil
+}
+
+// convertChannelMappingsToServerScoped rewrites each channel_mapping_ value from
+// a bare room-ID string into a single-entry []ChannelServerMapping JSON array
+// attributed to serverID. Values already stored as a non-empty JSON array are
+// left untouched, making the conversion idempotent.
+func (p *Plugin) convertChannelMappingsToServerScoped(serverID string) (int, error) {
+	keys, err := p.listAllKeysWithPrefix(kvstore.KeyPrefixChannelMapping)
+	if err != nil {
+		return 0, err
+	}
+
+	converted := 0
+	failures := 0
+	for _, key := range keys {
+		value, err := p.kvstore.Get(key)
+		if err != nil {
+			p.logger.LogWarn("Failed to read channel mapping during v3 migration", "key", key, "error", err)
+			failures++
+			continue
+		}
+		if len(value) == 0 {
+			continue
+		}
+
+		// Skip values already in the new []ChannelServerMapping shape.
+		if existing, perr := kvstore.ParseChannelServerMappings(value); perr == nil && len(existing) > 0 {
+			continue
+		}
+
+		newValue, err := kvstore.BuildSingleChannelMapping(serverID, string(value))
+		if err != nil {
+			p.logger.LogWarn("Failed to marshal channel mapping during v3 migration", "key", key, "error", err)
+			failures++
+			continue
+		}
+		if err := p.kvstore.Set(key, newValue); err != nil {
+			p.logger.LogWarn("Failed to write converted channel mapping during v3 migration", "key", key, "error", err)
+			failures++
+			continue
+		}
+		converted++
+	}
+
+	if failures > 0 {
+		// Do not let the version marker advance to 3 with un-converted values,
+		// which GetMatrixRoomID would then read as unmapped. Retry next activation.
+		return converted, errors.Errorf("failed to convert %d channel mapping(s)", failures)
+	}
+	return converted, nil
+}
+
+// listAllKeysWithPrefix enumerates every key for a prefix by paging through the
+// KV store. The full list is materialized so callers can safely mutate keys
+// sharing the prefix without disturbing pagination.
+func (p *Plugin) listAllKeysWithPrefix(prefix string) ([]string, error) {
+	var keys []string
+	page := 0
+	for {
+		batch, err := p.kvstore.ListKeysWithPrefix(page, MigrationBatchSize, prefix)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to list KV store keys with prefix")
+		}
+		keys = append(keys, batch...)
+		if len(batch) < MigrationBatchSize {
+			break
+		}
+		page++
+	}
+	return keys, nil
 }
