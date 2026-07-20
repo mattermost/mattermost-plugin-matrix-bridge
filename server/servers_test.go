@@ -4,11 +4,27 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
+
+// stubAllLogging registers permissive stubs for every plugin-API log method across
+// the arities used by the code under test, so a stray log call never panics the mock.
+func stubAllLogging(api *plugintest.API) {
+	for _, level := range []string{"LogDebug", "LogInfo", "LogWarn", "LogError"} {
+		for n := 1; n <= 12; n++ {
+			args := make([]any, n)
+			for i := range args {
+				args[i] = mock.Anything
+			}
+			api.On(level, args...).Maybe()
+		}
+	}
+}
 
 func TestReconcileServerConfig(t *testing.T) {
 	t.Run("MintsAndDerivesFieldsFromFlatConfig", func(t *testing.T) {
@@ -151,6 +167,44 @@ func TestReconcileServerConfig(t *testing.T) {
 		assert.False(t, second[0].Enabled)
 	})
 
+	t.Run("PreservesInjectedServersAcrossReconcile", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.logger = &testLogger{t: t}
+		plugin.configuration = &configuration{MatrixServerURL: "https://a.example.com", EnableSync: true}
+
+		// Establish the primary, then persist an injected extra server alongside it.
+		first, err := plugin.reconcileServerConfig()
+		require.NoError(t, err)
+		require.Len(t, first, 1)
+		primaryID := first[0].ServerID
+
+		injected := kvstore.ServerConfig{ServerID: "injected01injected01inject1", ServerURL: "https://b.example.com", ServerName: "b.example.com", HSToken: "hs-b", Enabled: true, Injected: true}
+		require.NoError(t, plugin.persistServers(append(first, injected)))
+
+		// A later reconcile (warm cache) keeps the injected server and refreshes the primary.
+		second, err := plugin.reconcileServerConfig()
+		require.NoError(t, err)
+		require.Len(t, second, 2)
+		assert.Equal(t, primaryID, second[0].ServerID, "primary stays first")
+		assert.False(t, second[0].Injected)
+		assert.Equal(t, "injected01injected01inject1", second[1].ServerID, "injected server preserved")
+		assert.True(t, second[1].Injected)
+
+		// A cold reconcile (cleared cache) still preserves the injected server, and a
+		// primary URL change replaces only the primary — the injected extra survives.
+		plugin.serverID = ""
+		plugin.configuration = &configuration{MatrixServerURL: "https://c.example.com", EnableSync: true}
+		third, err := plugin.reconcileServerConfig()
+		require.NoError(t, err)
+		require.Len(t, third, 2)
+		newPrimaryID, err := deriveServerID("https://c.example.com")
+		require.NoError(t, err)
+		assert.Equal(t, newPrimaryID, third[0].ServerID)
+		assert.NotEqual(t, primaryID, third[0].ServerID, "old primary replaced, not preserved")
+		assert.Equal(t, "injected01injected01inject1", third[1].ServerID, "injected server still preserved after primary URL change")
+	})
+
 	t.Run("DoesNotMintOnReadError", func(t *testing.T) {
 		base := NewMemoryKVStore()
 		plugin := setupPluginForTest()
@@ -199,6 +253,123 @@ func TestReconcileServerConfig(t *testing.T) {
 // TestDeriveServerID verifies the deterministic serverID derivation: same
 // hostname (regardless of scheme/port/path/case) yields the same 26-char base32
 // ID, distinct hostnames yield distinct IDs, and an unusable URL errors.
+func TestManagedServers(t *testing.T) {
+	const primaryURL = "https://primary.example.com"
+	const extraURL = "https://extra.example.com"
+
+	newPlugin := func(t *testing.T) *Plugin {
+		t.Helper()
+		api := &plugintest.API{}
+		stubAllLogging(api)
+		plugin := &Plugin{}
+		plugin.SetAPI(api)
+		plugin.logger = &testLogger{t: t}
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.remoteID = "rid-primary"
+		plugin.configuration = &configuration{MatrixServerURL: primaryURL, EnableSync: true}
+		return plugin
+	}
+
+	t.Run("AddStampsInjectedAndSurvivesReconcile", func(t *testing.T) {
+		plugin := newPlugin(t)
+
+		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as-x", "hs-x", "mx")
+		require.NoError(t, err)
+		expectedID, err := deriveServerID(extraURL)
+		require.NoError(t, err)
+		assert.Equal(t, expectedID, serverID, "serverID is derived from the URL hostname")
+
+		servers, err := plugin.GetManagedServers()
+		require.NoError(t, err)
+		require.Len(t, servers, 2, "primary plus the injected extra")
+
+		extra, ok := kvstore.ServerConfigForID(servers, serverID)
+		require.True(t, ok)
+		assert.True(t, extra.Injected, "an added server is marked injected")
+		assert.Equal(t, "hs-x", extra.HSToken)
+		assert.Equal(t, "as-x", extra.ASToken)
+		assert.Equal(t, "mx", extra.UsernamePrefix)
+		assert.True(t, extra.Enabled)
+
+		// A later reconcile (driven by any config change) must not drop the injected
+		// server: the Injected flag is exactly what makes it survive.
+		reconciled, err := plugin.reconcileServerConfig()
+		require.NoError(t, err)
+		_, stillThere := kvstore.ServerConfigForID(reconciled, serverID)
+		assert.True(t, stillThere, "injected server survives reconcile")
+	})
+
+	t.Run("AddUpsertsInPlaceAndPreservesRemoteID", func(t *testing.T) {
+		plugin := newPlugin(t)
+
+		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as-1", "hs-1", "mx")
+		require.NoError(t, err)
+
+		// Give the injected entry a distinct RemoteID, as a real shared-channels
+		// registration would.
+		servers, err := plugin.getServers()
+		require.NoError(t, err)
+		for i := range servers {
+			if servers[i].ServerID == serverID {
+				servers[i].RemoteID = "preserved-rid"
+			}
+		}
+		require.NoError(t, plugin.persistServers(servers))
+
+		// Re-adding the same URL updates fields in place and keeps the RemoteID.
+		_, err = plugin.AddManagedServer(extraURL, "extra.example.com", "as-2", "hs-2", "mx2")
+		require.NoError(t, err)
+
+		after, err := plugin.GetManagedServers()
+		require.NoError(t, err)
+		assert.Len(t, after, 2, "re-adding the same server does not create a duplicate")
+		extra, ok := kvstore.ServerConfigForID(after, serverID)
+		require.True(t, ok)
+		assert.Equal(t, "hs-2", extra.HSToken, "tokens are updated in place")
+		assert.Equal(t, "preserved-rid", extra.RemoteID, "existing RemoteID is preserved on re-add")
+	})
+
+	t.Run("Remove", func(t *testing.T) {
+		plugin := newPlugin(t)
+		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as", "hs", "mx")
+		require.NoError(t, err)
+
+		// Removing an injected server drops it.
+		removed, err := plugin.RemoveManagedServer(serverID)
+		require.NoError(t, err)
+		assert.True(t, removed)
+		servers, err := plugin.GetManagedServers()
+		require.NoError(t, err)
+		_, present := kvstore.ServerConfigForID(servers, serverID)
+		assert.False(t, present, "injected server is removed")
+
+		// Removing an unknown server reports not-found.
+		removed, err = plugin.RemoveManagedServer("no-such-server")
+		require.NoError(t, err)
+		assert.False(t, removed)
+	})
+
+	t.Run("RemovePrimaryReappearsAfterReconcile", func(t *testing.T) {
+		plugin := newPlugin(t)
+		// Establish the primary.
+		_, err := plugin.reconcileServerConfig()
+		require.NoError(t, err)
+		primaryID, err := deriveServerID(primaryURL)
+		require.NoError(t, err)
+
+		removed, err := plugin.RemoveManagedServer(primaryID)
+		require.NoError(t, err)
+		assert.True(t, removed, "the primary entry is found and removed")
+
+		// RemoveManagedServer rebuilds via reconcile, which re-derives the primary
+		// from the flat config, so it comes back.
+		servers, err := plugin.GetManagedServers()
+		require.NoError(t, err)
+		_, present := kvstore.ServerConfigForID(servers, primaryID)
+		assert.True(t, present, "the primary is re-added from the flat configuration")
+	})
+}
+
 func TestDeriveServerID(t *testing.T) {
 	const base32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
 

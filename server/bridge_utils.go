@@ -115,21 +115,18 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 
 	// Store forward mapping: channel_mapping_<channelID> -> [{serverID, room_id}].
 	// Upsert only this server's entry so a channel bridged to multiple homeservers
-	// keeps the others' mappings intact.
-	existingData, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
-	if err != nil {
-		return errors.Wrap(err, "failed to read existing channel room mapping")
-	}
-	mappings, err := kvstore.ParseChannelServerMappings(existingData)
-	if err != nil {
-		return errors.Wrap(err, "failed to parse existing channel room mapping")
-	}
-	mappings = kvstore.UpsertChannelServerMapping(mappings, s.serverID, roomID)
-	mappingValue, err := kvstore.MarshalChannelServerMappings(mappings)
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal channel room mapping")
-	}
-	err = s.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingValue)
+	// keeps the others' mappings intact. Use compare-and-set with retries because
+	// the value is shared across servers: two inbound events racing on the same
+	// channel key would otherwise read-modify-write over each other and drop an
+	// entry.
+	err = s.kvstore.SetAtomicWithRetries(kvstore.BuildChannelMappingKey(channelID), func(oldValue []byte) ([]byte, error) {
+		mappings, err := kvstore.ParseChannelServerMappings(oldValue)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to parse existing channel room mapping")
+		}
+		mappings = kvstore.UpsertChannelServerMapping(mappings, s.serverID, roomID)
+		return kvstore.MarshalChannelServerMappings(mappings)
+	})
 	if err != nil {
 		return errors.Wrap(err, "failed to store channel room mapping")
 	}
@@ -185,6 +182,31 @@ func (s *BridgeUtils) matrixUsernamePrefix() string {
 	}
 	// No registry yet (before the first reconcile) or no entry for this server.
 	return DefaultMatrixUsernamePrefix
+}
+
+// serverDomain returns the property-key-sanitized domain of this bridge's Matrix
+// server, resolved from the managed server registry (the source of truth for
+// per-server settings). It is used to build the per-server post property key
+// "matrix_event_id_<domain>". When no registry entry exists for this server (e.g.
+// before the first reconcile), it falls back to the flat configuration, which
+// yields the same value in the single-server case. The registry is read live,
+// mirroring matrixUsernamePrefix.
+func (s *BridgeUtils) serverDomain() string {
+	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
+	if err != nil {
+		s.logger.LogError("Failed to read server registry for server domain; using config fallback", "server_id", s.serverID, "error", err)
+		return extractServerDomain(s.logger, s.getConfiguration().MatrixServerURL)
+	}
+	servers, err := kvstore.ParseServersConfig(data)
+	if err != nil {
+		s.logger.LogError("Corrupt server registry; using config fallback for server domain", "server_id", s.serverID, "error", err)
+		return extractServerDomain(s.logger, s.getConfiguration().MatrixServerURL)
+	}
+	if server, ok := kvstore.ServerConfigForID(servers, s.serverID); ok && server.ServerURL != "" {
+		return extractServerDomain(s.logger, server.ServerURL)
+	}
+	// No registry yet (before the first reconcile) or no entry for this server.
+	return extractServerDomain(s.logger, s.getConfiguration().MatrixServerURL)
 }
 
 func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {

@@ -53,6 +53,28 @@ func (p *Plugin) getSingleServerID() string {
 	return servers[0].ServerID
 }
 
+// serverDomainForID returns the raw homeserver domain (hostname, not the
+// property-key-sanitized form) for the given serverID, resolved from the managed
+// server registry. It is used to recognize this server's ghost users, whose IDs
+// end in ":<domain>". The bool is false when the server is unknown or its URL
+// cannot be parsed.
+func (p *Plugin) serverDomainForID(serverID string) (string, bool) {
+	servers, err := p.getServers()
+	if err != nil {
+		p.logger.LogWarn("Failed to read server registry while resolving server domain", "server_id", serverID, "error", err)
+		return "", false
+	}
+	server, ok := kvstore.ServerConfigForID(servers, serverID)
+	if !ok {
+		return "", false
+	}
+	domain, err := matrix.ExtractServerDomain(server.ServerURL)
+	if err != nil || domain == "" {
+		return "", false
+	}
+	return domain, true
+}
+
 // serverIDNamespace returns the "<serverID>_" prefix used to namespace per-server
 // KV keys, or "" when no server is registered yet. Migrations use it to detect
 // keys already migrated to the v3 layout.
@@ -99,12 +121,22 @@ func (p *Plugin) reconcileServerConfig() ([]kvstore.ServerConfig, error) {
 		return nil, err
 	}
 
+	// The primary entry is the one derived from the flat plugin.json config. Find
+	// any previously persisted primary (an entry that is not an injected extra) to
+	// carry its RemoteID forward and to warn when the hostname changes.
+	var persistedPrimary *kvstore.ServerConfig
+	for i := range existing {
+		if !existing[i].Injected {
+			persistedPrimary = &existing[i]
+			break
+		}
+	}
 	persistedRemoteID := ""
-	if len(existing) > 0 {
-		persistedRemoteID = existing[0].RemoteID
-		if existing[0].ServerID != serverID {
+	if persistedPrimary != nil {
+		persistedRemoteID = persistedPrimary.RemoteID
+		if persistedPrimary.ServerID != serverID {
 			p.logger.LogWarn("Matrix homeserver hostname changed; KV records under the previous serverID are now orphaned and can be recovered by reverting the server URL",
-				"previous_server_id", existing[0].ServerID, "new_server_id", serverID)
+				"previous_server_id", persistedPrimary.ServerID, "new_server_id", serverID)
 		}
 	}
 
@@ -127,7 +159,19 @@ func (p *Plugin) reconcileServerConfig() ([]kvstore.ServerConfig, error) {
 		Enabled:        config.EnableSync,
 		RemoteID:       remoteID,
 	}
+
+	// The flat plugin.json config describes only the primary server. Rebuild the
+	// primary entry and preserve any injected extra servers (added via
+	// `/matrix server add` for local multi-server testing). Non-injected entries
+	// are the previous primary and are always replaced, so a normal single-server
+	// install collapses to the same single-element list as before — no behavior
+	// change regardless of whether the serverID cache is warm.
 	servers := []kvstore.ServerConfig{entry}
+	for _, s := range existing {
+		if s.Injected && s.ServerID != serverID {
+			servers = append(servers, s)
+		}
+	}
 
 	data, err := json.Marshal(servers)
 	if err != nil {
@@ -142,6 +186,124 @@ func (p *Plugin) reconcileServerConfig() ([]kvstore.ServerConfig, error) {
 	p.matrixClientsLock.Unlock()
 
 	return servers, nil
+}
+
+// persistServers marshals and stores the managed server registry.
+func (p *Plugin) persistServers(servers []kvstore.ServerConfig) error {
+	data, err := json.Marshal(servers)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal servers_config")
+	}
+	if err := p.kvstore.Set(kvstore.KeyServersConfig, data); err != nil {
+		return errors.Wrap(err, "failed to persist servers_config")
+	}
+	return nil
+}
+
+// GetManagedServers returns the current managed Matrix server registry.
+func (p *Plugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
+	return p.getServers()
+}
+
+// AddManagedServer upserts a Matrix server into the managed registry and rebuilds
+// the live client and bridge set so the server is usable without a restart. It
+// backs the `/matrix server add` admin command, which exists because the System
+// Console UI cannot yet manage more than one server. The serverID is derived from
+// serverURL (see deriveServerID), so adding a URL whose hostname matches an
+// existing server updates that entry in place. reconcileServerConfig preserves
+// this entry across future config changes because it is now part of the persisted
+// registry.
+func (p *Plugin) AddManagedServer(serverURL, serverName, asToken, hsToken, usernamePrefix string) (string, error) {
+	serverURL = strings.TrimSpace(serverURL)
+	serverID, err := deriveServerID(serverURL)
+	if err != nil {
+		return "", err
+	}
+
+	servers, err := p.getServers()
+	if err != nil {
+		return "", err
+	}
+
+	if usernamePrefix == "" {
+		usernamePrefix = DefaultMatrixUsernamePrefix
+	}
+	entry := kvstore.ServerConfig{
+		ServerID:       serverID,
+		ServerURL:      serverURL,
+		ServerName:     serverName,
+		ASToken:        asToken,
+		HSToken:        hsToken,
+		UsernamePrefix: usernamePrefix,
+		Enabled:        true,
+		RemoteID:       p.remoteID,
+		Injected:       true,
+	}
+
+	replaced := false
+	for i := range servers {
+		if servers[i].ServerID == serverID {
+			// Keep the existing RemoteID so re-adding a server does not drop its
+			// shared-channels registration.
+			if servers[i].RemoteID != "" {
+				entry.RemoteID = servers[i].RemoteID
+			}
+			servers[i] = entry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		servers = append(servers, entry)
+	}
+
+	if err := p.persistServers(servers); err != nil {
+		return "", err
+	}
+
+	// Rebuild the client registry and bridges from the updated registry so the new
+	// server is live immediately.
+	if err := p.initMatrixClient(); err != nil {
+		return "", errors.Wrap(err, "failed to rebuild Matrix clients after adding server")
+	}
+	p.initBridges()
+
+	return serverID, nil
+}
+
+// RemoveManagedServer removes a server from the managed registry by serverID and
+// rebuilds the live client and bridge set. It returns false if no entry matched.
+// Removing the primary server derived from the flat plugin.json configuration does
+// not persist: reconcileServerConfig re-adds it on the next rebuild.
+func (p *Plugin) RemoveManagedServer(serverID string) (bool, error) {
+	servers, err := p.getServers()
+	if err != nil {
+		return false, err
+	}
+
+	filtered := make([]kvstore.ServerConfig, 0, len(servers))
+	found := false
+	for _, s := range servers {
+		if s.ServerID == serverID {
+			found = true
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	if !found {
+		return false, nil
+	}
+
+	if err := p.persistServers(filtered); err != nil {
+		return false, err
+	}
+
+	if err := p.initMatrixClient(); err != nil {
+		return true, errors.Wrap(err, "failed to rebuild Matrix clients after removing server")
+	}
+	p.initBridges()
+
+	return true, nil
 }
 
 // serverIDEncoding matches model.NewId()'s base32 alphabet so a derived serverID

@@ -49,6 +49,20 @@ func (kv Client) Set(key string, value []byte) error {
 	return nil
 }
 
+// SetAtomicWithRetries reads the current value for key, computes the new value
+// via valueFunc, and writes it back using compare-and-set semantics, retrying on
+// conflict. It delegates to the plugin API's SetAtomicWithRetries, which stores
+// the returned byte slice as the raw value.
+func (kv Client) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error {
+	err := kv.client.KV.SetAtomicWithRetries(key, func(oldValue []byte) (any, error) {
+		return valueFunc(oldValue)
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to atomically set key in KV store")
+	}
+	return nil
+}
+
 // Delete removes a key-value pair from the KV store.
 func (kv Client) Delete(key string) error {
 	appErr := kv.client.KV.Delete(key)

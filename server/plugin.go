@@ -233,6 +233,27 @@ func (p *Plugin) initBridges() {
 	p.matrixToMattermostBridge = NewMatrixToMattermostBridge(sharedUtils)
 }
 
+// newMatrixToMattermostBridge builds an inbound bridge scoped to a specific
+// serverID, carrying that server's Matrix client and KV namespace. Inbound
+// webhook traffic is routed to the originating homeserver (resolved from its
+// hs_token), so the bridge that handles an event must be bound to that server
+// rather than the single default one. Constructed on demand, mirroring the
+// per-call bridge construction in createDMChannelForGhostUser.
+func (p *Plugin) newMatrixToMattermostBridge(serverID string) *MatrixToMattermostBridge {
+	utils := NewBridgeUtils(BridgeUtilsConfig{
+		Logger:              p.logger,
+		API:                 p.API,
+		KVStore:             p.kvstore,
+		MatrixClient:        p.getMatrixClient(serverID),
+		ServerID:            serverID,
+		RemoteID:            p.remoteID,
+		MaxProfileImageSize: p.maxProfileImageSize,
+		MaxFileSize:         p.maxFileSize,
+		ConfigGetter:        p,
+	})
+	return NewMatrixToMattermostBridge(utils)
+}
+
 func (p *Plugin) registerForSharedChannels() error {
 	// Get the bot user ID or use a system admin
 	botUser, err := p.API.GetUserByUsername("mattermost-bridge")
@@ -276,6 +297,13 @@ func (p *Plugin) registerForSharedChannels() error {
 // GetMatrixClient returns the Matrix client for the single configured server.
 func (p *Plugin) GetMatrixClient() *matrix.Client {
 	return p.getMatrixClient(p.getSingleServerID())
+}
+
+// GetMatrixClientForServer returns the Matrix client for the given serverID, or
+// nil if none is registered. It lets commands operate on a specific server (e.g.
+// mapping a channel to a room on an injected server).
+func (p *Plugin) GetMatrixClientForServer(serverID string) *matrix.Client {
+	return p.getMatrixClient(serverID)
 }
 
 // GetServerID returns the serverID of the single configured Matrix server.

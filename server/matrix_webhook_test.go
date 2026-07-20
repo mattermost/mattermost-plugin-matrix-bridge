@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 func TestHandleMatrixMemberDM_EarlyExits(t *testing.T) {
@@ -66,12 +69,51 @@ func TestHandleMatrixMemberDM_EarlyExits(t *testing.T) {
 			plugin := &Plugin{}
 			plugin.logger = &testLogger{t: t}
 
-			channelID, err := plugin.handleMatrixMemberDM(tt.event)
+			// These cases all early-exit before ghost detection, so no server
+			// registry is needed; any serverID is fine.
+			channelID, err := plugin.handleMatrixMemberDM(testServerID, tt.event)
 
 			require.NoError(t, err)
 			assert.Equal(t, "", channelID)
 		})
 	}
+}
+
+// TestIsGhostUserPerServer verifies that ghost-user (loop-prevention) detection is
+// scoped to each server's own domain. A ghost minted on one server's domain must be
+// recognized only for events originating from that server; misresolving the domain
+// would either fail to skip the plugin's own echoes (message loops) or misclassify a
+// real Matrix user as a ghost (dropped inbound messages).
+func TestIsGhostUserPerServer(t *testing.T) {
+	const (
+		serverAID = "serveraserveraserveraserv01"
+		serverBID = "serverbserverbserverbserv02"
+	)
+
+	plugin := &Plugin{}
+	plugin.logger = &testLogger{t: t}
+	plugin.kvstore = NewMemoryKVStore()
+
+	// ServerURL hostname is the source of the ghost domain (see serverDomainForID),
+	// so set each server's URL host to match the domain used in its ghost IDs.
+	servers := []kvstore.ServerConfig{
+		{ServerID: serverAID, ServerURL: "https://synapse-a.local", ServerName: "synapse-a.local"},
+		{ServerID: serverBID, ServerURL: "https://synapse-b.local", ServerName: "synapse-b.local"},
+	}
+	data, err := json.Marshal(servers)
+	require.NoError(t, err)
+	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	ghostA := "@_mattermost_abc123:synapse-a.local"
+
+	assert.True(t, plugin.isGhostUser(serverAID, ghostA),
+		"a server-A ghost is recognized for server-A events")
+	assert.False(t, plugin.isGhostUser(serverBID, ghostA),
+		"a server-A ghost is NOT a ghost for server-B events (different domain)")
+	assert.False(t, plugin.isGhostUser(serverAID, "@alice:synapse-a.local"),
+		"a real Matrix user is not a ghost")
+	assert.False(t, plugin.isGhostUser("unknown-server-id", ghostA),
+		"an unresolvable server yields false rather than a false positive")
 }
 
 func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
@@ -87,6 +129,8 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		plugin.logger = &testLogger{t: t}
 		plugin.configuration = &configuration{MatrixServerURL: matrixServerURL}
 		plugin.kvstore = NewMemoryKVStore()
+		// Seed the registry so isGhostUser can resolve the server's domain by ID.
+		seedTestServerConfig(plugin)
 		return plugin
 	}
 
@@ -101,7 +145,7 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 			Content:  map[string]any{"membership": "join"},
 		}
 
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(testServerID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)
@@ -119,7 +163,7 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		}
 
 		// Ghost not registered in kvstore → createDMChannelForGhostUser returns "", nil silently
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(testServerID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)
@@ -137,7 +181,7 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		}
 
 		// Ghost not registered in kvstore → createDMChannelForGhostUser returns "", nil silently
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(testServerID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)
@@ -155,7 +199,7 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		}
 
 		// Neither user is ghost → default case → returns "", nil
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(testServerID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)

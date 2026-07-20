@@ -327,6 +327,29 @@ func (m *MemoryKVStore) Set(key string, value []byte) error {
 	return nil
 }
 
+// SetAtomicWithRetries performs a read-modify-write under the store's write lock,
+// which is atomic within this single-process test double, so no retry is needed.
+func (m *MemoryKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var old []byte
+	if data, exists := m.data[key]; exists {
+		old = make([]byte, len(data))
+		copy(old, data)
+	}
+
+	newValue, err := valueFunc(old)
+	if err != nil {
+		return err
+	}
+
+	data := make([]byte, len(newValue))
+	copy(data, newValue)
+	m.data[key] = data
+	return nil
+}
+
 // Delete removes a key-value pair from the KV store.
 func (m *MemoryKVStore) Delete(key string) error {
 	m.mu.Lock()

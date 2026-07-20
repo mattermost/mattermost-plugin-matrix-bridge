@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -35,9 +34,17 @@ type MatrixTransaction struct {
 	Events []MatrixEvent `json:"events"`
 }
 
-// processedTransactions stores transaction IDs to prevent duplicate processing
+// txnKey identifies a processed transaction. Matrix transaction IDs are only
+// unique per homeserver, so the key is scoped by serverID to keep colliding
+// txnIDs from different servers from deduping against each other.
+type txnKey struct {
+	serverID string
+	txnID    string
+}
+
+// processedTransactions stores transaction keys to prevent duplicate processing
 var (
-	processedTransactions = make(map[string]time.Time)
+	processedTransactions = make(map[txnKey]time.Time)
 	transactionsMutex     sync.RWMutex
 )
 
@@ -45,13 +52,13 @@ var (
 func (p *Plugin) cleanupOldTransactions() {
 	cutoff := time.Now().Add(-time.Hour)
 
-	// Create a list of transaction IDs to delete to avoid holding the lock during iteration
-	var toDelete []string
+	// Create a list of transaction keys to delete to avoid holding the lock during iteration
+	var toDelete []txnKey
 
 	transactionsMutex.RLock()
-	for txnID, timestamp := range processedTransactions {
+	for key, timestamp := range processedTransactions {
 		if timestamp.Before(cutoff) {
-			toDelete = append(toDelete, txnID)
+			toDelete = append(toDelete, key)
 		}
 	}
 	transactionsMutex.RUnlock()
@@ -59,10 +66,10 @@ func (p *Plugin) cleanupOldTransactions() {
 	// Delete the old transactions with write lock
 	if len(toDelete) > 0 {
 		transactionsMutex.Lock()
-		for _, txnID := range toDelete {
+		for _, key := range toDelete {
 			// Double-check the timestamp in case it was updated between read and write lock
-			if timestamp, exists := processedTransactions[txnID]; exists && timestamp.Before(cutoff) {
-				delete(processedTransactions, txnID)
+			if timestamp, exists := processedTransactions[key]; exists && timestamp.Before(cutoff) {
+				delete(processedTransactions, key)
 			}
 		}
 		transactionsMutex.Unlock()
@@ -87,11 +94,19 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Authentication is handled by MatrixAuthorizationRequired middleware
+	// Authentication is handled by MatrixAuthorizationRequired middleware, which
+	// resolves and injects the originating server's serverID.
+	serverID, ok := serverIDFromContext(r.Context())
+	if !ok || serverID == "" {
+		p.logger.LogError("Matrix webhook reached handler without a resolved server ID", "txn_id", txnID)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	key := txnKey{serverID: serverID, txnID: txnID}
 
 	// Check for duplicate transaction (idempotency)
 	transactionsMutex.RLock()
-	timestamp, exists := processedTransactions[txnID]
+	timestamp, exists := processedTransactions[key]
 	transactionsMutex.RUnlock()
 
 	if exists {
@@ -133,7 +148,7 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 
 	// Mark transaction as processed
 	transactionsMutex.Lock()
-	processedTransactions[txnID] = time.Now()
+	processedTransactions[key] = time.Now()
 	shouldCleanup := len(processedTransactions)%100 == 0
 	transactionsMutex.Unlock()
 
@@ -146,7 +161,7 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 
 	// Process each event in the transaction
 	for _, event := range transaction.Events {
-		if err := p.processMatrixEvent(event); err != nil {
+		if err := p.processMatrixEvent(serverID, event); err != nil {
 			p.logger.LogError("Failed to process Matrix event", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "txn_id", txnID)
 			// Continue processing other events even if one fails
 			continue
@@ -162,10 +177,12 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-// processMatrixEvent routes a single Matrix event to the appropriate handler
-func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
+// processMatrixEvent routes a single Matrix event to the appropriate handler.
+// serverID identifies the originating homeserver (resolved from its hs_token) and
+// scopes every lookup, KV namespace and Matrix client used to process the event.
+func (p *Plugin) processMatrixEvent(serverID string, event MatrixEvent) error {
 	// Check if we have an existing mapping for this room
-	channelID, err := p.getChannelIDFromMatrixRoom(event.RoomID)
+	channelID, err := p.getChannelIDFromMatrixRoom(serverID, event.RoomID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get channel ID from Matrix room")
 	}
@@ -175,7 +192,7 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 		// Only attempt DM creation for room membership events or messages
 		if event.Type == "m.room.member" || event.Type == "m.room.message" {
 			// Check if this is a Matrix-initiated DM that we should bridge
-			newChannelID, err := p.handleMatrixInitiatedDM(event)
+			newChannelID, err := p.handleMatrixInitiatedDM(serverID, event)
 			if err != nil {
 				p.logger.LogWarn("Failed to handle Matrix-initiated DM", "room_id", event.RoomID, "error", err)
 				return nil // Don't error - just skip processing
@@ -194,23 +211,24 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 	}
 
 	// Skip events from our own ghost users to prevent loops
-	if p.isGhostUser(event.Sender) {
+	if p.isGhostUser(serverID, event.Sender) {
 		p.logger.LogDebug("Ignoring event from ghost user", "sender", event.Sender, "event_type", event.Type, "room_id", event.RoomID)
 		return nil
 	}
 
 	p.logger.LogDebug("Processing Matrix event", "event_id", event.EventID, "event_type", event.Type, "sender", event.Sender, "room_id", event.RoomID, "channel_id", channelID)
 
-	// Route event based on type
+	// Route event based on type, using a bridge scoped to the originating server.
+	bridge := p.newMatrixToMattermostBridge(serverID)
 	switch event.Type {
 	case "m.room.message":
-		return p.matrixToMattermostBridge.syncMatrixMessageToMattermost(event, channelID)
+		return bridge.syncMatrixMessageToMattermost(event, channelID)
 	case "m.reaction":
-		return p.matrixToMattermostBridge.syncMatrixReactionToMattermost(event, channelID)
+		return bridge.syncMatrixReactionToMattermost(event, channelID)
 	case "m.room.member":
-		return p.matrixToMattermostBridge.syncMatrixMemberEventToMattermost(event, channelID)
+		return bridge.syncMatrixMemberEventToMattermost(event, channelID)
 	case "m.room.redaction":
-		return p.matrixToMattermostBridge.syncMatrixRedactionToMattermost(event, channelID)
+		return bridge.syncMatrixRedactionToMattermost(event, channelID)
 	default:
 		p.logger.LogDebug("Ignoring unsupported event type", "event_type", event.Type, "event_id", event.EventID, "room_id", event.RoomID)
 		return nil
@@ -218,9 +236,10 @@ func (p *Plugin) processMatrixEvent(event MatrixEvent) error {
 }
 
 // getChannelIDFromMatrixRoom finds the Mattermost channel ID for a Matrix room ID
-func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
-	// First check KV store mapping (trusted source): room_mapping_<roomID> -> channelID
-	roomMappingKey := kvstore.BuildRoomMappingKey(p.getSingleServerID(), roomID)
+// within the given server's KV namespace.
+func (p *Plugin) getChannelIDFromMatrixRoom(serverID, roomID string) (string, error) {
+	// First check KV store mapping (trusted source): room_mapping_<serverID>_<roomID> -> channelID
+	roomMappingKey := kvstore.BuildRoomMappingKey(serverID, roomID)
 	channelIDBytes, err := p.kvstore.Get(roomMappingKey)
 	if err == nil && len(channelIDBytes) > 0 {
 		channelID := string(channelIDBytes)
@@ -229,7 +248,7 @@ func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
 	}
 
 	// Fallback: get channel ID from Matrix room state (for race condition during room creation)
-	matrixClient := p.GetMatrixClient()
+	matrixClient := p.getMatrixClient(serverID)
 	if matrixClient != nil {
 		channelID, err := matrixClient.GetMattermostChannelID(roomID)
 		if err != nil {
@@ -243,21 +262,16 @@ func (p *Plugin) getChannelIDFromMatrixRoom(roomID string) (string, error) {
 	return "", nil // No mapping found
 }
 
-// isGhostUser checks if a Matrix user ID belongs to one of our ghost users
-func (p *Plugin) isGhostUser(userID string) bool {
-	config := p.getConfiguration()
-	if config.MatrixServerURL == "" {
-		p.logger.LogDebug("isGhostUser: no MatrixServerURL configured", "user_id", userID)
+// isGhostUser checks if a Matrix user ID belongs to one of our ghost users on the
+// given server. Ghost users end in ":<server_domain>", so the check is scoped to
+// the originating server's domain rather than a single global config.
+func (p *Plugin) isGhostUser(serverID, userID string) bool {
+	// Extract server domain (the real domain, not sanitized for property keys).
+	serverDomain, ok := p.serverDomainForID(serverID)
+	if !ok {
+		p.logger.LogDebug("isGhostUser: could not resolve server domain", "server_id", serverID, "user_id", userID)
 		return false
 	}
-
-	// Extract server domain (get the real domain, not sanitized for property keys)
-	parsedURL, err := url.Parse(config.MatrixServerURL)
-	if err != nil || parsedURL.Hostname() == "" {
-		p.logger.LogDebug("isGhostUser: failed to parse MatrixServerURL", "url", config.MatrixServerURL, "error", err)
-		return false
-	}
-	serverDomain := parsedURL.Hostname()
 
 	// Ghost users follow the pattern: @_mattermost_<mattermost_user_id>:<server_domain>
 	ghostUserPrefix := "@_mattermost_"
@@ -268,11 +282,11 @@ func (p *Plugin) isGhostUser(userID string) bool {
 
 // handleMatrixInitiatedDM checks if an unmapped Matrix room is a potential DM that should be bridged
 // This uses a heuristic approach based on the event information available
-func (p *Plugin) handleMatrixInitiatedDM(event MatrixEvent) (string, error) {
+func (p *Plugin) handleMatrixInitiatedDM(serverID string, event MatrixEvent) (string, error) {
 	// Handle different event types that might indicate DM creation
 	switch event.Type {
 	case "m.room.member":
-		return p.handleMatrixMemberDM(event)
+		return p.handleMatrixMemberDM(serverID, event)
 	case "m.room.message":
 		return p.handleMatrixMessageDM(event)
 	default:
@@ -281,7 +295,7 @@ func (p *Plugin) handleMatrixInitiatedDM(event MatrixEvent) (string, error) {
 }
 
 // handleMatrixMemberDM processes member events to detect DM room creation with ghost users
-func (p *Plugin) handleMatrixMemberDM(event MatrixEvent) (string, error) {
+func (p *Plugin) handleMatrixMemberDM(serverID string, event MatrixEvent) (string, error) {
 	// Only handle join events to avoid creating channels for leave/invite events
 	if event.Content == nil {
 		p.logger.LogDebug("Member event has no content", "room_id", event.RoomID, "event_id", event.EventID)
@@ -308,11 +322,11 @@ func (p *Plugin) handleMatrixMemberDM(event MatrixEvent) (string, error) {
 	// Check if either user is one of our ghost users
 	var ghostUserID, matrixUserID string
 	switch {
-	case p.isGhostUser(targetUserID):
+	case p.isGhostUser(serverID, targetUserID):
 		ghostUserID = targetUserID
 		matrixUserID = actingUserID
 		p.logger.LogDebug("Detected ghost user as target", "room_id", event.RoomID, "ghost_user", ghostUserID, "matrix_user", matrixUserID, "membership", membership)
-	case p.isGhostUser(actingUserID):
+	case p.isGhostUser(serverID, actingUserID):
 		ghostUserID = actingUserID
 		matrixUserID = targetUserID
 		p.logger.LogDebug("Detected ghost user as actor", "room_id", event.RoomID, "ghost_user", ghostUserID, "matrix_user", matrixUserID, "membership", membership)
@@ -322,7 +336,7 @@ func (p *Plugin) handleMatrixMemberDM(event MatrixEvent) (string, error) {
 		return "", nil
 	}
 
-	return p.createDMChannelForGhostUser(event.RoomID, ghostUserID, matrixUserID)
+	return p.createDMChannelForGhostUser(serverID, event.RoomID, ghostUserID, matrixUserID)
 }
 
 // handleMatrixMessageDM processes message events that might be in a DM with a ghost user
@@ -338,7 +352,7 @@ func (p *Plugin) handleMatrixMessageDM(event MatrixEvent) (string, error) {
 }
 
 // createDMChannelForGhostUser creates a Mattermost DM channel for a Matrix DM involving a verified ghost user
-func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID string) (string, error) {
+func (p *Plugin) createDMChannelForGhostUser(serverID, roomID, ghostUserID, matrixUserID string) (string, error) {
 	// Extract Mattermost user ID from ghost user
 	mattermostUserID := p.extractMattermostUserIDFromGhost(ghostUserID)
 	if mattermostUserID == "" {
@@ -346,7 +360,7 @@ func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID s
 	}
 
 	// Verify that this ghost user exists in our KV store (meaning we created it)
-	ghostUserKey := kvstore.BuildGhostUserKey(p.getSingleServerID(), mattermostUserID)
+	ghostUserKey := kvstore.BuildGhostUserKey(serverID, mattermostUserID)
 	ghostUserData, err := p.kvstore.Get(ghostUserKey)
 	if err != nil || len(ghostUserData) == 0 {
 		p.logger.LogDebug("Rejecting DM creation for unrecognized ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID)
@@ -366,18 +380,9 @@ func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID s
 		return "", errors.Wrap(appErr, "failed to get Mattermost user")
 	}
 
-	// Get or create the Matrix user in Mattermost
-	bridgeUtils := NewBridgeUtils(BridgeUtilsConfig{
-		Logger:       p.logger,
-		API:          p.API,
-		KVStore:      p.kvstore,
-		MatrixClient: p.GetMatrixClient(),
-		ServerID:     p.getSingleServerID(),
-		RemoteID:     p.remoteID,
-		ConfigGetter: p,
-	})
-
-	matrixToMattermostBridge := NewMatrixToMattermostBridge(bridgeUtils)
+	// Get or create the Matrix user in Mattermost, using a bridge scoped to the
+	// originating server.
+	matrixToMattermostBridge := p.newMatrixToMattermostBridge(serverID)
 
 	// Create or get the Matrix user in Mattermost (using a dummy team - will be fixed by addUserToChannelTeam)
 	mattermostMatrixUserID, err := matrixToMattermostBridge.getOrCreateMattermostUser(matrixUserID, "")
@@ -392,7 +397,7 @@ func (p *Plugin) createDMChannelForGhostUser(roomID, ghostUserID, matrixUserID s
 	}
 
 	// Store the mapping between Matrix room and Mattermost channel
-	err = bridgeUtils.setChannelRoomMapping(dmChannel.Id, roomID)
+	err = matrixToMattermostBridge.setChannelRoomMapping(dmChannel.Id, roomID)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to store channel room mapping")
 	}

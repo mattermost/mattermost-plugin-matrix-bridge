@@ -143,10 +143,10 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 		Props:     make(map[string]any),
 	}
 
-	// Store Matrix event ID in post properties for reaction mapping and edit tracking
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
+	// Store Matrix event ID in post properties for reaction mapping and edit tracking.
+	// The domain is resolved per-server so events from different homeservers get
+	// distinct property keys.
+	propertyKey := "matrix_event_id_" + b.serverDomain()
 	post.Props[propertyKey] = event.EventID
 	post.Props["from_matrix"] = true
 
@@ -281,10 +281,10 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 		Props:     make(map[string]any),
 	}
 
-	// Store Matrix event ID in post properties for reaction mapping and edit tracking
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
+	// Store Matrix event ID in post properties for reaction mapping and edit tracking.
+	// The domain is resolved per-server so events from different homeservers get
+	// distinct property keys.
+	propertyKey := "matrix_event_id_" + b.serverDomain()
 	post.Props[propertyKey] = event.EventID
 	post.Props["from_matrix"] = true
 

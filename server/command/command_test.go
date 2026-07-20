@@ -1,6 +1,7 @@
 package command
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -93,6 +94,63 @@ func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 func (m *mockPlugin) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Mock implementation - return test Matrix user
 	return "@test_" + mattermostUserID + ":test.com", nil
+}
+
+func (m *mockPlugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
+	data, err := m.kvstore.Get(kvstore.KeyServersConfig)
+	if err != nil {
+		return nil, err
+	}
+	return kvstore.ParseServersConfig(data)
+}
+
+func (m *mockPlugin) AddManagedServer(serverURL, serverName, asToken, hsToken, usernamePrefix string) (string, error) {
+	servers, _ := m.GetManagedServers()
+	serverID := "srv_" + serverName
+	entry := kvstore.ServerConfig{ServerID: serverID, ServerURL: serverURL, ServerName: serverName, ASToken: asToken, HSToken: hsToken, UsernamePrefix: usernamePrefix, Enabled: true}
+	replaced := false
+	for i := range servers {
+		if servers[i].ServerID == serverID {
+			servers[i] = entry
+			replaced = true
+		}
+	}
+	if !replaced {
+		servers = append(servers, entry)
+	}
+	data, err := json.Marshal(servers)
+	if err != nil {
+		return "", err
+	}
+	if err := m.kvstore.Set(kvstore.KeyServersConfig, data); err != nil {
+		return "", err
+	}
+	return serverID, nil
+}
+
+func (m *mockPlugin) GetMatrixClientForServer(string) *matrix.Client {
+	return m.matrixClient
+}
+
+func (m *mockPlugin) RemoveManagedServer(serverID string) (bool, error) {
+	servers, _ := m.GetManagedServers()
+	filtered := make([]kvstore.ServerConfig, 0, len(servers))
+	found := false
+	for _, s := range servers {
+		if s.ServerID == serverID {
+			found = true
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	if !found {
+		return false, nil
+	}
+	data, err := json.Marshal(filtered)
+	if err != nil {
+		return false, err
+	}
+	return true, m.kvstore.Set(kvstore.KeyServersConfig, data)
 }
 
 func setupTest() *env {
@@ -389,6 +447,24 @@ func setupCommandRegistration(env *env) {
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
 
+	serverCmd := model.NewAutocompleteData("server", "[list|add|remove]", serverCommandDesc)
+	serverCmd.AddCommand(model.NewAutocompleteData("list", "", "List all registered Matrix servers"))
+	serverAddCmd := model.NewAutocompleteData("add", "<server_url> <server_name> <as_token> <hs_token> [username_prefix]", "Register or replace a Matrix server")
+	serverAddCmd.AddTextArgument("Matrix homeserver base URL", "<server_url>", "")
+	serverAddCmd.AddTextArgument("Matrix server name (domain in user IDs)", "<server_name>", "")
+	serverAddCmd.AddTextArgument("Application Service token", "<as_token>", "")
+	serverAddCmd.AddTextArgument("Homeserver token", "<hs_token>", "")
+	serverAddCmd.AddTextArgument("Optional username prefix", "[username_prefix]", "")
+	serverCmd.AddCommand(serverAddCmd)
+	serverRemoveCmd := model.NewAutocompleteData("remove", "<server_id>", "Remove a registered Matrix server")
+	serverRemoveCmd.AddTextArgument("Server ID (from /matrix server list)", "<server_id>", "")
+	serverCmd.AddCommand(serverRemoveCmd)
+	serverMapCmd := model.NewAutocompleteData("map", "<server_id> <room_alias|room_id>", "Map the current channel to a room on a specific server")
+	serverMapCmd.AddTextArgument("Server ID (from /matrix server list)", "<server_id>", "")
+	serverMapCmd.AddTextArgument("Matrix room alias or room ID", "<room_alias|room_id>", "")
+	serverCmd.AddCommand(serverMapCmd)
+	matrixData.AddCommand(serverCmd)
+
 	env.api.On("RegisterCommand", &model.Command{
 		Trigger:          matrixCommandTrigger,
 		AutoComplete:     true,
@@ -626,7 +702,16 @@ func (s *memKV) GetTemplateData(string) (string, error) { return "", nil }
 func (s *memKV) Get(k string) ([]byte, error)           { return s.m[k], nil }
 func (s *memKV) Set(k string, v []byte) error           { s.m[k] = v; return nil }
 func (s *memKV) Delete(k string) error                  { delete(s.m, k); return nil }
-func (s *memKV) ListKeys(int, int) ([]string, error)    { return nil, nil }
+
+func (s *memKV) SetAtomicWithRetries(k string, valueFunc func(oldValue []byte) ([]byte, error)) error {
+	newValue, err := valueFunc(s.m[k])
+	if err != nil {
+		return err
+	}
+	s.m[k] = newValue
+	return nil
+}
+func (s *memKV) ListKeys(int, int) ([]string, error) { return nil, nil }
 
 func (s *memKV) ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error) {
 	var keys []string

@@ -32,6 +32,11 @@ type ServerConfig struct {
 	// RemoteID is the shared-channels remote identifier, currently the single
 	// global remoteID returned by RegisterPluginForSharedChannels.
 	RemoteID string `json:"remote_id"`
+	// Injected marks a server added out-of-band (via the `/matrix server add`
+	// admin command for local multi-server testing) rather than derived from the
+	// flat plugin.json configuration. reconcileServerConfig preserves injected
+	// entries and always rebuilds the single non-injected primary.
+	Injected bool `json:"injected,omitempty"`
 }
 
 // ChannelServerMapping is one element of the value stored under a

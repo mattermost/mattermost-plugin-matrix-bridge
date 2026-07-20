@@ -126,3 +126,17 @@ func (mr *MockKVStoreMockRecorder) Set(key, value any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Set", reflect.TypeOf((*MockKVStore)(nil).Set), key, value)
 }
+
+// SetAtomicWithRetries mocks base method.
+func (m *MockKVStore) SetAtomicWithRetries(key string, valueFunc func([]byte) ([]byte, error)) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SetAtomicWithRetries", key, valueFunc)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SetAtomicWithRetries indicates an expected call of SetAtomicWithRetries.
+func (mr *MockKVStoreMockRecorder) SetAtomicWithRetries(key, valueFunc any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetAtomicWithRetries", reflect.TypeOf((*MockKVStore)(nil).SetAtomicWithRetries), key, valueFunc)
+}
