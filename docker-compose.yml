@@ -30,6 +30,16 @@ services:
             - synapse-init
             - postgres
 
+    element:
+        image: vectorim/element-web:latest
+        restart: unless-stopped
+        ports:
+            - "8880:80"
+        volumes:
+            - ./docker/element-config.json:/app/config.json:ro
+        depends_on:
+            - synapse
+
     postgres:
         image: postgres:14
         restart: unless-stopped

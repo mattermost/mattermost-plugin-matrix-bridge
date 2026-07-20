@@ -125,12 +125,32 @@ For local development and testing, you can run a Matrix Synapse server using Doc
 
 3. The Matrix server will be available at `http://localhost:8888`
 
+### Accessing the Web Chat Interface (Element)
+
+Synapse is only a homeserver and has no built-in chat UI. The Docker Compose stack
+includes an [Element Web](https://element.io/) client for testing:
+
+1. Start the Element service (included in `docker-compose up -d`, or start it alone):
+
+    ```bash
+    docker-compose up -d element
+    ```
+
+2. Open `http://localhost:8880` in your browser.
+
+3. It is pre-configured to use the local homeserver (`http://localhost:8888`), so you
+   can register or sign in with a test user directly. Registration is enabled for
+   development, so you can create new users from the login screen.
+
+Element's configuration lives in `docker/element-config.json`.
+
 ### Configuration Notes
 
 - The Synapse server is configured to use PostgreSQL as the database
 - Registration is enabled for development purposes
 - App service configuration is loaded from `docker/mattermost-bridge-registration.yaml`
 - Room list publication is restricted to the bridge user only
+- An Element Web client is available at `http://localhost:8880` for manual testing
 
 ### Stopping the Services
 
