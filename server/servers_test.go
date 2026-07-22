@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -257,10 +258,31 @@ func TestManagedServers(t *testing.T) {
 	const primaryURL = "https://primary.example.com"
 	const extraURL = "https://extra.example.com"
 
+	// remoteIDForSiteURL models the server-side contract of
+	// RegisterPluginForSharedChannels: the remote is keyed by SiteURL, so the same
+	// SiteURL always yields the same remoteID (idempotent) and distinct SiteURLs
+	// yield distinct remoteIDs. The empty SiteURL is the primary's legacy remote.
+	remoteIDForSiteURL := func(siteURL string) string {
+		if siteURL == "" {
+			return "rid-primary"
+		}
+		return "rid:" + siteURL
+	}
+	// injectedRemoteID is the remote the extra server must end up with: derived from
+	// its homeserver hostname, matching siteURLForServer's hostname-based SiteURL.
+	injectedRemoteID := remoteIDForSiteURL("https://extra.example.com")
+
 	newPlugin := func(t *testing.T) *Plugin {
 		t.Helper()
 		api := &plugintest.API{}
 		stubAllLogging(api)
+		// AddManagedServer registers every server for shared channels. Stub the
+		// creator lookup and return a remoteID keyed by SiteURL, faithfully modeling
+		// the real API so distinct servers get distinct remotes and re-registration
+		// is idempotent.
+		api.On("GetUserByUsername", "mattermost-bridge").Return(&model.User{Id: "bot-user-id"}, nil).Maybe()
+		api.On("RegisterPluginForSharedChannels", mock.Anything).
+			Return(func(o model.RegisterPluginOpts) string { return remoteIDForSiteURL(o.SiteURL) }, nil).Maybe()
 		plugin := &Plugin{}
 		plugin.SetAPI(api)
 		plugin.logger = &testLogger{t: t}
@@ -299,34 +321,84 @@ func TestManagedServers(t *testing.T) {
 		assert.True(t, stillThere, "injected server survives reconcile")
 	})
 
-	t.Run("AddUpsertsInPlaceAndPreservesRemoteID", func(t *testing.T) {
+	t.Run("AddUpsertsInPlaceAndKeepsStableRemoteID", func(t *testing.T) {
 		plugin := newPlugin(t)
 
 		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as-1", "hs-1", "mx")
 		require.NoError(t, err)
 
-		// Give the injected entry a distinct RemoteID, as a real shared-channels
-		// registration would.
+		// AddManagedServer registers the injected server, which assigns its distinct
+		// remote ID immediately.
 		servers, err := plugin.getServers()
 		require.NoError(t, err)
-		for i := range servers {
-			if servers[i].ServerID == serverID {
-				servers[i].RemoteID = "preserved-rid"
-			}
-		}
-		require.NoError(t, plugin.persistServers(servers))
+		extra, ok := kvstore.ServerConfigForID(servers, serverID)
+		require.True(t, ok)
+		assert.Equal(t, injectedRemoteID, extra.RemoteID, "an added server is registered for its own distinct remote")
 
-		// Re-adding the same URL updates fields in place and keeps the RemoteID.
+		// Re-adding the same URL updates fields in place; registration is idempotent
+		// so the remote ID is unchanged.
 		_, err = plugin.AddManagedServer(extraURL, "extra.example.com", "as-2", "hs-2", "mx2")
 		require.NoError(t, err)
 
 		after, err := plugin.GetManagedServers()
 		require.NoError(t, err)
 		assert.Len(t, after, 2, "re-adding the same server does not create a duplicate")
-		extra, ok := kvstore.ServerConfigForID(after, serverID)
+		extra, ok = kvstore.ServerConfigForID(after, serverID)
 		require.True(t, ok)
 		assert.Equal(t, "hs-2", extra.HSToken, "tokens are updated in place")
-		assert.Equal(t, "preserved-rid", extra.RemoteID, "existing RemoteID is preserved on re-add")
+		assert.Equal(t, injectedRemoteID, extra.RemoteID, "remote ID is stable across re-add")
+	})
+
+	t.Run("AddAssignsDistinctRemoteResolvableToServer", func(t *testing.T) {
+		plugin := newPlugin(t)
+
+		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as", "hs", "mx")
+		require.NoError(t, err)
+
+		servers, err := plugin.GetManagedServers()
+		require.NoError(t, err)
+		extra, ok := kvstore.ServerConfigForID(servers, serverID)
+		require.True(t, ok)
+
+		assert.NotEqual(t, plugin.remoteID, extra.RemoteID, "the added server's remote differs from the primary's")
+
+		// The property this wiring fixes: loop attribution resolves the added server's
+		// remote to the added server, immediately (no restart).
+		resolved, ok := plugin.serverIDForRemoteID(extra.RemoteID)
+		require.True(t, ok)
+		assert.Equal(t, serverID, resolved)
+	})
+
+	t.Run("DuplicateServerNameStillGetsDistinctRemotePerServer", func(t *testing.T) {
+		plugin := newPlugin(t)
+
+		// Two homeservers with different hostnames but the SAME free-form ServerName.
+		// The SiteURL (and thus the remote) must key off the unique hostname, not the
+		// shared ServerName, or the two servers would collapse onto one remoteID.
+		const dupName = "shared.example.com"
+		id1, err := plugin.AddManagedServer("https://one.example.com", dupName, "as1", "hs1", "mx")
+		require.NoError(t, err)
+		id2, err := plugin.AddManagedServer("https://two.example.com", dupName, "as2", "hs2", "mx")
+		require.NoError(t, err)
+		require.NotEqual(t, id1, id2, "distinct hostnames yield distinct serverIDs")
+
+		servers, err := plugin.GetManagedServers()
+		require.NoError(t, err)
+		s1, ok := kvstore.ServerConfigForID(servers, id1)
+		require.True(t, ok)
+		s2, ok := kvstore.ServerConfigForID(servers, id2)
+		require.True(t, ok)
+
+		require.NotEmpty(t, s1.RemoteID)
+		assert.NotEqual(t, s1.RemoteID, s2.RemoteID, "servers sharing a ServerName must not share a remote ID")
+
+		// Each remote resolves back to its own server.
+		r1, ok := plugin.serverIDForRemoteID(s1.RemoteID)
+		require.True(t, ok)
+		assert.Equal(t, id1, r1)
+		r2, ok := plugin.serverIDForRemoteID(s2.RemoteID)
+		require.True(t, ok)
+		assert.Equal(t, id2, r2)
 	})
 
 	t.Run("Remove", func(t *testing.T) {

@@ -8,12 +8,15 @@ import (
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/pkg/errors"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// getGhostUser retrieves the Matrix ghost user ID for a Mattermost user if it exists
-func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
-	ghostUserKey := kvstore.BuildGhostUserKey(p.getSingleServerID(), mattermostUserID)
+// getGhostUserForServer retrieves the Matrix ghost user ID for a Mattermost user
+// on a specific server if it exists. Ghost users are namespaced per server, so a
+// user bridged into multiple homeservers has a distinct ghost on each.
+func (p *Plugin) getGhostUserForServer(serverID, mattermostUserID string) (string, bool) {
+	ghostUserKey := kvstore.BuildGhostUserKey(serverID, mattermostUserID)
 	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
 	if err == nil && len(ghostUserIDBytes) > 0 {
 		return string(ghostUserIDBytes), true
@@ -40,12 +43,18 @@ func extractServerDomain(logger Logger, serverURL string) string {
 	}
 
 	// Replace dots and colons to make it safe for use in property keys
-	return strings.ReplaceAll(strings.ReplaceAll(hostname, ".", "_"), ":", "_")
+	return sanitizeDomainForPropertyKey(hostname)
 }
 
-// findAndDeleteFileMessage finds and deletes file attachment messages that are replies to the main post
-func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, postEventID string) error {
-	matrixClient := p.GetMatrixClient()
+// sanitizeDomainForPropertyKey makes a Matrix domain safe for use in a post
+// property key by replacing dots and colons with underscores.
+func sanitizeDomainForPropertyKey(domain string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(domain, ".", "_"), ":", "_")
+}
+
+// findAndDeleteFileMessage finds and deletes file attachment messages that are
+// replies to the main post, using the provided (per-server) Matrix client.
+func (p *Plugin) findAndDeleteFileMessage(matrixClient *matrix.Client, matrixRoomID, ghostUserID, filename, postEventID string) error {
 	// Get all reply messages to the main post event
 	relations, err := matrixClient.GetEventRelationsAsUser(matrixRoomID, postEventID, ghostUserID)
 	if err != nil {

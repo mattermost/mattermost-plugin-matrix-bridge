@@ -187,26 +187,47 @@ func (s *BridgeUtils) matrixUsernamePrefix() string {
 // serverDomain returns the property-key-sanitized domain of this bridge's Matrix
 // server, resolved from the managed server registry (the source of truth for
 // per-server settings). It is used to build the per-server post property key
-// "matrix_event_id_<domain>". When no registry entry exists for this server (e.g.
-// before the first reconcile), it falls back to the flat configuration, which
-// yields the same value in the single-server case. The registry is read live,
-// mirroring matrixUsernamePrefix.
+// "matrix_event_id_<domain>".
+//
+// The domain is derived from the homeserver's Matrix server name when set (the
+// canonical per-homeserver identity, matching ghost user and room domains), and
+// only falls back to the connection URL's host otherwise. Using the server name
+// keeps the key unique across homeservers even when several share a connection
+// host but differ by port (e.g. localhost:8008 vs localhost:8009), where the
+// URL-host-derived key would collide and cross-wire their event IDs. When no
+// registry entry exists (before the first reconcile) it falls back to the flat
+// configuration, which yields the same value in the single-server case.
 func (s *BridgeUtils) serverDomain() string {
 	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
 	if err != nil {
 		s.logger.LogError("Failed to read server registry for server domain; using config fallback", "server_id", s.serverID, "error", err)
-		return extractServerDomain(s.logger, s.getConfiguration().MatrixServerURL)
+		return s.configServerDomain()
 	}
 	servers, err := kvstore.ParseServersConfig(data)
 	if err != nil {
 		s.logger.LogError("Corrupt server registry; using config fallback for server domain", "server_id", s.serverID, "error", err)
-		return extractServerDomain(s.logger, s.getConfiguration().MatrixServerURL)
+		return s.configServerDomain()
 	}
-	if server, ok := kvstore.ServerConfigForID(servers, s.serverID); ok && server.ServerURL != "" {
-		return extractServerDomain(s.logger, server.ServerURL)
+	if server, ok := kvstore.ServerConfigForID(servers, s.serverID); ok {
+		if server.ServerName != "" {
+			return sanitizeDomainForPropertyKey(server.ServerName)
+		}
+		if server.ServerURL != "" {
+			return extractServerDomain(s.logger, server.ServerURL)
+		}
 	}
 	// No registry yet (before the first reconcile) or no entry for this server.
-	return extractServerDomain(s.logger, s.getConfiguration().MatrixServerURL)
+	return s.configServerDomain()
+}
+
+// configServerDomain derives the server domain from the flat configuration,
+// preferring the configured Matrix server name over the connection URL host.
+func (s *BridgeUtils) configServerDomain() string {
+	config := s.getConfiguration()
+	if name := config.GetMatrixServerName(); name != "" {
+		return sanitizeDomainForPropertyKey(name)
+	}
+	return extractServerDomain(s.logger, config.MatrixServerURL)
 }
 
 func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {
@@ -534,9 +555,21 @@ func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername str
 		return "" // Empty username
 	}
 
-	// Extract server domain using ServerDiscovery
+	// Extract server domain using ServerDiscovery. Resolve the URL/name from the
+	// managed registry for this bridge's server so a reconstruction on server B
+	// appends B's domain, not the flat config's (single-server) domain. Fall back
+	// to the flat config when there is no registry entry (pre-reconcile), which
+	// yields the same value in the single-server case.
 	serverURL := config.GetMatrixServerURL()
 	configuredServerName := config.GetMatrixServerName()
+	if data, regErr := s.kvstore.Get(kvstore.KeyServersConfig); regErr == nil {
+		if servers, parseErr := kvstore.ParseServersConfig(data); parseErr == nil {
+			if sc, ok := kvstore.ServerConfigForID(servers, s.serverID); ok && sc.ServerURL != "" {
+				serverURL = sc.ServerURL
+				configuredServerName = sc.ServerName
+			}
+		}
+	}
 
 	logger := matrix.NewAPILogger(s.API)
 	discovery := matrix.NewServerDiscovery(logger)

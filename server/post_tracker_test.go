@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// testTrackerServer is a fixed serverID used to exercise the per-server trackers.
+const testTrackerServer = "srv1"
+
 func TestPostTracker_PutAndGet(t *testing.T) {
 	tracker := NewPostTracker(DefaultPostTrackerMaxEntries)
 
@@ -13,12 +16,12 @@ func TestPostTracker_PutAndGet(t *testing.T) {
 	postID := "test_post_123"
 	updateAt := time.Now().UnixMilli()
 
-	err := tracker.Put(postID, updateAt)
+	err := tracker.Put(testTrackerServer, postID, updateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
 
-	retrievedUpdateAt, exists := tracker.Get(postID)
+	retrievedUpdateAt, exists := tracker.Get(testTrackerServer, postID)
 	if !exists {
 		t.Fatalf("Expected post ID to exist in tracker")
 	}
@@ -34,14 +37,14 @@ func TestPostTracker_Delete(t *testing.T) {
 	postID := "test_post_456"
 	updateAt := time.Now().UnixMilli()
 
-	err := tracker.Put(postID, updateAt)
+	err := tracker.Put(testTrackerServer, postID, updateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
 
-	tracker.Delete(postID)
+	tracker.Delete(testTrackerServer, postID)
 
-	_, exists := tracker.Get(postID)
+	_, exists := tracker.Get(testTrackerServer, postID)
 	if exists {
 		t.Fatalf("Expected post ID to be deleted from tracker")
 	}
@@ -54,7 +57,7 @@ func TestPostTracker_MaxEntries(t *testing.T) {
 	for i := range 10000 {
 		postID := fmt.Sprintf("test_post_%d", i)
 		updateAt := time.Now().UnixMilli()
-		err := tracker.Put(postID, updateAt)
+		err := tracker.Put(testTrackerServer, postID, updateAt)
 		if err != nil {
 			t.Fatalf("Unexpected error adding entry %d: %v", i, err)
 		}
@@ -67,7 +70,7 @@ func TestPostTracker_MaxEntries(t *testing.T) {
 	}
 
 	// Try to add one more entry - should fail since all entries are recent
-	err := tracker.Put("should_fail", time.Now().UnixMilli())
+	err := tracker.Put(testTrackerServer, "should_fail", time.Now().UnixMilli())
 	if err == nil {
 		t.Fatalf("Expected Put to fail when at capacity with recent entries")
 	}
@@ -85,7 +88,7 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	// Add an old entry (older than 1 hour)
 	oldPostID := "old_post"
 	oldUpdateAt := time.Now().Add(-2 * time.Hour).UnixMilli()
-	err := tracker.Put(oldPostID, oldUpdateAt)
+	err := tracker.Put(testTrackerServer, oldPostID, oldUpdateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
@@ -93,7 +96,7 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	// Add a recent entry
 	recentPostID := "recent_post"
 	recentUpdateAt := time.Now().UnixMilli()
-	err = tracker.Put(recentPostID, recentUpdateAt)
+	err = tracker.Put(testTrackerServer, recentPostID, recentUpdateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
@@ -102,20 +105,20 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	for i := range 100 {
 		postID := fmt.Sprintf("trigger_cleanup_%d", i)
 		updateAt := time.Now().UnixMilli()
-		err := tracker.Put(postID, updateAt)
+		err := tracker.Put(testTrackerServer, postID, updateAt)
 		if err != nil {
 			t.Fatalf("Unexpected error from Put during cleanup trigger: %v", err)
 		}
 	}
 
 	// Old entry should be cleaned up
-	_, oldExists := tracker.Get(oldPostID)
+	_, oldExists := tracker.Get(testTrackerServer, oldPostID)
 	if oldExists {
 		t.Fatalf("Expected old entry to be cleaned up")
 	}
 
 	// Recent entry should still exist
-	_, recentExists := tracker.Get(recentPostID)
+	_, recentExists := tracker.Get(testTrackerServer, recentPostID)
 	if !recentExists {
 		t.Fatalf("Expected recent entry to still exist")
 	}
@@ -130,7 +133,7 @@ func TestPostTracker_CustomMaxEntries(t *testing.T) {
 	for i := range customLimit {
 		postID := fmt.Sprintf("test_post_%d", i)
 		updateAt := time.Now().UnixMilli()
-		err := tracker.Put(postID, updateAt)
+		err := tracker.Put(testTrackerServer, postID, updateAt)
 		if err != nil {
 			t.Fatalf("Unexpected error adding entry %d: %v", i, err)
 		}
@@ -143,7 +146,7 @@ func TestPostTracker_CustomMaxEntries(t *testing.T) {
 	}
 
 	// Try to add one more entry - should fail
-	err := tracker.Put("should_fail", time.Now().UnixMilli())
+	err := tracker.Put(testTrackerServer, "should_fail", time.Now().UnixMilli())
 	if err == nil {
 		t.Fatalf("Expected Put to fail when at custom capacity limit")
 	}

@@ -7,6 +7,14 @@ import (
 	"github.com/pkg/errors"
 )
 
+// trackerKey composes the per-server tracking key. Post IDs are only unique
+// within a homeserver's sync stream, and a post shared to multiple Matrix servers
+// produces distinct per-server state (a server-specific mxc URI, an independent
+// edit timestamp), so tracking must be namespaced by serverID.
+func trackerKey(serverID, postID string) string {
+	return serverID + "\x00" + postID
+}
+
 const (
 	// DefaultPostTrackerMaxEntries is the default maximum number of entries in PostTracker
 	DefaultPostTrackerMaxEntries = 10000
@@ -15,7 +23,7 @@ const (
 // PostTracker tracks post creation timestamps in memory to detect redundant edits
 type PostTracker struct {
 	mutex       sync.RWMutex
-	entries     map[string]int64 // postID -> UpdateAt timestamp
+	entries     map[string]int64 // trackerKey(serverID, postID) -> UpdateAt timestamp
 	putCounter  int              // Counter for triggering cleanup
 	cleanupFreq int              // Cleanup every N puts
 	maxEntries  int              // Maximum number of entries allowed
@@ -30,9 +38,9 @@ func NewPostTracker(maxEntries int) *PostTracker {
 	}
 }
 
-// Put stores a post ID with its UpdateAt timestamp
+// Put stores a post's UpdateAt timestamp for a specific server.
 // Returns an error if the tracker is at capacity and cannot accept new entries
-func (pt *PostTracker) Put(postID string, updateAt int64) error {
+func (pt *PostTracker) Put(serverID, postID string, updateAt int64) error {
 	pt.mutex.Lock()
 	defer pt.mutex.Unlock()
 
@@ -48,7 +56,7 @@ func (pt *PostTracker) Put(postID string, updateAt int64) error {
 	}
 
 	// Add the entry
-	pt.entries[postID] = updateAt
+	pt.entries[trackerKey(serverID, postID)] = updateAt
 	pt.putCounter++
 
 	// Periodic cleanup based on put frequency
@@ -59,21 +67,21 @@ func (pt *PostTracker) Put(postID string, updateAt int64) error {
 	return nil
 }
 
-// Get retrieves the UpdateAt timestamp for a post ID
-func (pt *PostTracker) Get(postID string) (int64, bool) {
+// Get retrieves the UpdateAt timestamp for a post on a specific server
+func (pt *PostTracker) Get(serverID, postID string) (int64, bool) {
 	pt.mutex.RLock()
 	defer pt.mutex.RUnlock()
 
-	updateAt, exists := pt.entries[postID]
+	updateAt, exists := pt.entries[trackerKey(serverID, postID)]
 	return updateAt, exists
 }
 
-// Delete removes a post ID from tracking
-func (pt *PostTracker) Delete(postID string) {
+// Delete removes a post's tracking entry for a specific server
+func (pt *PostTracker) Delete(serverID, postID string) {
 	pt.mutex.Lock()
 	defer pt.mutex.Unlock()
 
-	delete(pt.entries, postID)
+	delete(pt.entries, trackerKey(serverID, postID))
 }
 
 // cleanupOldEntries removes entries older than 1 hour
@@ -112,7 +120,7 @@ type PendingFile struct {
 // PendingFileTracker tracks files uploaded to Matrix that are awaiting their posts
 type PendingFileTracker struct {
 	mutex       sync.RWMutex
-	filesByPost map[string][]*PendingFile // postID -> list of pending files
+	filesByPost map[string][]*PendingFile // trackerKey(serverID, postID) -> list of pending files
 	addCounter  int                       // Counter for triggering cleanup
 	cleanupFreq int                       // Cleanup every N adds
 }
@@ -125,13 +133,14 @@ func NewPendingFileTracker() *PendingFileTracker {
 	}
 }
 
-// AddFile adds a pending file for a specific post
-func (pft *PendingFileTracker) AddFile(postID string, file *PendingFile) {
+// AddFile adds a pending file for a specific post on a specific server
+func (pft *PendingFileTracker) AddFile(serverID, postID string, file *PendingFile) {
 	pft.mutex.Lock()
 	defer pft.mutex.Unlock()
 
+	key := trackerKey(serverID, postID)
 	file.UploadedAt = time.Now().UnixMilli()
-	pft.filesByPost[postID] = append(pft.filesByPost[postID], file)
+	pft.filesByPost[key] = append(pft.filesByPost[key], file)
 	pft.addCounter++
 
 	// Periodic cleanup based on add frequency
@@ -140,30 +149,32 @@ func (pft *PendingFileTracker) AddFile(postID string, file *PendingFile) {
 	}
 }
 
-// GetFiles retrieves and removes all pending files for a post
-func (pft *PendingFileTracker) GetFiles(postID string) []*PendingFile {
+// GetFiles retrieves and removes all pending files for a post on a specific server
+func (pft *PendingFileTracker) GetFiles(serverID, postID string) []*PendingFile {
 	pft.mutex.Lock()
 	defer pft.mutex.Unlock()
 
-	files := pft.filesByPost[postID]
-	delete(pft.filesByPost, postID)
+	key := trackerKey(serverID, postID)
+	files := pft.filesByPost[key]
+	delete(pft.filesByPost, key)
 	return files
 }
 
-// RemoveFile removes a specific file from pending files for a post
-func (pft *PendingFileTracker) RemoveFile(postID, fileID string) bool {
+// RemoveFile removes a specific file from pending files for a post on a specific server
+func (pft *PendingFileTracker) RemoveFile(serverID, postID, fileID string) bool {
 	pft.mutex.Lock()
 	defer pft.mutex.Unlock()
 
-	files := pft.filesByPost[postID]
+	key := trackerKey(serverID, postID)
+	files := pft.filesByPost[key]
 	for i, file := range files {
 		if file.FileID == fileID {
 			// Remove this file from the slice
-			pft.filesByPost[postID] = append(files[:i], files[i+1:]...)
+			pft.filesByPost[key] = append(files[:i], files[i+1:]...)
 
 			// If no files left for this post, remove the post entry
-			if len(pft.filesByPost[postID]) == 0 {
-				delete(pft.filesByPost, postID)
+			if len(pft.filesByPost[key]) == 0 {
+				delete(pft.filesByPost, key)
 			}
 			return true
 		}

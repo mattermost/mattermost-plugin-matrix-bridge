@@ -126,18 +126,9 @@ under that server's namespace (preserving any mapping the channel already has to
 primary server). Send a message in the Matrix room and it appears in the Mattermost
 channel.
 
-> **Inbound only for now:** messages **from** server 2 sync **into** Mattermost. The
-> reverse direction (Mattermost → a non-primary server) is not yet wired — outbound
-> multi-server routing lands in a later phase — so posting in the Mattermost channel
-> will not (yet) reach server 2's room.
-
 Notes:
 
 - These commands require System Administrator privileges.
-- Injected servers persist in the plugin's KV store and survive restarts and plugin
-  reconfiguration. The single server configured in the System Console is always the
-  "primary"; removing it via the command is not permanent (it is re-derived from the
-  configuration), whereas injected servers can be removed permanently.
 
 ## Stopping the Services
 

@@ -304,7 +304,7 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
 
 	// Server management command (admin only) for local multi-server testing.
-	serverCmd := model.NewAutocompleteData("server", "[list|add|remove]", serverCommandDesc)
+	serverCmd := model.NewAutocompleteData("server", "[list|add|remove|map]", serverCommandDesc)
 	serverCmd.AddCommand(model.NewAutocompleteData("list", "", "List all registered Matrix servers"))
 	serverAddCmd := model.NewAutocompleteData("add", "<server_url> <server_name> <as_token> <hs_token> [username_prefix]", "Register or replace a Matrix server")
 	serverAddCmd.AddTextArgument("Matrix homeserver base URL", "<server_url>", "")
@@ -368,6 +368,17 @@ func (c *Handler) getMatrixClientOrError() (*matrix.Client, *model.CommandRespon
 }
 
 func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier string) *model.CommandResponse {
+	// `/matrix map` implicitly targets the primary server. When more than one
+	// Matrix server is registered that target is ambiguous, and its single-entry
+	// write would clobber another server's mapping for this channel. Require the
+	// explicit `/matrix server map <server_id> <room>` in that case.
+	if servers, err := c.plugin.GetManagedServers(); err != nil {
+		c.client.Log.Error("Failed to read managed servers", "error", err)
+		return ephemeral("❌ Failed to read the server registry. Check plugin logs for details.")
+	} else if len(servers) > 1 {
+		return ephemeral("Multiple Matrix servers are configured, so `/matrix map` is ambiguous. Use `/matrix server map <server_id> <room>` to choose a server (see `/matrix server list`).")
+	}
+
 	// Get current Matrix client and fail fast if not configured
 	matrixClient, errResponse := c.getMatrixClientOrError()
 	if errResponse != nil {

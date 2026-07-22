@@ -1,6 +1,7 @@
 package command
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -90,6 +91,46 @@ func TestServerCommandRemoveUnknown(t *testing.T) {
 	handler, _ := newServerCommandHandler(t, true)
 	resp := runServer(handler, "/matrix server remove does-not-exist")
 	assert.Contains(t, resp.Text, "No server found")
+}
+
+func TestMapCommandRefusesWithMultipleServers(t *testing.T) {
+	handler, mp := newServerCommandHandler(t, true)
+
+	servers := []kvstore.ServerConfig{
+		{ServerID: "s1", ServerName: "a.example.org", Enabled: true},
+		{ServerID: "s2", ServerName: "b.example.org", Enabled: true, Injected: true},
+	}
+	data, err := json.Marshal(servers)
+	require.NoError(t, err)
+	require.NoError(t, mp.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	resp := handler.executeMatrixCommand(&model.CommandArgs{
+		Command:   "/matrix map #room:a.example.org",
+		UserId:    "admin-user",
+		ChannelId: "chan-1",
+	})
+	require.NotNil(t, resp)
+	assert.Contains(t, resp.Text, "Multiple Matrix servers")
+	assert.Contains(t, resp.Text, "/matrix server map")
+}
+
+func TestMapCommandAllowedWithSingleServer(t *testing.T) {
+	handler, mp := newServerCommandHandler(t, true)
+
+	servers := []kvstore.ServerConfig{{ServerID: "s1", ServerName: "a.example.org", Enabled: true}}
+	data, err := json.Marshal(servers)
+	require.NoError(t, err)
+	require.NoError(t, mp.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	// With a single server the guard does not fire; the command proceeds past it
+	// (and then fails later because the mock has no live Matrix client).
+	resp := handler.executeMatrixCommand(&model.CommandArgs{
+		Command:   "/matrix map #room:a.example.org",
+		UserId:    "admin-user",
+		ChannelId: "chan-1",
+	})
+	require.NotNil(t, resp)
+	assert.NotContains(t, resp.Text, "Multiple Matrix servers")
 }
 
 func TestServerCommandMapUnknownServer(t *testing.T) {

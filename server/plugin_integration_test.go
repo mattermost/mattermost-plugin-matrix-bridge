@@ -125,7 +125,7 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 		require.NoError(suite.T(), err, "Should set up reverse user mapping")
 
 		// Test inviting remote user to Matrix room
-		err = suite.plugin.inviteRemoteUserToMatrixRoom(remoteUser, testChannelID)
+		err = suite.plugin.inviteRemoteUserToMatrixRoomForServer(testServerID, remoteUser, testChannelID)
 		require.NoError(suite.T(), err, "Should invite remote user to Matrix room")
 
 		// Verify user has been invited to the room
@@ -156,7 +156,7 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 		suite.api.On("GetUser", nonExistentUserID).Return(nonExistentUser, nil)
 
 		// This should fail because there's no Matrix user mapping
-		err := suite.plugin.inviteRemoteUserToMatrixRoom(nonExistentUser, testChannelID)
+		err := suite.plugin.inviteRemoteUserToMatrixRoomForServer(testServerID, nonExistentUser, testChannelID)
 		assert.Error(suite.T(), err, "Should fail to invite user with no Matrix mapping")
 	})
 
@@ -184,7 +184,7 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 		require.NoError(suite.T(), err, "Should set up reverse user mapping")
 
 		nonExistentChannelID := model.NewId()
-		err = suite.plugin.inviteRemoteUserToMatrixRoom(remoteUser, nonExistentChannelID)
+		err = suite.plugin.inviteRemoteUserToMatrixRoomForServer(testServerID, remoteUser, nonExistentChannelID)
 		assert.NoError(suite.T(), err, "Should gracefully skip invite to non-bridged channel")
 	})
 }

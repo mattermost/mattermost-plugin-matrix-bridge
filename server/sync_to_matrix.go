@@ -12,18 +12,21 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// FileTracker interface for dependency injection
+// FileTracker interface for dependency injection. All operations are namespaced
+// by serverID because a file's mxc URI is only valid on the server it was
+// uploaded to (a channel may be bridged to several servers).
 type FileTracker interface {
-	GetFiles(postID string) []*PendingFile
-	AddFile(postID string, file *PendingFile)
-	RemoveFile(postID, fileID string) bool
+	GetFiles(serverID, postID string) []*PendingFile
+	AddFile(serverID, postID string, file *PendingFile)
+	RemoveFile(serverID, postID, fileID string) bool
 }
 
-// PostTrackerInterface provides dependency injection for post tracking operations
+// PostTrackerInterface provides dependency injection for post tracking
+// operations, namespaced by serverID so redundant-edit detection is per-server.
 type PostTrackerInterface interface {
-	Get(postID string) (int64, bool)
-	Put(postID string, updateAt int64) error
-	Delete(postID string)
+	Get(serverID, postID string) (int64, bool)
+	Put(serverID, postID string, updateAt int64) error
+	Delete(serverID, postID string)
 }
 
 // MattermostToMatrixBridge handles syncing FROM Mattermost TO Matrix
@@ -303,8 +306,10 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 	}
 
 	// Check if this post already has a Matrix event ID (indicating it's an edit)
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
+	// The event-ID property key is per-server (a post shared to multiple servers
+	// stores one event ID per server), so resolve the domain from this bridge's
+	// server via the registry rather than the flat single-server config.
+	serverDomain := b.serverDomain()
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var existingEventID string
@@ -316,17 +321,17 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 
 	if existingEventID != "" {
 		// Check if this is a redundant edit from adding the Matrix event ID property
-		if storedUpdateAt, exists := b.postTracker.Get(post.Id); exists {
+		if storedUpdateAt, exists := b.postTracker.Get(b.serverID, post.Id); exists {
 			if post.UpdateAt == storedUpdateAt {
 				// This post's UpdateAt matches the timestamp we stored when adding Matrix event ID
 				// This is the redundant edit from adding the Matrix event ID property
-				b.postTracker.Delete(post.Id)
+				b.postTracker.Delete(b.serverID, post.Id)
 				b.logger.LogDebug("Skipping redundant edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 				return nil
 			}
 			// This is a genuine edit that happened after we added the Matrix event ID
 			// Remove the tracking entry since we're processing a real edit now
-			b.postTracker.Delete(post.Id)
+			b.postTracker.Delete(b.serverID, post.Id)
 			b.logger.LogDebug("Processing genuine edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 		}
 
@@ -412,7 +417,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 	}
 
 	// Check for pending file attachments for this post
-	pendingFiles := b.fileTracker.GetFiles(post.Id)
+	pendingFiles := b.fileTracker.GetFiles(b.serverID, post.Id)
 
 	// Prepare file attachments if any
 	var fileAttachments []matrix.FileAttachment
@@ -464,7 +469,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 			// Continue anyway, the message was sent successfully
 		} else {
 			// Store the UpdateAt timestamp in memory to detect redundant edits
-			err = b.postTracker.Put(post.Id, updatedPost.UpdateAt)
+			err = b.postTracker.Put(b.serverID, post.Id, updatedPost.UpdateAt)
 			if err != nil {
 				b.logger.LogWarn("Failed to store post tracking for redundant edit detection", "error", err, "post_id", post.Id, "update_at", updatedPost.UpdateAt)
 				// Continue anyway - this is just an optimization to avoid redundant edits
@@ -523,7 +528,7 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 	var currentFiles []matrix.FileAttachment
 
 	// First check pending files (for new posts that haven't been sent yet)
-	pendingFiles := b.fileTracker.GetFiles(post.Id)
+	pendingFiles := b.fileTracker.GetFiles(b.serverID, post.Id)
 	for _, file := range pendingFiles {
 		currentFiles = append(currentFiles, matrix.FileAttachment{
 			Filename: file.Filename,
@@ -606,8 +611,10 @@ func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channe
 	}
 
 	// Get Matrix event ID from post properties
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
+	// The event-ID property key is per-server (a post shared to multiple servers
+	// stores one event ID per server), so resolve the domain from this bridge's
+	// server via the registry rather than the flat single-server config.
+	serverDomain := b.serverDomain()
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var matrixEventID string
@@ -689,8 +696,10 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 	}
 
 	// Get Matrix event ID from post properties
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
+	// The event-ID property key is per-server (a post shared to multiple servers
+	// stores one event ID per server), so resolve the domain from this bridge's
+	// server via the registry rather than the flat single-server config.
+	serverDomain := b.serverDomain()
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var matrixEventID string
@@ -768,8 +777,10 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 	}
 
 	// Get Matrix event ID from post properties
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
+	// The event-ID property key is per-server (a post shared to multiple servers
+	// stores one event ID per server), so resolve the domain from this bridge's
+	// server via the registry rather than the flat single-server config.
+	serverDomain := b.serverDomain()
 	propertyKey := "matrix_event_id_" + serverDomain
 
 	var matrixEventID string

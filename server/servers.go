@@ -68,6 +68,15 @@ func (p *Plugin) serverDomainForID(serverID string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	// Ghost users are named with the homeserver's Matrix server name (e.g.
+	// @_mattermost_<id>:example.com), which is the configured ServerName — not
+	// necessarily the connection URL host (the two differ under delegation, or in
+	// tests where the URL is localhost:<port> but the server name is example.com).
+	// Prefer ServerName so ghost recognition matches how ghosts are actually
+	// created; fall back to the URL host only when no server name is configured.
+	if server.ServerName != "" {
+		return server.ServerName, true
+	}
 	domain, err := matrix.ExtractServerDomain(server.ServerURL)
 	if err != nil || domain == "" {
 		return "", false
@@ -261,8 +270,20 @@ func (p *Plugin) AddManagedServer(serverURL, serverName, asToken, hsToken, usern
 		return "", err
 	}
 
-	// Rebuild the client registry and bridges from the updated registry so the new
-	// server is live immediately.
+	// Register the added server for shared channels now so it is assigned its own
+	// distinct remote ID immediately, rather than sharing the primary's remote until
+	// the next activation. This makes loop-prevention attribution for messages
+	// originating on the added server correct without a restart. The call is
+	// idempotent and Mattermost-side only (it does not contact the homeserver); a
+	// failure leaves the server usable with the primary's remote (the prior
+	// approximate behavior), so warn and continue rather than failing the add.
+	if err := p.registerForSharedChannels(); err != nil {
+		p.logger.LogWarn("Failed to register added Matrix server for shared channels; loop attribution stays approximate until next activation",
+			"server_id", serverID, "error", err)
+	}
+
+	// Rebuild the client registry and bridges from the updated registry (now carrying
+	// the added server's distinct remote ID) so the new server is live immediately.
 	if err := p.initMatrixClient(); err != nil {
 		return "", errors.Wrap(err, "failed to rebuild Matrix clients after adding server")
 	}

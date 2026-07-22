@@ -692,19 +692,19 @@ func (b *MatrixToMattermostBridge) addUserToChannelTeam(userID, channelID string
 	return nil
 }
 
-// extractUsernameFromMatrixUserID extracts username from Matrix user ID
+// extractUsernameFromMatrixUserID extracts the localpart from a Matrix user ID.
+// Matrix user IDs are "@localpart:server", where the server name may itself
+// contain a colon for a port (e.g. "@u:example.com:8448"). Split on the first
+// colon only so the localpart is returned intact regardless of a port. The
+// server component is intentionally not used to build the Mattermost username:
+// the target homeserver is carried by the per-server bridge, and reverse lookups
+// use the per-server KV mapping (BuildMattermostUserKey) which is server-aware.
 func (b *MatrixToMattermostBridge) extractUsernameFromMatrixUserID(userID string) string {
-	// Matrix user IDs are in format @username:server.com
 	if !strings.HasPrefix(userID, "@") {
 		return ""
 	}
 
-	parts := strings.Split(userID[1:], ":")
-	if len(parts) == 0 {
-		return ""
-	}
-
-	return parts[0]
+	return strings.SplitN(userID[1:], ":", 2)[0]
 }
 
 // generateMattermostUsername creates a unique Mattermost username

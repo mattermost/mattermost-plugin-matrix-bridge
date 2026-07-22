@@ -447,7 +447,7 @@ func setupCommandRegistration(env *env) {
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
 
-	serverCmd := model.NewAutocompleteData("server", "[list|add|remove]", serverCommandDesc)
+	serverCmd := model.NewAutocompleteData("server", "[list|add|remove|map]", serverCommandDesc)
 	serverCmd.AddCommand(model.NewAutocompleteData("list", "", "List all registered Matrix servers"))
 	serverAddCmd := model.NewAutocompleteData("add", "<server_url> <server_name> <as_token> <hs_token> [username_prefix]", "Register or replace a Matrix server")
 	serverAddCmd.AddTextArgument("Matrix homeserver base URL", "<server_url>", "")

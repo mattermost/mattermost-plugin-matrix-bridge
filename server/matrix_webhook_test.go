@@ -94,11 +94,15 @@ func TestIsGhostUserPerServer(t *testing.T) {
 	plugin.logger = &testLogger{t: t}
 	plugin.kvstore = NewMemoryKVStore()
 
-	// ServerURL hostname is the source of the ghost domain (see serverDomainForID),
-	// so set each server's URL host to match the domain used in its ghost IDs.
+	// Ghost IDs use the homeserver's Matrix ServerName as their domain, which is the
+	// source serverDomainForID uses. Server C below deliberately has a connection
+	// URL host that differs from its ServerName (delegation) to prove recognition
+	// keys off ServerName, not the URL host.
+	const serverCID = "servercservercservercserv03"
 	servers := []kvstore.ServerConfig{
 		{ServerID: serverAID, ServerURL: "https://synapse-a.local", ServerName: "synapse-a.local"},
 		{ServerID: serverBID, ServerURL: "https://synapse-b.local", ServerName: "synapse-b.local"},
+		{ServerID: serverCID, ServerURL: "https://matrix-internal.example.com:8448", ServerName: "example.com"},
 	}
 	data, err := json.Marshal(servers)
 	require.NoError(t, err)
@@ -114,6 +118,15 @@ func TestIsGhostUserPerServer(t *testing.T) {
 		"a real Matrix user is not a ghost")
 	assert.False(t, plugin.isGhostUser("unknown-server-id", ghostA),
 		"an unresolvable server yields false rather than a false positive")
+
+	// Delegation: ghost domain is the ServerName (example.com), not the URL host
+	// (matrix-internal.example.com). Recognizing it proves loop prevention works
+	// when the connection host and the Matrix server name differ.
+	ghostC := "@_mattermost_def456:example.com"
+	assert.True(t, plugin.isGhostUser(serverCID, ghostC),
+		"a ghost is recognized by ServerName even when it differs from the URL host")
+	assert.False(t, plugin.isGhostUser(serverCID, "@_mattermost_def456:matrix-internal.example.com"),
+		"the URL host is NOT the ghost domain under delegation")
 }
 
 func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
