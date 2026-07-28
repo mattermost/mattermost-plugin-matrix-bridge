@@ -95,7 +95,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 
 	// Create plugin instance
-	plugin := &Plugin{remoteID: "test-remote-id"}
+	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.kvstore = NewMemoryKVStore()
 	plugin.logger = &testLogger{t: suite.T()}
@@ -109,20 +109,23 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		plugin.remoteID,
+		testRemoteID,
 	))
 	plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-	}
-	plugin.configuration = config
+	plugin.configuration = &configuration{}
+	seedServerEntry(plugin, kvstore.ServerConfig{
+		ServerID:   testServerID,
+		ServerURL:  suite.matrixContainer.ServerURL,
+		ServerName: suite.matrixContainer.ServerDomain,
+		ASToken:    suite.matrixContainer.ASToken,
+		HSToken:    suite.matrixContainer.HSToken,
+		Enabled:    true,
+		RemoteID:   testRemoteID,
+	})
 
 	// Initialize bridges
-	plugin.initBridges()
 
 	// Store reverse mapping for the Matrix user (simulating existing mapping)
 	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(testServerID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
@@ -139,11 +142,11 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 	}
 
 	// Call SyncPostToMatrix - this should create the DM room with proper name
-	err = plugin.mattermostToMatrixBridge.SyncPostToMatrix(testPost, dmChannelID)
+	err = testOutboundBridge(plugin).SyncPostToMatrix(testPost, dmChannelID)
 	require.NoError(suite.T(), err)
 
 	// Verify that a room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(dmChannelID)
+	dmRoomID, err := testOutboundBridge(plugin).GetMatrixRoomID(dmChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 
@@ -236,7 +239,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 
 	// Create plugin instance
-	plugin := &Plugin{remoteID: "test-remote-id"}
+	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.kvstore = NewMemoryKVStore()
 	plugin.logger = &testLogger{t: suite.T()}
@@ -250,20 +253,23 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		plugin.remoteID,
+		testRemoteID,
 	))
 	plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-	}
-	plugin.configuration = config
+	plugin.configuration = &configuration{}
+	seedServerEntry(plugin, kvstore.ServerConfig{
+		ServerID:   testServerID,
+		ServerURL:  suite.matrixContainer.ServerURL,
+		ServerName: suite.matrixContainer.ServerDomain,
+		ASToken:    suite.matrixContainer.ASToken,
+		HSToken:    suite.matrixContainer.HSToken,
+		Enabled:    true,
+		RemoteID:   testRemoteID,
+	})
 
 	// Initialize bridges
-	plugin.initBridges()
 
 	// Store reverse mapping for the Matrix user
 	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(testServerID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
@@ -280,11 +286,11 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 	}
 
 	// Call SyncPostToMatrix - this should create the group DM room with proper name
-	err = plugin.mattermostToMatrixBridge.SyncPostToMatrix(testPost, groupDMChannelID)
+	err = testOutboundBridge(plugin).SyncPostToMatrix(testPost, groupDMChannelID)
 	require.NoError(suite.T(), err)
 
 	// Verify that a room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(groupDMChannelID)
+	dmRoomID, err := testOutboundBridge(plugin).GetMatrixRoomID(groupDMChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 
@@ -361,7 +367,7 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 
 	// Create plugin instance
-	plugin := &Plugin{remoteID: "test-remote-id"}
+	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.kvstore = NewMemoryKVStore()
 	plugin.logger = &testLogger{t: suite.T()}
@@ -375,20 +381,23 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		plugin.remoteID,
+		testRemoteID,
 	))
 	plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
 	// Set up configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-	}
-	plugin.configuration = config
+	plugin.configuration = &configuration{}
+	seedServerEntry(plugin, kvstore.ServerConfig{
+		ServerID:   testServerID,
+		ServerURL:  suite.matrixContainer.ServerURL,
+		ServerName: suite.matrixContainer.ServerDomain,
+		ASToken:    suite.matrixContainer.ASToken,
+		HSToken:    suite.matrixContainer.HSToken,
+		Enabled:    true,
+		RemoteID:   testRemoteID,
+	})
 
 	// Initialize bridges
-	plugin.initBridges()
 
 	// Store reverse mapping for the Matrix user
 	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(testServerID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
@@ -405,11 +414,11 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 	}
 
 	// Call SyncPostToMatrix - this should create the DM room with fallback name
-	err = plugin.mattermostToMatrixBridge.SyncPostToMatrix(testPost, dmChannelID)
+	err = testOutboundBridge(plugin).SyncPostToMatrix(testPost, dmChannelID)
 	require.NoError(suite.T(), err)
 
 	// Verify that a room mapping was created
-	dmRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(dmChannelID)
+	dmRoomID, err := testOutboundBridge(plugin).GetMatrixRoomID(dmChannelID)
 	require.NoError(suite.T(), err)
 	require.NotEmpty(suite.T(), dmRoomID)
 

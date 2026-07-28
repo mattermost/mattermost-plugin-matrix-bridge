@@ -14,12 +14,6 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// Configuration interface for accessing plugin configuration
-type Configuration interface {
-	GetMatrixServerURL() string
-	GetMatrixServerName() string
-}
-
 // MigrationResult holds the results of a migration operation
 type MigrationResult struct {
 	UserMappingsCreated      int
@@ -29,44 +23,33 @@ type MigrationResult struct {
 	ReverseDMMappingsCreated int
 }
 
-// PluginAccessor defines the interface for plugin functionality needed by command handlers
+// PluginAccessor defines the interface for plugin functionality needed by command
+// handlers. Matrix operations are server-scoped: configured homeservers live in
+// the managed server registry, so callers resolve a serverID (explicitly via
+// `/matrix server` or implicitly as the sole server) and pass it through.
 type PluginAccessor interface {
-	// Matrix client access
-	GetMatrixClient() *matrix.Client
-
 	// Storage access
 	GetKVStore() kvstore.KVStore
-
-	// Configuration access
-	GetConfiguration() Configuration
-
-	// Ghost user management
-	CreateOrGetGhostUser(mattermostUserID string) (string, error)
-
-	// Matrix user mapping access
-	GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error)
 
 	// Mattermost API access
 	GetPluginAPI() plugin.API
 	GetPluginAPIClient() *pluginapi.Client
 
-	// Shared channel access
-	GetRemoteID() string
-
-	// Server registry access
-	GetServerID() string
-
 	// Migration access
 	RunKVStoreMigrations() error
 	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 
-	// Managed server registry access (local multi-server testing). The System
-	// Console UI cannot yet manage more than one server, so these back the
-	// `/matrix server` command that injects additional servers directly.
+	// Managed server registry access. These back the `/matrix server` command
+	// group and the single-server convenience commands.
 	GetManagedServers() ([]kvstore.ServerConfig, error)
-	AddManagedServer(serverURL, serverName, asToken, hsToken, usernamePrefix string) (string, error)
-	RemoveManagedServer(serverID string) (bool, error)
+	AddServer(serverURL, serverName, asToken, hsToken, usernamePrefix string) (string, error)
+	RemoveServer(serverID string) (bool, error)
+
+	// Per-server Matrix operations.
 	GetMatrixClientForServer(serverID string) *matrix.Client
+	GetRemoteIDForServer(serverID string) string
+	CreateOrGetGhostUserForServer(serverID, mattermostUserID string) (string, error)
+	GetMatrixUserIDFromMattermostUserForServer(serverID, mattermostUserID string) (string, error)
 }
 
 // sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
@@ -107,8 +90,8 @@ func sanitizeShareName(name string) string {
 }
 
 // syncChannelMembersToMatrixRoom creates ghost users for all channel members and joins them to the Matrix room
-func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID string) (int, int, error) {
-	matrixClient := c.plugin.GetMatrixClient()
+func (c *Handler) syncChannelMembersToMatrixRoom(serverID, channelID, roomID string) (int, int, error) {
+	matrixClient := c.plugin.GetMatrixClientForServer(serverID)
 	if matrixClient == nil {
 		return 0, 0, errors.New("matrix client not available")
 	}
@@ -143,7 +126,7 @@ func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID string) (int,
 
 			if user.IsRemote() {
 				// This is a Matrix-originated user - invite the original Matrix user to the room
-				originalMatrixUserID, err := c.plugin.GetMatrixUserIDFromMattermostUser(user.Id)
+				originalMatrixUserID, err := c.plugin.GetMatrixUserIDFromMattermostUserForServer(serverID, user.Id)
 				if err != nil {
 					c.client.Log.Warn("Failed to get original Matrix user ID for remote user", "error", err, "user_id", user.Id, "username", user.Username)
 					continue
@@ -158,7 +141,7 @@ func (c *Handler) syncChannelMembersToMatrixRoom(channelID, roomID string) (int,
 				}
 			} else {
 				// This is a local Mattermost user - create ghost user and join to room
-				ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
+				ghostUserID, err := c.plugin.CreateOrGetGhostUserForServer(serverID, user.Id)
 				if err != nil {
 					c.client.Log.Warn("Failed to create or get ghost user", "error", err, "user_id", user.Id, "username", user.Username)
 					continue
@@ -204,7 +187,7 @@ const (
 	matrixCommandTrigger = "matrix"
 
 	// Main command usage
-	matrixCommandUsage = "Usage: /matrix [test|create|map|unmap|list|status|migrate] [room_name|room_alias|room_id]"
+	matrixCommandUsage = "Usage: /matrix [test|create|map|unmap|list|status|migrate|server] [room_name|room_alias|room_id]"
 
 	// Subcommand descriptions for autocomplete
 	testCommandDesc    = "Test Matrix server connection and configuration"
@@ -217,14 +200,18 @@ const (
 	listCommandDesc    = "List all channel-to-room mappings"
 	statusCommandDesc  = "Show bridge status"
 	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings"
-	serverCommandDesc  = "Manage additional Matrix servers (admin only, local multi-server testing)"
+	serverCommandDesc  = "Manage Matrix servers (admin only)"
 
 	// server subcommand usage
-	serverCommandUsage = "Usage: /matrix server [list|add|remove|map]\n" +
+	serverCommandUsage = "Usage: /matrix server [list|add|remove|map|unmap|registration|status]\n" +
 		"• `/matrix server list` - Show all registered Matrix servers\n" +
 		"• `/matrix server add <server_url> <server_name> <as_token> <hs_token> [username_prefix]` - Register/replace a Matrix server\n" +
 		"• `/matrix server remove <server_id>` - Remove a registered Matrix server\n" +
-		"• `/matrix server map <server_id> <room_alias|room_id>` - Map the current channel to a room on a specific server"
+		"• `/matrix server map [server_id] <room_alias|room_id>` - Map the current channel to a room on a server\n" +
+		"• `/matrix server unmap [server_id]` - Remove the current channel's mapping for a server\n" +
+		"• `/matrix server registration [server_id]` - Print the Application Service registration YAML\n" +
+		"• `/matrix server status [server_id]` - Show status for a server\n" +
+		"(server_id may be omitted when only one server is configured)"
 	serverAdminOnlyError = "❌ This command requires System Administrator privileges."
 
 	// Map command usage and validation
@@ -232,8 +219,8 @@ const (
 	roomIdentifierError = "Invalid room identifier format. Use either:\n• Room alias: `#roomname:server.com` (preferred for joining)\n• Room ID: `!roomid:server.com`"
 
 	// Error messages
-	matrixClientNotConfigured = "❌ Matrix client not configured. Please configure Matrix settings in System Console."
-	unknownSubcommandError    = "Unknown subcommand. Use: test, create, map, unmap, list, status, or migrate"
+	matrixClientNotConfigured = "❌ Matrix client not configured. Add a Matrix server with `/matrix server add ...`."
+	unknownSubcommandError    = "Unknown subcommand. Use: test, create, map, unmap, list, status, migrate, or server"
 
 	// Status messages
 	autoJoinSuccess     = "\n\n✅ **Auto-joined** Matrix room successfully!"
@@ -265,9 +252,6 @@ const (
 		"• `/matrix create` - Create new Matrix room using channel name and map to current channel\n" +
 		"• `/matrix create [room_name]` - Create new Matrix room with custom name and map to current channel\n" +
 		"• `/matrix status` - Check bridge status\n"
-
-	// Status command response
-	statusCommandResponse = "Matrix Bridge Status:\n- Plugin: Active\n- Configuration: Check System Console → Plugins → Matrix Bridge\n- Logs: Check plugin logs for connection status"
 
 	// Test command next steps
 	testCommandNextSteps = "\n📋 **Next Steps:**\n" +
@@ -303,8 +287,8 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
 
-	// Server management command (admin only) for local multi-server testing.
-	serverCmd := model.NewAutocompleteData("server", "[list|add|remove|map]", serverCommandDesc)
+	// Server management command (admin only): the supported way to manage servers.
+	serverCmd := model.NewAutocompleteData("server", "[list|add|remove|map|unmap|registration|status]", serverCommandDesc)
 	serverCmd.AddCommand(model.NewAutocompleteData("list", "", "List all registered Matrix servers"))
 	serverAddCmd := model.NewAutocompleteData("add", "<server_url> <server_name> <as_token> <hs_token> [username_prefix]", "Register or replace a Matrix server")
 	serverAddCmd.AddTextArgument("Matrix homeserver base URL", "<server_url>", "")
@@ -316,10 +300,19 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	serverRemoveCmd := model.NewAutocompleteData("remove", "<server_id>", "Remove a registered Matrix server")
 	serverRemoveCmd.AddTextArgument("Server ID (from /matrix server list)", "<server_id>", "")
 	serverCmd.AddCommand(serverRemoveCmd)
-	serverMapCmd := model.NewAutocompleteData("map", "<server_id> <room_alias|room_id>", "Map the current channel to a room on a specific server")
-	serverMapCmd.AddTextArgument("Server ID (from /matrix server list)", "<server_id>", "")
+	serverMapCmd := model.NewAutocompleteData("map", "[server_id] <room_alias|room_id>", "Map the current channel to a room on a server")
+	serverMapCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
 	serverMapCmd.AddTextArgument("Matrix room alias or room ID", "<room_alias|room_id>", "")
 	serverCmd.AddCommand(serverMapCmd)
+	serverUnmapCmd := model.NewAutocompleteData("unmap", "[server_id]", "Remove the current channel's mapping for a server")
+	serverUnmapCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
+	serverCmd.AddCommand(serverUnmapCmd)
+	serverRegistrationCmd := model.NewAutocompleteData("registration", "[server_id]", "Print the Application Service registration YAML")
+	serverRegistrationCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
+	serverCmd.AddCommand(serverRegistrationCmd)
+	serverStatusCmd := model.NewAutocompleteData("status", "[server_id]", "Show status for a Matrix server")
+	serverStatusCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
+	serverCmd.AddCommand(serverStatusCmd)
 	matrixData.AddCommand(serverCmd)
 
 	err := client.SlashCommand.Register(&model.Command{
@@ -355,9 +348,60 @@ func (c *Handler) Handle(args *model.CommandArgs) (*model.CommandResponse, error
 	}
 }
 
-// getMatrixClientOrError gets the current Matrix client or returns an error response if not configured
-func (c *Handler) getMatrixClientOrError() (*matrix.Client, *model.CommandResponse) {
-	matrixClient := c.plugin.GetMatrixClient()
+// resolveServerID resolves the Matrix server a channel-scoped convenience command
+// (map/create/unmap/test) should target. With exactly one server registered it
+// returns that server; with none or several it returns an ephemeral error
+// response guiding the operator to `/matrix server`.
+func (c *Handler) resolveServerID() (string, *model.CommandResponse) {
+	servers, err := c.plugin.GetManagedServers()
+	if err != nil {
+		c.client.Log.Error("Failed to read managed servers", "error", err)
+		return "", ephemeral("❌ Failed to read the server registry. Check plugin logs for details.")
+	}
+	switch len(servers) {
+	case 0:
+		return "", ephemeral("❌ No Matrix server is configured. Add one with `/matrix server add <server_url> <server_name> <as_token> <hs_token> [username_prefix]`.")
+	case 1:
+		return servers[0].ServerID, nil
+	default:
+		return "", ephemeral("Multiple Matrix servers are configured, so this command is ambiguous. Use the `/matrix server` subcommands with an explicit server_id (see `/matrix server list`).")
+	}
+}
+
+// resolveServerIDArg resolves an explicit server_id/domain argument to a serverID.
+// An empty arg falls back to the sole registered server (matching the convenience
+// commands). It returns an ephemeral error response when the arg is empty and the
+// target is ambiguous, or when no server matches the arg.
+func (c *Handler) resolveServerIDArg(arg string) (string, *model.CommandResponse) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return c.resolveServerID()
+	}
+	servers, err := c.plugin.GetManagedServers()
+	if err != nil {
+		c.client.Log.Error("Failed to read managed servers", "error", err)
+		return "", ephemeral("❌ Failed to read the server registry. Check plugin logs for details.")
+	}
+	// Match by serverID first, then by (normalized) domain / URL host.
+	if _, ok := kvstore.ServerConfigForID(servers, arg); ok {
+		return arg, nil
+	}
+	wantHost, _ := matrix.ExtractServerDomain(arg)
+	for _, s := range servers {
+		if s.ServerName == arg {
+			return s.ServerID, nil
+		}
+		if host, herr := matrix.ExtractServerDomain(s.ServerURL); herr == nil && host != "" && (host == arg || (wantHost != "" && host == wantHost)) {
+			return s.ServerID, nil
+		}
+	}
+	return "", ephemeral(fmt.Sprintf("No server found matching `%s`. Use `/matrix server list` to see registered servers.", arg))
+}
+
+// matrixClientForServerOrError returns the Matrix client for serverID, or an
+// ephemeral error response if none is available.
+func (c *Handler) matrixClientForServerOrError(serverID string) (*matrix.Client, *model.CommandResponse) {
+	matrixClient := c.plugin.GetMatrixClientForServer(serverID)
 	if matrixClient == nil {
 		return nil, &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
@@ -368,19 +412,21 @@ func (c *Handler) getMatrixClientOrError() (*matrix.Client, *model.CommandRespon
 }
 
 func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier string) *model.CommandResponse {
-	// `/matrix map` implicitly targets the primary server. When more than one
-	// Matrix server is registered that target is ambiguous, and its single-entry
-	// write would clobber another server's mapping for this channel. Require the
-	// explicit `/matrix server map <server_id> <room>` in that case.
-	if servers, err := c.plugin.GetManagedServers(); err != nil {
-		c.client.Log.Error("Failed to read managed servers", "error", err)
-		return ephemeral("❌ Failed to read the server registry. Check plugin logs for details.")
-	} else if len(servers) > 1 {
-		return ephemeral("Multiple Matrix servers are configured, so `/matrix map` is ambiguous. Use `/matrix server map <server_id> <room>` to choose a server (see `/matrix server list`).")
+	// `/matrix map` targets the sole registered server; with multiple servers the
+	// operator must use `/matrix server map <server_id> <room>`.
+	serverID, errResponse := c.resolveServerID()
+	if errResponse != nil {
+		return errResponse
 	}
+	return c.mapChannelToRoom(args, serverID, roomIdentifier)
+}
 
-	// Get current Matrix client and fail fast if not configured
-	matrixClient, errResponse := c.getMatrixClientOrError()
+// mapChannelToRoom maps the current channel to a Matrix room on the given server,
+// joining the AS bot and the issuer's ghost, writing both mapping directions
+// (upserting so other servers' entries are preserved), and sharing the channel.
+func (c *Handler) mapChannelToRoom(args *model.CommandArgs, serverID, roomIdentifier string) *model.CommandResponse {
+	// Get the target server's Matrix client and fail fast if not configured
+	matrixClient, errResponse := c.matrixClientForServerOrError(serverID)
 	if errResponse != nil {
 		return errResponse
 	}
@@ -419,7 +465,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 			joinStatus = autoJoinSuccess
 		} else {
 			// Create or get ghost user for the command issuer
-			ghostUserID, err := c.plugin.CreateOrGetGhostUser(user.Id)
+			ghostUserID, err := c.plugin.CreateOrGetGhostUserForServer(serverID, user.Id)
 			if err != nil {
 				c.client.Log.Warn("Failed to create or get ghost user for command issuer", "error", err, "user_id", user.Id)
 				joinStatus = autoJoinSuccess
@@ -436,10 +482,21 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		}
 	}
 
-	// Save both directions of the mapping
-	serverID := c.plugin.GetServerID()
+	// Save both directions of the mapping. Upsert the forward value so a channel
+	// already bridged to another server keeps that entry.
 	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
-	mappingValue, err := kvstore.BuildSingleChannelMapping(serverID, roomIdentifier)
+	existingMapping, err := c.kvstore.Get(mappingKey)
+	if err != nil {
+		c.client.Log.Error("Failed to read channel mapping", "error", err, "channel_id", args.ChannelId)
+		return ephemeral(fmt.Sprintf("❌ Failed to read the existing channel mapping. Check plugin logs for details.%s", joinStatus))
+	}
+	channelMappings, err := kvstore.ParseChannelServerMappings(existingMapping)
+	if err != nil {
+		c.client.Log.Error("Corrupt channel mapping value", "error", err, "channel_id", args.ChannelId)
+		return ephemeral(fmt.Sprintf("❌ The existing channel mapping is corrupt. Use `/matrix unmap` and try again.%s", joinStatus))
+	}
+	channelMappings = kvstore.UpsertChannelServerMapping(channelMappings, serverID, roomIdentifier)
+	mappingValue, err := kvstore.MarshalChannelServerMappings(channelMappings)
 	if err == nil {
 		err = c.kvstore.Set(mappingKey, mappingValue)
 	}
@@ -488,23 +545,28 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 
 	if roomName != "" {
 		// Create bridge alias
-		serverDomain := c.extractServerDomain()
-		bridgeAlias := "#mattermost-bridge-" + roomName + ":" + serverDomain
+		serverDomain, domainErr := c.extractServerDomain(serverID)
+		if domainErr != nil {
+			c.client.Log.Warn("Failed to resolve server domain for bridge filtering alias", "error", domainErr, "server_id", serverID)
+			// Continue - mapping still works, just no filtering alias
+		} else {
+			bridgeAlias := "#mattermost-bridge-" + roomName + ":" + serverDomain
 
-		// Resolve room identifier to room ID (handles both aliases and room IDs)
-		roomID, err := matrixClient.ResolveRoomAlias(roomIdentifier)
-		if err != nil {
-			c.client.Log.Warn("Failed to resolve room identifier for bridge alias", "error", err, "room_identifier", roomIdentifier)
-			roomID = ""
-		}
-
-		if roomID != "" {
-			err = matrixClient.AddRoomAlias(roomID, bridgeAlias)
+			// Resolve room identifier to room ID (handles both aliases and room IDs)
+			roomID, err := matrixClient.ResolveRoomAlias(roomIdentifier)
 			if err != nil {
-				c.client.Log.Warn("Failed to add bridge filtering alias for manual mapping", "error", err, "bridge_alias", bridgeAlias, "room_id", roomID)
-				// Continue - mapping still works, just no filtering alias
-			} else {
-				c.client.Log.Info("Successfully added bridge filtering alias for manual mapping", "room_id", roomID, "bridge_alias", bridgeAlias, "original_identifier", roomIdentifier)
+				c.client.Log.Warn("Failed to resolve room identifier for bridge alias", "error", err, "room_identifier", roomIdentifier)
+				roomID = ""
+			}
+
+			if roomID != "" {
+				err = matrixClient.AddRoomAlias(roomID, bridgeAlias)
+				if err != nil {
+					c.client.Log.Warn("Failed to add bridge filtering alias for manual mapping", "error", err, "bridge_alias", bridgeAlias, "room_id", roomID)
+					// Continue - mapping still works, just no filtering alias
+				} else {
+					c.client.Log.Info("Successfully added bridge filtering alias for manual mapping", "room_id", roomID, "bridge_alias", bridgeAlias, "original_identifier", roomIdentifier)
+				}
 			}
 		}
 	}
@@ -517,7 +579,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 		roomID = resolvedRoomID
 	}
 
-	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(args.ChannelId, roomID)
+	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(serverID, args.ChannelId, roomID)
 	if syncErr != nil {
 		c.client.Log.Error("Failed to sync channel members to Matrix room", "error", syncErr, "room_id", roomID, "channel_id", args.ChannelId)
 		memberSyncStatus = roomMemberSyncFailed
@@ -536,7 +598,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	}
 
 	// Share the channel and invite this plugin to receive sync messages
-	shareStatus := c.shareChannelAndInvitePlugin(args, channelName, fmt.Sprintf("Mapped to Matrix room: %s", roomIdentifier))
+	shareStatus := c.shareChannelAndInvitePlugin(args, channelName, fmt.Sprintf("Mapped to Matrix room: %s", roomIdentifier), serverID)
 
 	return &model.CommandResponse{
 		ResponseType: model.CommandResponseTypeEphemeral,
@@ -544,7 +606,7 @@ func (c *Handler) executeMapCommand(args *model.CommandArgs, roomIdentifier stri
 	}
 }
 
-func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandResponse {
+func (c *Handler) executeUnmapCommand(args *model.CommandArgs, serverID string) *model.CommandResponse {
 	// Get channel info for display
 	channel, appErr := c.client.Channel.Get(args.ChannelId)
 	channelName := args.ChannelId
@@ -556,7 +618,6 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 	}
 
 	// Check if this channel has a Matrix room mapping
-	serverID := c.plugin.GetServerID()
 	channelMappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
 	roomIDBytes, err := c.kvstore.Get(channelMappingKey)
 
@@ -587,7 +648,7 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 	}
 
 	// Clear the Matrix room state to prevent fallback lookups - this is critical
-	matrixClient := c.plugin.GetMatrixClient()
+	matrixClient := c.plugin.GetMatrixClientForServer(serverID)
 	if matrixClient == nil {
 		c.client.Log.Error("Matrix client not available, cannot clear room state", "room_id", matrixRoomIdentifier)
 		return &model.CommandResponse{
@@ -606,12 +667,34 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 
 	c.client.Log.Info("Successfully cleared Matrix room state", "room_id", matrixRoomIdentifier)
 
-	// Remove the channel->room mapping
-	if err := c.kvstore.Delete(channelMappingKey); err != nil {
-		c.client.Log.Error("Failed to remove channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         "❌ **Error:** Failed to remove channel mapping. Check plugin logs for details.",
+	// Remove only this server's entry from the channel->room mapping, preserving
+	// any other servers this channel is bridged to. Delete the key entirely only
+	// when no mappings remain.
+	remaining := make([]kvstore.ChannelServerMapping, 0, len(mappings))
+	for _, m := range mappings {
+		if m.ServerID != serverID {
+			remaining = append(remaining, m)
+		}
+	}
+	if len(remaining) == 0 {
+		if err := c.kvstore.Delete(channelMappingKey); err != nil {
+			c.client.Log.Error("Failed to remove channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
+			return &model.CommandResponse{
+				ResponseType: model.CommandResponseTypeEphemeral,
+				Text:         "❌ **Error:** Failed to remove channel mapping. Check plugin logs for details.",
+			}
+		}
+	} else {
+		value, mErr := kvstore.MarshalChannelServerMappings(remaining)
+		if mErr == nil {
+			mErr = c.kvstore.Set(channelMappingKey, value)
+		}
+		if mErr != nil {
+			c.client.Log.Error("Failed to update channel mapping", "error", mErr, "channel_id", args.ChannelId)
+			return &model.CommandResponse{
+				ResponseType: model.CommandResponseTypeEphemeral,
+				Text:         "❌ **Error:** Failed to update channel mapping. Check plugin logs for details.",
+			}
 		}
 	}
 
@@ -624,17 +707,27 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 
 	c.client.Log.Info("Removed Matrix room mapping", "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
 
-	// Uninvite this plugin from the shared channel
-	uninviteErr := c.pluginAPI.UninviteRemoteFromChannel(args.ChannelId, c.plugin.GetRemoteID())
-
+	// Uninvite this plugin from the shared channel only when the channel is no
+	// longer bridged to any server; otherwise the remaining server still needs it.
+	remoteID := c.plugin.GetRemoteIDForServer(serverID)
 	var responseIcon, responseTitle, uninviteStatus string
+	if len(remaining) > 0 {
+		responseIcon = "✅"
+		responseTitle = "**Mapping Removed**"
+		uninviteStatus = "\n\n_Channel is still bridged to another Matrix server; the shared-channel remote was left in place._"
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         fmt.Sprintf("%s %s\n\n**Channel:** %s\n**Matrix Room:** `%s`%s", responseIcon, responseTitle, channelName, matrixRoomIdentifier, uninviteStatus),
+		}
+	}
+	uninviteErr := c.pluginAPI.UninviteRemoteFromChannel(args.ChannelId, remoteID)
 	if uninviteErr != nil {
-		c.client.Log.Warn("Failed to uninvite plugin from shared channel", "error", uninviteErr, "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		c.client.Log.Warn("Failed to uninvite plugin from shared channel", "error", uninviteErr, "channel_id", args.ChannelId, "remote_id", remoteID)
 		responseIcon = "⚠️"
 		responseTitle = "**Mapping Partially Removed**"
 		uninviteStatus = "\n\n⚠️ **Note:** Failed to uninvite plugin from shared channel. The channel may still receive some sync events."
 	} else {
-		c.client.Log.Info("Successfully uninvited plugin from shared channel", "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		c.client.Log.Info("Successfully uninvited plugin from shared channel", "channel_id", args.ChannelId, "remote_id", remoteID)
 		responseIcon = "✅"
 		responseTitle = "**Mapping Removed**"
 		uninviteStatus = "\n\n✅ **Plugin uninvited** from shared channel successfully!"
@@ -647,8 +740,15 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs) *model.CommandRes
 }
 
 func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName string, publish bool) *model.CommandResponse {
-	// Get current Matrix client and fail fast if not configured
-	matrixClient, errResponse := c.getMatrixClientOrError()
+	// `/matrix create` targets the sole registered server; with multiple servers
+	// the operator must add the room manually and use `/matrix server map`.
+	serverID, errResponse := c.resolveServerID()
+	if errResponse != nil {
+		return errResponse
+	}
+
+	// Get the target server's Matrix client and fail fast if not configured
+	matrixClient, errResponse := c.matrixClientForServerOrError(serverID)
 	if errResponse != nil {
 		return errResponse
 	}
@@ -672,7 +772,14 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 
 	// Create the Matrix room
 	// Extract server domain from Matrix server URL
-	serverDomain := c.extractServerDomain()
+	serverDomain, domainErr := c.extractServerDomain(serverID)
+	if domainErr != nil {
+		c.client.Log.Error("Failed to resolve server domain for Matrix room creation", "error", domainErr, "server_id", serverID)
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         fmt.Sprintf("❌ Failed to determine Matrix server domain for '%s'. Check plugin logs for details.", roomName),
+		}
+	}
 	roomID, err := matrixClient.CreateRoom(roomName, topic, serverDomain, publish, args.ChannelId)
 	if err != nil {
 		c.client.Log.Error("Failed to create Matrix room", "error", err, "room_name", roomName)
@@ -686,7 +793,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 
 	// Sync all channel members to the newly created Matrix room
 	var joinStatus string
-	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(args.ChannelId, roomID)
+	joinedCount, totalMembers, syncErr := c.syncChannelMembersToMatrixRoom(serverID, args.ChannelId, roomID)
 	if syncErr != nil {
 		c.client.Log.Error("Failed to sync channel members to Matrix room", "error", syncErr, "room_id", roomID, "channel_id", args.ChannelId)
 		joinStatus = roomMemberSyncFailed
@@ -704,8 +811,8 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 		}
 	}
 
-	// Automatically map the created room to this channel (both directions)
-	serverID := c.plugin.GetServerID()
+	// Automatically map the created room to this channel (both directions). The
+	// room is brand new, so a single-entry mapping is correct here.
 	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
 	mappingValue, mErr := kvstore.BuildSingleChannelMapping(serverID, roomID)
 	if mErr == nil {
@@ -727,7 +834,7 @@ func (c *Handler) executeCreateRoomCommand(args *model.CommandArgs, roomName str
 	}
 
 	// Share the channel and invite this plugin to receive sync messages
-	shareStatus := c.shareChannelAndInvitePlugin(args, channelName, topic)
+	shareStatus := c.shareChannelAndInvitePlugin(args, channelName, topic, serverID)
 
 	// Build status message based on publish parameter
 	publishStatus := ""
@@ -747,9 +854,9 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	var responseText strings.Builder
 	responseText.WriteString("**Channel-to-Room Mappings:**\n\n")
 
-	// Get channel mapping keys using efficient prefix filtering
-	serverID := c.plugin.GetServerID()
-	mappings := make(map[string]string)
+	// Collect every channel's mappings across all servers; a channel may be
+	// bridged to rooms on several servers.
+	mappings := make(map[string][]kvstore.ChannelServerMapping)
 	channelMappingPrefix := kvstore.KeyPrefixChannelMapping
 	page := 0
 	batchSize := 1000
@@ -769,7 +876,6 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 			break // No more keys
 		}
 
-		// Build mappings directly (no need to filter since prefix filtering is server-side)
 		for _, key := range keys {
 			channelID := strings.TrimPrefix(key, channelMappingPrefix)
 			roomIDBytes, err := c.kvstore.Get(key)
@@ -781,8 +887,8 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 				c.client.Log.Warn("Failed to parse channel mapping value", "channel_id", channelID, "error", parseErr)
 				continue
 			}
-			if roomID := kvstore.RoomIDForServer(channelMappings, serverID); roomID != "" {
-				mappings[channelID] = roomID
+			if len(channelMappings) > 0 {
+				mappings[channelID] = channelMappings
 			}
 		}
 
@@ -794,13 +900,21 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 		page++
 	}
 
+	// renderRooms formats a channel's mappings as "`room` (server)" segments.
+	renderRooms := func(entries []kvstore.ChannelServerMapping) string {
+		parts := make([]string, 0, len(entries))
+		for _, e := range entries {
+			parts = append(parts, fmt.Sprintf("`%s` (`%s`)", e.RoomID, e.ServerID))
+		}
+		return strings.Join(parts, ", ")
+	}
+
 	if len(mappings) == 0 {
 		responseText.WriteString("No channel mappings found.\n\n")
 		responseText.WriteString(getStartedHelp)
 	} else {
 		// Show current channel first if it has a mapping
-		currentChannelMapping := mappings[args.ChannelId]
-		if currentChannelMapping != "" {
+		if current := mappings[args.ChannelId]; len(current) > 0 {
 			channel, appErr := c.client.Channel.Get(args.ChannelId)
 			channelName := args.ChannelId
 			if appErr == nil {
@@ -809,12 +923,12 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 					channelName = channel.Name
 				}
 			}
-			responseText.WriteString(fmt.Sprintf("**Current Channel:** %s → `%s`\n\n", channelName, currentChannelMapping))
+			responseText.WriteString(fmt.Sprintf("**Current Channel:** %s → %s\n\n", channelName, renderRooms(current)))
 		}
 
 		// Show all mappings
-		responseText.WriteString(fmt.Sprintf("**All Mappings (%d total):**\n", len(mappings)))
-		for channelID, roomID := range mappings {
+		responseText.WriteString(fmt.Sprintf("**All Mappings (%d channels):**\n", len(mappings)))
+		for channelID, entries := range mappings {
 			// Get channel info
 			channel, appErr := c.client.Channel.Get(channelID)
 			channelName := channelID
@@ -831,7 +945,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 				currentMarker = " *(current)*"
 			}
 
-			responseText.WriteString(fmt.Sprintf("• %s → `%s`%s\n", channelName, roomID, currentMarker))
+			responseText.WriteString(fmt.Sprintf("• %s → %s%s\n", channelName, renderRooms(entries), currentMarker))
 		}
 	}
 
@@ -919,14 +1033,15 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 		roomID := fields[2]
 		return c.executeMapCommand(args, roomID)
 	case "unmap":
-		return c.executeUnmapCommand(args)
+		serverID, errResponse := c.resolveServerID()
+		if errResponse != nil {
+			return errResponse
+		}
+		return c.executeUnmapCommand(args, serverID)
 	case "list":
 		return c.executeListMappingsCommand(args)
 	case "status":
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         statusCommandResponse,
-		}
+		return c.executeStatusCommand()
 	case "migrate":
 		return c.executeMigrateCommand(args)
 	case "server":
@@ -940,8 +1055,8 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 }
 
 // executeServerCommand handles the admin-only `/matrix server` subcommand group,
-// which injects additional Matrix servers into the registry for local
-// multi-server testing (the System Console UI supports only one server today).
+// the supported way to manage Matrix homeservers (the registry is the sole source
+// of truth) until the admin UI lands.
 func (c *Handler) executeServerCommand(args *model.CommandArgs, fields []string) *model.CommandResponse {
 	// Gate on System Administrator: this writes bridge routing config.
 	if !c.pluginAPI.HasPermissionTo(args.UserId, model.PermissionManageSystem) {
@@ -961,6 +1076,12 @@ func (c *Handler) executeServerCommand(args *model.CommandArgs, fields []string)
 		return c.executeServerRemoveCommand(fields)
 	case "map":
 		return c.executeServerMapCommand(args, fields)
+	case "unmap":
+		return c.executeServerUnmapCommand(args, fields)
+	case "registration":
+		return c.executeServerRegistrationCommand(fields)
+	case "status":
+		return c.executeServerStatusCommand(fields)
 	default:
 		return ephemeral(serverCommandUsage)
 	}
@@ -983,13 +1104,14 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 		if s.Enabled {
 			enabled = "enabled"
 		}
-		injected := ""
-		if s.Injected {
-			injected = " _(injected)_"
-		}
-		fmt.Fprintf(&b, "\n• **%s** (`%s`)%s\n", s.ServerName, s.ServerID, injected)
+		// ServerName (the Matrix domain) is optional — it may be empty when the
+		// server relies on .well-known discovery (typical for the migrated
+		// single-server entry). Fall back to the URL host so the row is legible.
+		displayName := serverDisplayName(s)
+		fmt.Fprintf(&b, "\n• **%s** (`%s`)\n", displayName, s.ServerID)
 		fmt.Fprintf(&b, "  - URL: `%s`\n", s.ServerURL)
 		fmt.Fprintf(&b, "  - Username prefix: `%s`\n", s.UsernamePrefix)
+		fmt.Fprintf(&b, "  - Mapped channels: %d\n", c.countMappedChannels(s.ServerID))
 		fmt.Fprintf(&b, "  - Status: %s\n", enabled)
 	}
 	return ephemeral(b.String())
@@ -1009,7 +1131,7 @@ func (c *Handler) executeServerAddCommand(fields []string) *model.CommandRespons
 		usernamePrefix = fields[7]
 	}
 
-	serverID, err := c.plugin.AddManagedServer(serverURL, serverName, asToken, hsToken, usernamePrefix)
+	serverID, err := c.plugin.AddServer(serverURL, serverName, asToken, hsToken, usernamePrefix)
 	if err != nil {
 		c.client.Log.Error("Failed to add managed server", "error", err, "server_url", serverURL)
 		return ephemeral(fmt.Sprintf("❌ Failed to add server: %s", err.Error()))
@@ -1026,7 +1148,7 @@ func (c *Handler) executeServerRemoveCommand(fields []string) *model.CommandResp
 	}
 	serverID := fields[3]
 
-	removed, err := c.plugin.RemoveManagedServer(serverID)
+	removed, err := c.plugin.RemoveServer(serverID)
 	if err != nil {
 		c.client.Log.Error("Failed to remove managed server", "error", err, "server_id", serverID)
 		return ephemeral(fmt.Sprintf("❌ Failed to remove server: %s", err.Error()))
@@ -1036,90 +1158,197 @@ func (c *Handler) executeServerRemoveCommand(fields []string) *model.CommandResp
 	}
 
 	c.client.Log.Info("Removed managed Matrix server", "server_id", serverID)
-	return ephemeral(fmt.Sprintf("✅ Removed server `%s`.\n\nNote: the primary server from the System Console configuration is re-added automatically; only injected servers can be removed permanently.", serverID))
+	return ephemeral(fmt.Sprintf("✅ Removed server `%s`.\n\nSyncing for this server has stopped. Channel content is not deleted; re-add the same URL to resume.", serverID))
 }
 
-// executeServerMapCommand maps the current channel to a Matrix room on a specific
-// registered server. Unlike `/matrix map`, which always targets the primary
-// server, this stores the mapping under the chosen server's namespace so inbound
-// events from that homeserver route to this channel. It upserts the channel
-// mapping so a channel already bridged to another server keeps that mapping.
-func (c *Handler) executeServerMapCommand(args *model.CommandArgs, fields []string) *model.CommandResponse {
-	// /matrix server map <server_id> <room_alias|room_id>
-	if len(fields) < 5 {
-		return ephemeral(serverCommandUsage)
-	}
-	serverID := fields[3]
-	roomIdentifier := fields[4]
-
+// executeStatusCommand shows the bridge status for every configured Matrix
+// server: whether it is enabled, its live connection health, and how many
+// channels are mapped to it. It is available to all users (no admin gate) and
+// exposes no secrets (tokens are never shown).
+func (c *Handler) executeStatusCommand() *model.CommandResponse {
 	servers, err := c.plugin.GetManagedServers()
 	if err != nil {
 		c.client.Log.Error("Failed to read managed servers", "error", err)
 		return ephemeral("❌ Failed to read the server registry. Check plugin logs for details.")
 	}
-	if _, ok := kvstore.ServerConfigForID(servers, serverID); !ok {
-		return ephemeral(fmt.Sprintf("No server found with ID `%s`. Use `/matrix server list` to see registered servers.", serverID))
+
+	var b strings.Builder
+	b.WriteString("**Matrix Bridge Status**\n")
+	if len(servers) == 0 {
+		b.WriteString("\nNo Matrix servers are configured. Add one with `/matrix server add <server_url> <server_name> <as_token> <hs_token> [username_prefix]`.")
+		return ephemeral(b.String())
 	}
 
-	// Resolve the room alias to a room ID and join the AS bot using the target
-	// server's client, so inbound events for the room reach the plugin. The client
-	// is best-effort: if it is unavailable, the identifier is stored as given.
-	roomID := roomIdentifier
-	var joinStatus string
-	if client := c.plugin.GetMatrixClientForServer(serverID); client != nil {
-		if resolved, resolveErr := client.ResolveRoomAlias(roomIdentifier); resolveErr == nil && resolved != "" {
-			roomID = resolved
-		}
-		if joinErr := client.JoinRoom(roomIdentifier); joinErr != nil {
-			c.client.Log.Warn("Failed to join room on target server", "error", joinErr, "server_id", serverID, "room", roomIdentifier)
-			joinStatus = "\n\n⚠️ Could not join the room as the bridge bot; make sure the room exists and is joinable on that server."
-		}
+	fmt.Fprintf(&b, "\n%d server(s) configured:\n", len(servers))
+	for _, s := range servers {
+		b.WriteString("\n")
+		c.writeServerStatus(&b, s)
+	}
+	return ephemeral(b.String())
+}
+
+// executeServerStatusCommand shows the bridge status for a single server. The
+// server_id may be omitted when only one server is configured.
+//
+//	/matrix server status [server_id]
+func (c *Handler) executeServerStatusCommand(fields []string) *model.CommandResponse {
+	serverArg := ""
+	if len(fields) >= 4 {
+		serverArg = fields[3]
+	}
+	serverID, errResponse := c.resolveServerIDArg(serverArg)
+	if errResponse != nil {
+		return errResponse
+	}
+	server, ok := c.serverConfig(serverID)
+	if !ok {
+		return ephemeral(fmt.Sprintf("No server found with ID `%s`. Use `/matrix server list`.", serverID))
+	}
+
+	var b strings.Builder
+	b.WriteString("**Matrix Server Status**\n\n")
+	c.writeServerStatus(&b, server)
+	return ephemeral(b.String())
+}
+
+// writeServerStatus appends a per-server status block: display name/ID, enabled
+// flag, live connection health (only probed for enabled servers), and mapped
+// channel count.
+func (c *Handler) writeServerStatus(b *strings.Builder, s kvstore.ServerConfig) {
+	fmt.Fprintf(b, "• **%s** (`%s`)\n", serverDisplayName(s), s.ServerID)
+	fmt.Fprintf(b, "  - URL: `%s`\n", s.ServerURL)
+	if !s.Enabled {
+		b.WriteString("  - Status: ⏸️ disabled (not syncing)\n")
 	} else {
-		joinStatus = "\n\n⚠️ No Matrix client is built for that server yet, so the room alias was not resolved. Pass a room ID (`!...`) if inbound events do not arrive."
+		b.WriteString("  - Status: enabled\n")
+		fmt.Fprintf(b, "  - Connection: %s\n", c.serverConnectionStatus(s.ServerID))
 	}
+	fmt.Fprintf(b, "  - Mapped channels: %d\n", c.countMappedChannels(s.ServerID))
+}
 
-	channelName := args.ChannelId
-	if channel, appErr := c.client.Channel.Get(args.ChannelId); appErr == nil {
-		if channel.DisplayName != "" {
-			channelName = channel.DisplayName
-		} else if channel.Name != "" {
-			channelName = channel.Name
+// serverConnectionStatus returns a human-readable connectivity result for a
+// server, performing a live TestConnection against its Matrix client.
+func (c *Handler) serverConnectionStatus(serverID string) string {
+	client := c.plugin.GetMatrixClientForServer(serverID)
+	if client == nil {
+		return "❌ client not initialized"
+	}
+	if err := client.TestConnection(); err != nil {
+		c.client.Log.Warn("Matrix server connection test failed", "server_id", serverID, "error", err)
+		return "❌ connection failed (see plugin logs)"
+	}
+	return "✅ connected"
+}
+
+// countMappedChannels returns how many channels are bridged to the given server.
+func (c *Handler) countMappedChannels(serverID string) int {
+	count := 0
+	page := 0
+	batchSize := 1000
+	for {
+		keys, err := c.kvstore.ListKeysWithPrefix(page, batchSize, kvstore.KeyPrefixChannelMapping)
+		if err != nil || len(keys) == 0 {
+			break
 		}
+		for _, key := range keys {
+			value, gErr := c.kvstore.Get(key)
+			if gErr != nil || len(value) == 0 {
+				continue
+			}
+			mappings, pErr := kvstore.ParseChannelServerMappings(value)
+			if pErr != nil {
+				continue
+			}
+			if kvstore.RoomIDForServer(mappings, serverID) != "" {
+				count++
+			}
+		}
+		if len(keys) < batchSize {
+			break
+		}
+		page++
+	}
+	return count
+}
+
+// executeServerMapCommand maps the current channel to a Matrix room on a specific
+// registered server. The server_id may be omitted when only one server exists.
+// It reuses mapChannelToRoom, which upserts the mapping so a channel already
+// bridged to another server keeps that mapping.
+//
+//	/matrix server map [server_id] <room_alias|room_id>
+func (c *Handler) executeServerMapCommand(args *model.CommandArgs, fields []string) *model.CommandResponse {
+	serverArg, roomIdentifier, ok := parseOptionalServerArg(fields, 3)
+	if !ok {
+		return ephemeral(serverCommandUsage)
+	}
+	serverID, errResponse := c.resolveServerIDArg(serverArg)
+	if errResponse != nil {
+		return errResponse
+	}
+	return c.mapChannelToRoom(args, serverID, roomIdentifier)
+}
+
+// executeServerUnmapCommand removes the current channel's mapping for a specific
+// server. The server_id may be omitted when only one server exists.
+//
+//	/matrix server unmap [server_id]
+func (c *Handler) executeServerUnmapCommand(args *model.CommandArgs, fields []string) *model.CommandResponse {
+	serverArg := ""
+	if len(fields) >= 4 {
+		serverArg = fields[3]
+	}
+	serverID, errResponse := c.resolveServerIDArg(serverArg)
+	if errResponse != nil {
+		return errResponse
+	}
+	return c.executeUnmapCommand(args, serverID)
+}
+
+// executeServerRegistrationCommand outputs the Application Service registration
+// YAML for a server, built server-side from its registry entry. The server_id may
+// be omitted when only one server exists.
+//
+//	/matrix server registration [server_id]
+func (c *Handler) executeServerRegistrationCommand(fields []string) *model.CommandResponse {
+	serverArg := ""
+	if len(fields) >= 4 {
+		serverArg = fields[3]
+	}
+	serverID, errResponse := c.resolveServerIDArg(serverArg)
+	if errResponse != nil {
+		return errResponse
+	}
+	servers, err := c.plugin.GetManagedServers()
+	if err != nil {
+		c.client.Log.Error("Failed to read managed servers", "error", err)
+		return ephemeral("❌ Failed to read the server registry. Check plugin logs for details.")
+	}
+	server, ok := kvstore.ServerConfigForID(servers, serverID)
+	if !ok {
+		return ephemeral(fmt.Sprintf("No server found with ID `%s`. Use `/matrix server list`.", serverID))
 	}
 
-	// Upsert the forward mapping so other servers' entries for this channel are
-	// preserved, then store the reverse mapping under the target server.
-	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
-	existing, err := c.kvstore.Get(mappingKey)
-	if err != nil {
-		c.client.Log.Error("Failed to read channel mapping", "error", err, "channel_id", args.ChannelId)
-		return ephemeral("❌ Failed to read the existing channel mapping. Check plugin logs for details.")
+	siteURL := ""
+	if cfg := c.pluginAPI.GetConfig(); cfg != nil && cfg.ServiceSettings.SiteURL != nil {
+		siteURL = *cfg.ServiceSettings.SiteURL
 	}
-	mappings, err := kvstore.ParseChannelServerMappings(existing)
-	if err != nil {
-		c.client.Log.Error("Corrupt channel mapping value", "error", err, "channel_id", args.ChannelId)
-		return ephemeral("❌ The existing channel mapping is corrupt. Use `/matrix unmap` and try again.")
-	}
-	mappings = kvstore.UpsertChannelServerMapping(mappings, serverID, roomID)
-	value, err := kvstore.MarshalChannelServerMappings(mappings)
-	if err != nil {
-		c.client.Log.Error("Failed to marshal channel mapping", "error", err, "channel_id", args.ChannelId)
-		return ephemeral("❌ Failed to save the channel mapping. Check plugin logs for details.")
-	}
-	if err := c.kvstore.Set(mappingKey, value); err != nil {
-		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId)
-		return ephemeral("❌ Failed to save the channel mapping. Check plugin logs for details.")
-	}
-	if err := c.kvstore.Set(kvstore.BuildRoomMappingKey(serverID, roomID), []byte(args.ChannelId)); err != nil {
-		c.client.Log.Error("Failed to save reverse room mapping", "error", err, "server_id", serverID, "room_id", roomID)
-		// The forward mapping is saved; inbound routing still works via it.
-	}
+	yaml := buildRegistrationYAML(server, siteURL)
+	return ephemeral(fmt.Sprintf("**Application Service registration for `%s`**\n\nSave this as `mattermost-bridge-registration.yaml` on the homeserver:\n\n```yaml\n%s\n```", server.ServerName, yaml))
+}
 
-	// Share the channel so inbound posts attribute to the bridge remote.
-	shareStatus := c.shareChannelAndInvitePlugin(args, channelName, fmt.Sprintf("Mapped to Matrix room %s on server %s", roomID, serverID))
-
-	c.client.Log.Info("Mapped channel to room on server", "channel_id", args.ChannelId, "server_id", serverID, "room_id", roomID)
-	return ephemeral(fmt.Sprintf("✅ **Mapping saved**\n\n**Channel:** %s\n**Server:** `%s`\n**Matrix room:** `%s`\n\nInbound events from this room now sync to the channel. (Outbound Mattermost→Matrix for non-primary servers is not yet supported.)%s%s", channelName, serverID, roomID, joinStatus, shareStatus))
+// parseOptionalServerArg parses `[server_id] <value>` starting at index base:
+// with one trailing field the server arg is empty and that field is the value;
+// with two it is (server_id, value). Returns ok=false if no value is present.
+func parseOptionalServerArg(fields []string, base int) (serverArg, value string, ok bool) {
+	switch {
+	case len(fields) == base+1:
+		return "", fields[base], true
+	case len(fields) >= base+2:
+		return fields[base], fields[base+1], true
+	default:
+		return "", "", false
+	}
 }
 
 // ephemeral builds an ephemeral command response with the given text.
@@ -1130,8 +1359,10 @@ func ephemeral(text string) *model.CommandResponse {
 	}
 }
 
-// shareChannelAndInvitePlugin shares a channel and invites this plugin to receive sync messages
-func (c *Handler) shareChannelAndInvitePlugin(args *model.CommandArgs, channelName, purpose string) string {
+// shareChannelAndInvitePlugin shares a channel and invites this plugin's remote
+// for the given Matrix server so it receives sync messages.
+func (c *Handler) shareChannelAndInvitePlugin(args *model.CommandArgs, channelName, purpose, serverID string) string {
+	remoteID := c.plugin.GetRemoteIDForServer(serverID)
 	sharedChannel := &model.SharedChannel{
 		ChannelId:        args.ChannelId,
 		TeamId:           args.TeamId,
@@ -1157,75 +1388,127 @@ func (c *Handler) shareChannelAndInvitePlugin(args *model.CommandArgs, channelNa
 
 	// Invite this plugin to the shared channel to ensure we receive sync messages
 	// This is critical - without this invitation, the channel won't receive sync events
-	inviteErr := c.pluginAPI.InviteRemoteToChannel(args.ChannelId, c.plugin.GetRemoteID(), args.UserId, false)
+	inviteErr := c.pluginAPI.InviteRemoteToChannel(args.ChannelId, remoteID, args.UserId, false)
 	if inviteErr != nil {
-		c.client.Log.Error("Failed to invite plugin to shared channel - bridge will not receive sync events", "error", inviteErr, "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+		c.client.Log.Error("Failed to invite plugin to shared channel - bridge will not receive sync events", "error", inviteErr, "channel_id", args.ChannelId, "remote_id", remoteID)
 		return channelSharingFailed
 	}
 
-	c.client.Log.Info("Successfully invited plugin to shared channel", "channel_id", args.ChannelId, "remote_id", c.plugin.GetRemoteID())
+	c.client.Log.Info("Successfully invited plugin to shared channel", "channel_id", args.ChannelId, "remote_id", remoteID)
 	return channelSharingEnabled
 }
 
-// extractServerDomain extracts the domain from the Matrix server URL
-func (c *Handler) extractServerDomain() string {
-	// Get the current plugin configuration
-	config := c.plugin.GetConfiguration()
-	if config == nil {
-		c.client.Log.Warn("Plugin configuration not available")
-		return "matrix.org" // fallback
+// extractServerDomain resolves the Matrix domain (the part after ':' in user/room
+// IDs) for the given server from the registry, using .well-known discovery when no
+// server name is configured. Returns an error instead of guessing a domain so
+// callers do not build aliases/rooms against the wrong homeserver.
+func (c *Handler) extractServerDomain(serverID string) (string, error) {
+	server, ok := c.serverConfig(serverID)
+	if !ok || server.ServerURL == "" {
+		return "", errors.Errorf("no registry entry for server %q", serverID)
 	}
-
-	serverURL := config.GetMatrixServerURL()
-	if serverURL == "" {
-		c.client.Log.Warn("Matrix server URL not configured")
-		return "matrix.org"
-	}
-
-	// Get the configured server name (if set)
-	configuredServerName := config.GetMatrixServerName()
 
 	// Use ServerDiscovery to determine the server name
 	// This will try: configured name -> .well-known discovery -> hostname fallback
 	logger := matrix.NewAPILogger(c.pluginAPI)
 	discovery := matrix.NewServerDiscovery(logger)
-	serverName, err := discovery.DiscoverServerName(serverURL, configuredServerName)
+	serverName, err := discovery.DiscoverServerName(server.ServerURL, server.ServerName)
 	if err != nil {
-		c.client.Log.Warn("Failed to discover Matrix server name", "url", serverURL, "error", err)
-		return "matrix.org"
+		return "", errors.Wrapf(err, "failed to discover Matrix server name for %q", server.ServerURL)
 	}
 
-	return serverName
+	return serverName, nil
+}
+
+// serverConfig returns the registry entry for serverID.
+func (c *Handler) serverConfig(serverID string) (kvstore.ServerConfig, bool) {
+	servers, err := c.plugin.GetManagedServers()
+	if err != nil {
+		c.client.Log.Error("Failed to read managed servers", "error", err)
+		return kvstore.ServerConfig{}, false
+	}
+	return kvstore.ServerConfigForID(servers, serverID)
+}
+
+// serverDisplayName returns a human-legible label for a server: its Matrix domain
+// (ServerName) when set, otherwise the URL host, otherwise the raw URL, and
+// finally the serverID so a row is never blank.
+func serverDisplayName(s kvstore.ServerConfig) string {
+	if s.ServerName != "" {
+		return s.ServerName
+	}
+	if host, err := matrix.ExtractServerDomain(s.ServerURL); err == nil && host != "" {
+		return host
+	}
+	if s.ServerURL != "" {
+		return s.ServerURL
+	}
+	return s.ServerID
+}
+
+// buildRegistrationYAML builds the Application Service registration file for a
+// server from its registry entry. The namespace domain is the server's Matrix
+// domain (ServerName when set, else the URL host) so it matches how ghost users
+// and room aliases are named. The output matches the format the webapp previously
+// produced for the single-server install.
+func buildRegistrationYAML(server kvstore.ServerConfig, mattermostSiteURL string) string {
+	domain := server.ServerName
+	if domain == "" {
+		if host, err := matrix.ExtractServerDomain(server.ServerURL); err == nil && host != "" {
+			domain = host
+		} else {
+			domain = "matrix.org"
+		}
+	}
+	return fmt.Sprintf(`id: "mattermost-bridge"
+url: "%s/plugins/com.mattermost.plugin-matrix-bridge"
+as_token: "%s"
+hs_token: "%s"
+sender_localpart: "_mattermost_bridge"
+namespaces:
+  users:
+    - exclusive: true
+      regex: "@_mattermost_.*:%s"
+  aliases:
+    - exclusive: true
+      regex: "#_mattermost_.*:%s"
+    - exclusive: false
+      regex: "#mattermost-bridge-.*:%s"
+  rooms:
+    - exclusive: false
+      regex: "!.*:%s"
+rate_limited: false
+protocols: ["mattermost"]
+de.sorunome.msc2409.push_ephemeral: true
+permissions:
+  - "m.room.directory"
+  - "m.room.membership"`,
+		mattermostSiteURL, server.ASToken, server.HSToken, domain, domain, domain, domain)
 }
 
 func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandResponse {
 	var responseText strings.Builder
 	responseText.WriteString("🔍 **Matrix Connection Test**\n\n")
 
-	// Check basic configuration
-	config := c.plugin.GetConfiguration()
-	if config == nil {
-		responseText.WriteString("❌ **Configuration:** Plugin configuration not available\n")
-		return &model.CommandResponse{
-			ResponseType: model.CommandResponseTypeEphemeral,
-			Text:         responseText.String(),
-		}
+	// Resolve the target server (sole server, or error when ambiguous/none).
+	serverID, errResponse := c.resolveServerID()
+	if errResponse != nil {
+		return errResponse
 	}
-
-	serverURL := config.GetMatrixServerURL()
-	if serverURL == "" {
+	server, ok := c.serverConfig(serverID)
+	if !ok || server.ServerURL == "" {
 		responseText.WriteString("❌ **Configuration:** Matrix server URL not set\n")
-		responseText.WriteString("📝 **Action:** Go to System Console → Plugins → Matrix Bridge and set your Matrix server URL\n")
+		responseText.WriteString("📝 **Action:** Add a server with `/matrix server add ...`\n")
 		return &model.CommandResponse{
 			ResponseType: model.CommandResponseTypeEphemeral,
 			Text:         responseText.String(),
 		}
 	}
 
-	responseText.WriteString(fmt.Sprintf("✅ **Server URL:** %s\n", serverURL))
+	responseText.WriteString(fmt.Sprintf("✅ **Server URL:** %s\n", server.ServerURL))
 
-	// Get current Matrix client and check if configured
-	matrixClient := c.plugin.GetMatrixClient()
+	// Get the target server's Matrix client and check if configured
+	matrixClient := c.plugin.GetMatrixClientForServer(serverID)
 	if matrixClient == nil {
 		responseText.WriteString("❌ **Matrix Client:** Not initialized\n")
 		responseText.WriteString("📝 **Action:** Check that Application Service and Homeserver tokens are generated\n")

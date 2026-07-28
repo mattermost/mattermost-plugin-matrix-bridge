@@ -19,8 +19,6 @@ func TestDMChannelDetection(t *testing.T) {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
 	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
-	// Initialize bridges for testing
-	plugin.initBridges()
 
 	api := plugin.API.(*plugintest.API)
 
@@ -45,7 +43,7 @@ func TestDMChannelDetection(t *testing.T) {
 		api.On("GetChannelMembers", channelID, 0, 10).Return(members, nil)
 
 		// Test detection
-		isDM, userIDs, err := plugin.mattermostToMatrixBridge.isDirectChannel(channelID)
+		isDM, userIDs, err := testOutboundBridge(plugin).isDirectChannel(channelID)
 		assert.NoError(t, err)
 		assert.True(t, isDM)
 		assert.Len(t, userIDs, 2)
@@ -77,7 +75,7 @@ func TestDMChannelDetection(t *testing.T) {
 		api.On("GetChannelMembers", channelID, 100, 100).Return(model.ChannelMembers{}, nil)
 
 		// Test detection
-		isDM, userIDs, err := plugin.mattermostToMatrixBridge.isDirectChannel(channelID)
+		isDM, userIDs, err := testOutboundBridge(plugin).isDirectChannel(channelID)
 		assert.NoError(t, err)
 		assert.True(t, isDM)
 		assert.Len(t, userIDs, 3)
@@ -97,7 +95,7 @@ func TestDMChannelDetection(t *testing.T) {
 		api.On("GetChannel", channelID).Return(publicChannel, nil)
 
 		// Test detection
-		isDM, userIDs, err := plugin.mattermostToMatrixBridge.isDirectChannel(channelID)
+		isDM, userIDs, err := testOutboundBridge(plugin).isDirectChannel(channelID)
 		assert.NoError(t, err)
 		assert.False(t, isDM)
 		assert.Nil(t, userIDs)
@@ -112,22 +110,19 @@ func TestDMRoomMapping(t *testing.T) {
 	plugin.maxFileSize = DefaultMaxFileSize
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
-	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
 	plugin.kvstore = NewMemoryKVStore() // Initialize KV store for tests
-
-	// Initialize bridges for testing
-	plugin.initBridges()
+	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
 
 	t.Run("SetAndGetDMRoomMapping", func(t *testing.T) {
 		channelID := model.NewId()
 		matrixRoomID := "!dmroom:matrix.example.com"
 
 		// Test setting room mapping (unified for all channels)
-		err := plugin.mattermostToMatrixBridge.setChannelRoomMapping(channelID, matrixRoomID)
+		err := testOutboundBridge(plugin).setChannelRoomMapping(channelID, matrixRoomID)
 		assert.NoError(t, err)
 
 		// Test getting room mapping
-		retrievedRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(channelID)
+		retrievedRoomID, err := testOutboundBridge(plugin).GetMatrixRoomID(channelID)
 		assert.NoError(t, err)
 		assert.Equal(t, matrixRoomID, retrievedRoomID)
 
@@ -142,7 +137,7 @@ func TestDMRoomMapping(t *testing.T) {
 		nonexistentChannelID := model.NewId()
 
 		// Test getting nonexistent room mapping
-		roomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(nonexistentChannelID)
+		roomID, err := testOutboundBridge(plugin).GetMatrixRoomID(nonexistentChannelID)
 		assert.NoError(t, err) // GetMatrixRoomID returns empty string, not error for missing keys
 		assert.Empty(t, roomID)
 	})

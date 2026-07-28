@@ -44,9 +44,7 @@ func (suite *PluginIntegrationTestSuite) SetupTest() {
 	suite.api = &plugintest.API{}
 
 	// Set up plugin
-	suite.plugin = &Plugin{
-		remoteID: "test-remote-id",
-	}
+	suite.plugin = &Plugin{}
 	suite.plugin.SetAPI(suite.api)
 
 	// Initialize KV store with in-memory implementation
@@ -60,17 +58,19 @@ func (suite *PluginIntegrationTestSuite) SetupTest() {
 	// Reuse the container's Matrix client to share rate limiting state
 	// This prevents rate limit conflicts between container setup and plugin operations
 	setTestMatrixClient(suite.plugin, suite.matrixContainer.Client)
-	// Set configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-		EnableSync:      true,
-	}
-	suite.plugin.configuration = config
+	// Seed the single server entry in the registry.
+	suite.plugin.configuration = &configuration{EnableSync: true}
+	seedServerEntry(suite.plugin, kvstore.ServerConfig{
+		ServerID:   testServerID,
+		ServerURL:  suite.matrixContainer.ServerURL,
+		ServerName: suite.matrixContainer.ServerDomain,
+		ASToken:    suite.matrixContainer.ASToken,
+		HSToken:    suite.matrixContainer.HSToken,
+		Enabled:    true,
+		RemoteID:   testRemoteID,
+	})
 
 	// Initialize bridge components
-	suite.plugin.initBridges()
 }
 
 // TestPluginMatrixOperations tests plugin-level Matrix operations
@@ -93,7 +93,7 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 
 	// Create test channel and set up mapping
 	testChannelID := model.NewId()
-	err = suite.plugin.mattermostToMatrixBridge.setChannelRoomMapping(testChannelID, roomID)
+	err = testOutboundBridge(suite.plugin).setChannelRoomMapping(testChannelID, roomID)
 	require.NoError(suite.T(), err, "Should set up channel room mapping")
 
 	suite.Run("InviteExistingRemoteUser", func() {
@@ -109,7 +109,7 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 		}
 
 		// Set up the remote user with proper remote ID
-		remoteUser.RemoteId = &suite.plugin.remoteID
+		remoteUser.RemoteId = model.NewPointer(testRemoteID)
 
 		// Set up API mocks
 		suite.api.On("GetUser", mattermostUserID).Return(remoteUser, nil)
@@ -151,7 +151,7 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 			Username: "nonexistent",
 			Email:    "nonexistent@example.com",
 		}
-		nonExistentUser.RemoteId = &suite.plugin.remoteID
+		nonExistentUser.RemoteId = model.NewPointer(testRemoteID)
 
 		suite.api.On("GetUser", nonExistentUserID).Return(nonExistentUser, nil)
 
@@ -170,7 +170,7 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 			Username: "remote_" + testUser.Username,
 			Email:    testUser.Username + "@matrix.org",
 		}
-		remoteUser.RemoteId = &suite.plugin.remoteID
+		remoteUser.RemoteId = model.NewPointer(testRemoteID)
 
 		suite.api.On("GetUser", mattermostUserID).Return(remoteUser, nil)
 
@@ -239,7 +239,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 			Username: "remote_" + matrixUser1.Username,
 			Email:    matrixUser1.Username + "@matrix.org",
 		}
-		remoteUser1.RemoteId = &suite.plugin.remoteID
+		remoteUser1.RemoteId = model.NewPointer(testRemoteID)
 
 		remoteUser2ID := model.NewId()
 		remoteUser2 := &model.User{
@@ -247,7 +247,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 			Username: "remote_" + matrixUser2.Username,
 			Email:    matrixUser2.Username + "@matrix.org",
 		}
-		remoteUser2.RemoteId = &suite.plugin.remoteID
+		remoteUser2.RemoteId = model.NewPointer(testRemoteID)
 
 		// Set up API mocks for all users
 		suite.api.On("GetChannel", testChannelID).Return(testChannel, nil)
@@ -287,7 +287,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 		require.NoError(suite.T(), err, "Should set up reverse mapping for remote user 2")
 
 		// Set up channel room mapping
-		err = suite.plugin.mattermostToMatrixBridge.setChannelRoomMapping(testChannelID, roomID)
+		err = testOutboundBridge(suite.plugin).setChannelRoomMapping(testChannelID, roomID)
 		require.NoError(suite.T(), err, "Should set up channel room mapping")
 
 		// Test the core sync logic by manually processing each member type
@@ -302,7 +302,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 
 			if user.IsRemote() {
 				// Handle remote user - invite to Matrix room
-				originalMatrixUserID, err := suite.plugin.mattermostToMatrixBridge.GetMatrixUserIDFromMattermostUser(user.Id)
+				originalMatrixUserID, err := testOutboundBridge(suite.plugin).GetMatrixUserIDFromMattermostUser(user.Id)
 				if err == nil {
 					err = suite.plugin.GetMatrixClient().InviteUserToRoom(roomID, originalMatrixUserID)
 					if err == nil {
@@ -312,7 +312,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 				}
 			} else {
 				// Handle local user - create ghost user and join to room
-				ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(user.Id)
+				ghostUserID, err := testOutboundBridge(suite.plugin).CreateOrGetGhostUser(user.Id)
 				if err == nil {
 					err = suite.plugin.GetMatrixClient().InviteAndJoinGhostUser(roomID, ghostUserID)
 					if err == nil {
@@ -337,7 +337,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 
 		for _, member := range members {
 			switch {
-			case suite.plugin.mattermostToMatrixBridge.isGhostUser(member.UserID):
+			case testOutboundBridge(suite.plugin).isGhostUser(member.UserID):
 				ghostUserCount++
 			case member.UserID == suite.matrixContainer.GetApplicationServiceBotUserID():
 				asBotCount++
@@ -374,7 +374,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 		emptyRoomID, err := suite.plugin.GetMatrixClient().ResolveRoomAlias(emptyRoomIdentifier)
 		require.NoError(suite.T(), err, "Should resolve empty room identifier")
 
-		err = suite.plugin.mattermostToMatrixBridge.setChannelRoomMapping(emptyChannelID, emptyRoomID)
+		err = testOutboundBridge(suite.plugin).setChannelRoomMapping(emptyChannelID, emptyRoomID)
 		require.NoError(suite.T(), err, "Should set up empty channel room mapping")
 
 		// Simulate sync with empty channel - should complete without error

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,20 +25,6 @@ func (f *failOnSetKVStore) Set(key string, value []byte) error {
 		return errors.New("simulated KV set failure")
 	}
 	return f.KVStore.Set(key, value)
-}
-
-// failOnGetKVStore wraps a KVStore and returns an error from Get for any key
-// containing failKeySubstr, to simulate a transient KV backend read failure.
-type failOnGetKVStore struct {
-	kvstore.KVStore
-	failKeySubstr string
-}
-
-func (f *failOnGetKVStore) Get(key string) ([]byte, error) {
-	if strings.Contains(key, f.failKeySubstr) {
-		return nil, errors.New("simulated KV get failure")
-	}
-	return f.KVStore.Get(key)
 }
 
 func TestRunKVStoreMigrations(t *testing.T) {
@@ -571,7 +558,10 @@ func TestMigrationToVersion3(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: "https://matrix.example.com"}
+		plugin.configuration = &configuration{}
+		// A pre-multi-server install still has its flat plugin.json values; the v3
+		// migration reads them via LoadPluginConfiguration to seed the registry.
+		mockLegacyPluginConfig(plugin.API.(*plugintest.API), legacyServerConfig{MatrixServerURL: "https://matrix.example.com"})
 
 		// No prior keys at all (fresh install)
 		err := plugin.runKVStoreMigrations()
@@ -582,13 +572,15 @@ func TestMigrationToVersion3(t *testing.T) {
 		version, _ := strconv.Atoi(string(versionBytes))
 		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 
-		// servers_config holds exactly one entry, keyed by the derived serverID.
+		// servers_config holds exactly one entry, keyed by the derived serverID,
+		// reserving the legacy remote (empty SiteURL) for the migrated server.
 		servers, err := plugin.getServers()
 		assert.NoError(t, err)
 		require.Len(t, servers, 1)
 		expectedID, err := deriveServerID("https://matrix.example.com")
 		require.NoError(t, err)
 		assert.Equal(t, expectedID, servers[0].ServerID)
+		assert.Empty(t, servers[0].SiteURL, "migrated server keeps the legacy plugin remote")
 	})
 
 	t.Run("FreshInstallWithoutServerConfiguredIsNoOp", func(t *testing.T) {
@@ -598,6 +590,7 @@ func TestMigrationToVersion3(t *testing.T) {
 
 		// Plugin enabled but no Matrix server configured (sync disabled): the v3
 		// migration must complete and bump the version without creating an entry.
+		mockLegacyPluginConfig(plugin.API.(*plugintest.API), legacyServerConfig{})
 		err := plugin.runKVStoreMigrations()
 		require.NoError(t, err)
 
@@ -805,20 +798,21 @@ func TestMigrateExistingSingleServerInstall(t *testing.T) {
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
 	plugin.logger = &testLogger{t: t}
-	plugin.remoteID = "remote-abc"
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 
 	// Existing single-server install: flat plugin.json config is the only source,
-	// and there is no server registry yet.
-	plugin.configuration = &configuration{
+	// and there is no server registry yet. The v3 migration reads the flat values
+	// via LoadPluginConfiguration.
+	plugin.configuration = &configuration{}
+	mockLegacyPluginConfig(plugin.API.(*plugintest.API), legacyServerConfig{
 		MatrixServerURL:      "https://matrix.example.com",
 		MatrixServerName:     "example.com",
 		MatrixASToken:        "as-token",
 		MatrixHSToken:        "hs-token",
 		MatrixUsernamePrefix: "mxprefix",
 		EnableSync:           true,
-	}
+	})
 
 	// Legacy v2 KV data written by the single-server plugin (un-namespaced keys,
 	// bare channel_mapping value).
@@ -850,7 +844,10 @@ func TestMigrateExistingSingleServerInstall(t *testing.T) {
 	assert.Equal(t, "hs-token", entry.HSToken)
 	assert.Equal(t, "mxprefix", entry.UsernamePrefix)
 	assert.True(t, entry.Enabled)
-	assert.Equal(t, "remote-abc", entry.RemoteID)
+	// The migration reserves the legacy plugin remote (empty SiteURL); the actual
+	// RemoteID is assigned later by registerForSharedChannels, not the migration.
+	assert.Empty(t, entry.SiteURL, "migrated server keeps the legacy plugin remote")
+	assert.Empty(t, entry.RemoteID, "RemoteID is assigned by registration, not migration")
 
 	sid := entry.ServerID
 
@@ -884,9 +881,8 @@ func TestMigrateExistingSingleServerInstall(t *testing.T) {
 	assert.Equal(t, "!room1:example.com", kvstore.RoomIDForServer(mappings, sid))
 
 	// The previously-global username prefix now resolves from the per-server
-	// registry entry, keyed by the minted serverID.
-	plugin.initBridges()
-	assert.Equal(t, "mxprefix", plugin.mattermostToMatrixBridge.matrixUsernamePrefix())
+	// registry entry, keyed by the minted serverID (not the test default).
+	assert.Equal(t, "mxprefix", plugin.newMattermostToMatrixBridge(sid).matrixUsernamePrefix())
 }
 
 // assertChannelRoom checks that the channel_mapping_ value for channelID is the

@@ -117,7 +117,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			}
 
 			// Sync post to Matrix
-			err := setup.Plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, setup.ChannelID)
+			err := testOutboundBridge(setup.Plugin).SyncPostToMatrix(post, setup.ChannelID)
 			require.NoError(t, err)
 
 			// Wait for Matrix to process with polling
@@ -137,7 +137,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			}
 
 			// Validate mention structure
-			validator := matrixtest.NewEventValidation(t, matrixContainer.ServerDomain, setup.Plugin.remoteID)
+			validator := matrixtest.NewEventValidation(t, matrixContainer.ServerDomain, testRemoteID)
 			validator.ValidateMessageWithMentions(*messageEvent, post, tc.expectedMentions)
 
 			// Verify specific mention details
@@ -317,7 +317,7 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			}
 
 			// Sync post to Matrix
-			err := setup.Plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, setup.ChannelID)
+			err := testOutboundBridge(setup.Plugin).SyncPostToMatrix(post, setup.ChannelID)
 			require.NoError(t, err)
 
 			// Wait for processing with polling

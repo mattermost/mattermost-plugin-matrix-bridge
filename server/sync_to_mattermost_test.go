@@ -16,9 +16,8 @@ func setupGetPostIDTest(t *testing.T) (*MatrixToMattermostBridge, kvstore.KVStor
 	plugin.client = pluginapi.NewClient(plugin.API, nil)
 	plugin.kvstore = NewMemoryKVStore()
 	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
-	plugin.initBridges()
 
-	return plugin.matrixToMattermostBridge, plugin.kvstore
+	return testInboundBridge(plugin), plugin.kvstore
 }
 
 // TestGetPostIDFromMatrixEvent_KVStorePath tests the optimized KV store path

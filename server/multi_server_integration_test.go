@@ -21,10 +21,13 @@ import (
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
-// Deterministic serverIDs for the two-server registry.
+// Deterministic serverIDs and per-server shared-channels remote IDs for the
+// two-server registry.
 const (
-	multiServerAID = "serveraserveraserveraserv01"
-	multiServerBID = "serverbserverbserverbserv02"
+	multiServerAID     = "serveraserveraserveraserv01"
+	multiServerBID     = "serverbserverbserverbserv02"
+	multiServerARemote = "remote-a"
+	multiServerBRemote = "remote-b"
 )
 
 // MultiServerIntegrationTestSuite verifies multi-server behavior — the client
@@ -77,7 +80,7 @@ func (suite *MultiServerIntegrationTestSuite) SetupTest() {
 	suite.api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 	suite.api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 
-	plugin := &Plugin{remoteID: "test-remote-id"}
+	plugin := &Plugin{}
 	plugin.SetAPI(suite.api)
 	plugin.logger = &testLogger{t: suite.T()}
 	plugin.kvstore = NewMemoryKVStore()
@@ -99,18 +102,25 @@ func (suite *MultiServerIntegrationTestSuite) SetupTest() {
 		multiServerAID: suite.containerA.Client,
 		multiServerBID: suite.containerB.Client,
 	}
-	plugin.serverID = multiServerAID // GetMatrixClient()/getSingleServerID() default
+	// With two servers registered getSingleServerID is ambiguous (""); tests that
+	// need a specific client use getMatrixClient(serverID) directly.
 
-	// Registry entries mirroring what reconcileServerConfig would persist. Each
-	// server carries its own hs_token so the auth middleware can resolve the
-	// originating server from the presented bearer token.
+	// Registry entries mirroring what the plugin persists. Each server carries its
+	// own hs_token (so inbound auth resolves the originating server) and its own
+	// distinct remote ID (so loop attribution is per-server).
 	servers := []kvstore.ServerConfig{
-		{ServerID: multiServerAID, ServerURL: suite.containerA.ServerURL, ServerName: suite.containerA.ServerDomain, ASToken: suite.containerA.ASToken, HSToken: suite.containerA.HSToken, UsernamePrefix: "matrixa", Enabled: true, RemoteID: plugin.remoteID},
-		{ServerID: multiServerBID, ServerURL: suite.containerB.ServerURL, ServerName: suite.containerB.ServerDomain, ASToken: suite.containerB.ASToken, HSToken: suite.containerB.HSToken, UsernamePrefix: "matrixb", Enabled: true, RemoteID: plugin.remoteID},
+		{ServerID: multiServerAID, ServerURL: suite.containerA.ServerURL, ServerName: suite.containerA.ServerDomain, ASToken: suite.containerA.ASToken, HSToken: suite.containerA.HSToken, UsernamePrefix: "matrixa", Enabled: true, RemoteID: multiServerARemote, SiteURL: "https://" + suite.containerA.ServerDomain},
+		{ServerID: multiServerBID, ServerURL: suite.containerB.ServerURL, ServerName: suite.containerB.ServerDomain, ASToken: suite.containerB.ASToken, HSToken: suite.containerB.HSToken, UsernamePrefix: "matrixb", Enabled: true, RemoteID: multiServerBRemote, SiteURL: "https://" + suite.containerB.ServerDomain},
 	}
 	data, err := json.Marshal(servers)
 	suite.Require().NoError(err)
 	suite.Require().NoError(plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	// Populate the remote→server and own-remote maps as initMatrixClient would, so
+	// inbound routing and loop prevention resolve per-server without a p.remoteID
+	// fallback.
+	plugin.remoteToServerID = map[string]string{multiServerARemote: multiServerAID, multiServerBRemote: multiServerBID}
+	plugin.ownRemoteIDs = map[string]struct{}{multiServerARemote: {}, multiServerBRemote: {}}
 
 	// The transaction handler reads the server config to bound the request body size.
 	suite.api.On("GetConfig").Return(&model.Config{}).Maybe()
@@ -141,7 +151,7 @@ func (suite *MultiServerIntegrationTestSuite) bridgeFor(serverID string, client 
 		KVStore:             suite.plugin.kvstore,
 		MatrixClient:        client,
 		ServerID:            serverID,
-		RemoteID:            suite.plugin.remoteID,
+		RemoteID:            suite.plugin.remoteIDForServer(serverID),
 		MaxProfileImageSize: DefaultMaxProfileImageSize,
 		MaxFileSize:         DefaultMaxFileSize,
 		ConfigGetter:        suite.plugin,
@@ -157,8 +167,9 @@ func (suite *MultiServerIntegrationTestSuite) TestClientRegistryRoutesToCorrectH
 	assert.Same(t, suite.containerA.Client, suite.plugin.getMatrixClient(multiServerAID))
 	assert.Same(t, suite.containerB.Client, suite.plugin.getMatrixClient(multiServerBID))
 	assert.Nil(t, suite.plugin.getMatrixClient("no-such-server"))
-	// The single-server accessor resolves the cached serverID (server A).
-	assert.Same(t, suite.containerA.Client, suite.plugin.GetMatrixClient())
+	// The single-server accessor is ambiguous with two servers registered, so it
+	// resolves to no client; callers must target a specific serverID.
+	assert.Nil(t, suite.plugin.GetMatrixClient())
 
 	// Both live homeservers are reachable through their registered clients.
 	assert.NoError(t, suite.plugin.getMatrixClient(multiServerAID).TestConnection())

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -21,13 +22,11 @@ func newServerCommandHandler(t *testing.T, isAdmin bool) (*Handler, *mockPlugin)
 	setupCommandRegistration(env)
 	env.api.On("HasPermissionTo", "admin-user", model.PermissionManageSystem).Return(isAdmin).Maybe()
 	env.api.On("HasPermissionTo", mock.Anything, mock.Anything).Return(isAdmin).Maybe()
-	env.api.On("LogInfo", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
-	env.api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+	mockAllLogs(env.api)
 
 	mp := &mockPlugin{
 		client:    env.client,
 		kvstore:   newMemKV(),
-		config:    &mockConfiguration{serverURL: "http://test.com"},
 		pluginAPI: env.api,
 	}
 	handler := NewCommandHandler(mp).(*Handler)
@@ -98,7 +97,7 @@ func TestMapCommandRefusesWithMultipleServers(t *testing.T) {
 
 	servers := []kvstore.ServerConfig{
 		{ServerID: "s1", ServerName: "a.example.org", Enabled: true},
-		{ServerID: "s2", ServerName: "b.example.org", Enabled: true, Injected: true},
+		{ServerID: "s2", ServerName: "b.example.org", Enabled: true, SiteURL: "https://b.example.org"},
 	}
 	data, err := json.Marshal(servers)
 	require.NoError(t, err)
@@ -111,7 +110,7 @@ func TestMapCommandRefusesWithMultipleServers(t *testing.T) {
 	})
 	require.NotNil(t, resp)
 	assert.Contains(t, resp.Text, "Multiple Matrix servers")
-	assert.Contains(t, resp.Text, "/matrix server map")
+	assert.Contains(t, resp.Text, "/matrix server")
 }
 
 func TestMapCommandAllowedWithSingleServer(t *testing.T) {
@@ -146,15 +145,20 @@ func TestServerCommandMapUnknownServer(t *testing.T) {
 func TestServerCommandMapStoresMappingUnderServer(t *testing.T) {
 	handler, mp := newServerCommandHandler(t, true)
 
-	// Register a server (no live client -> map stores the identifier as given).
+	// Register a server and give the mock a Matrix client. The client points at an
+	// unreachable address so its network calls (join/resolve/sync) fail fast and
+	// best-effort; the mapping is still stored and "Mapping Saved" is returned.
 	require.Contains(t, runServer(handler, "/matrix server add http://synapse2.localhost:8889 synapse2.localhost as hs matrix2").Text, "Server registered")
+	mp.matrixClient = matrix.NewClientWithLoggerAndRateLimit("http://127.0.0.1:1", "as", "remote", "synapse2.localhost", matrix.NewTestLogger(t), matrix.TestRateLimitConfig())
 
-	// Channel + share mocks used by the map handler.
+	// Channel + share + member mocks used by the map handler.
 	env := handler.pluginAPI.(*plugintest.API)
 	env.On("GetChannel", "chan-1").Return(&model.Channel{Id: "chan-1", Name: "town-square"}, nil).Maybe()
+	env.On("GetChannelMembers", "chan-1", mock.Anything, mock.Anything).Return(model.ChannelMembers{}, nil).Maybe()
 	env.On("ShareChannel", mock.Anything).Return(nil, nil).Maybe()
 	env.On("UpdateChannel", mock.Anything).Return(nil, nil).Maybe()
 	env.On("InviteRemoteToChannel", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	env.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
 
 	resp := handler.executeMatrixCommand(&model.CommandArgs{
 		Command:   "/matrix server map srv_synapse2.localhost !room2:synapse2.localhost",
@@ -162,7 +166,7 @@ func TestServerCommandMapStoresMappingUnderServer(t *testing.T) {
 		ChannelId: "chan-1",
 		TeamId:    "team-1",
 	})
-	require.Contains(t, resp.Text, "Mapping saved")
+	require.Contains(t, resp.Text, "Mapping Saved")
 
 	// Forward mapping stored under the target server, reverse mapping keyed by it.
 	fwd, err := mp.kvstore.Get(kvstore.BuildChannelMappingKey("chan-1"))
@@ -174,4 +178,150 @@ func TestServerCommandMapStoresMappingUnderServer(t *testing.T) {
 	rev, err := mp.kvstore.Get(kvstore.BuildRoomMappingKey("srv_synapse2.localhost", "!room2:synapse2.localhost"))
 	require.NoError(t, err)
 	assert.Equal(t, "chan-1", string(rev))
+}
+
+// seedServers writes the given servers into the mock plugin's registry.
+func seedServers(t *testing.T, mp *mockPlugin, servers ...kvstore.ServerConfig) {
+	t.Helper()
+	data, err := json.Marshal(servers)
+	require.NoError(t, err)
+	require.NoError(t, mp.kvstore.Set(kvstore.KeyServersConfig, data))
+}
+
+func TestResolveServerID(t *testing.T) {
+	t.Run("NoneConfiguredErrors", func(t *testing.T) {
+		h, _ := newServerCommandHandler(t, true)
+		id, resp := h.resolveServerID()
+		assert.Empty(t, id)
+		require.NotNil(t, resp)
+		assert.Contains(t, resp.Text, "No Matrix server")
+	})
+
+	t.Run("SoleServerResolves", func(t *testing.T) {
+		h, mp := newServerCommandHandler(t, true)
+		seedServers(t, mp, kvstore.ServerConfig{ServerID: "only", ServerURL: "https://a.example.com"})
+		id, resp := h.resolveServerID()
+		assert.Nil(t, resp)
+		assert.Equal(t, "only", id)
+	})
+
+	t.Run("MultipleServersAmbiguous", func(t *testing.T) {
+		h, mp := newServerCommandHandler(t, true)
+		seedServers(t, mp,
+			kvstore.ServerConfig{ServerID: "s1", ServerURL: "https://a.example.com"},
+			kvstore.ServerConfig{ServerID: "s2", ServerURL: "https://b.example.com"},
+		)
+		id, resp := h.resolveServerID()
+		assert.Empty(t, id)
+		require.NotNil(t, resp)
+		assert.Contains(t, resp.Text, "Multiple Matrix servers")
+	})
+}
+
+func TestResolveServerIDArg(t *testing.T) {
+	h, mp := newServerCommandHandler(t, true)
+	seedServers(t, mp,
+		kvstore.ServerConfig{ServerID: "s1", ServerURL: "https://a.example.com", ServerName: "a.example.com"},
+		kvstore.ServerConfig{ServerID: "s2", ServerURL: "https://b.example.com", ServerName: "b.example.com"},
+	)
+
+	t.Run("ByServerID", func(t *testing.T) {
+		id, resp := h.resolveServerIDArg("s2")
+		assert.Nil(t, resp)
+		assert.Equal(t, "s2", id)
+	})
+
+	t.Run("ByDomain", func(t *testing.T) {
+		id, resp := h.resolveServerIDArg("b.example.com")
+		assert.Nil(t, resp)
+		assert.Equal(t, "s2", id)
+	})
+
+	t.Run("UnknownErrors", func(t *testing.T) {
+		id, resp := h.resolveServerIDArg("nope.example.com")
+		assert.Empty(t, id)
+		require.NotNil(t, resp)
+		assert.Contains(t, resp.Text, "No server found")
+	})
+
+	t.Run("EmptyWithMultipleIsAmbiguous", func(t *testing.T) {
+		id, resp := h.resolveServerIDArg("")
+		assert.Empty(t, id)
+		require.NotNil(t, resp)
+		assert.Contains(t, resp.Text, "Multiple Matrix servers")
+	})
+}
+
+func TestParseOptionalServerArg(t *testing.T) {
+	// /matrix server map <room>  -> no server_id, room = fields[3]
+	sid, val, ok := parseOptionalServerArg([]string{"/matrix", "server", "map", "!room:hs"}, 3)
+	require.True(t, ok)
+	assert.Empty(t, sid)
+	assert.Equal(t, "!room:hs", val)
+
+	// /matrix server map <server_id> <room>
+	sid, val, ok = parseOptionalServerArg([]string{"/matrix", "server", "map", "srv", "!room:hs"}, 3)
+	require.True(t, ok)
+	assert.Equal(t, "srv", sid)
+	assert.Equal(t, "!room:hs", val)
+
+	// Missing value.
+	_, _, ok = parseOptionalServerArg([]string{"/matrix", "server", "map"}, 3)
+	assert.False(t, ok)
+}
+
+func TestBuildRegistrationYAML(t *testing.T) {
+	server := kvstore.ServerConfig{
+		ServerID:   "srv1",
+		ServerURL:  "https://matrix.example.com",
+		ServerName: "example.com",
+		ASToken:    "as-token-value",
+		HSToken:    "hs-token-value",
+	}
+	got := buildRegistrationYAML(server, "https://mm.example.com")
+
+	// Byte-compatible with the format the webapp previously produced.
+	want := `id: "mattermost-bridge"
+url: "https://mm.example.com/plugins/com.mattermost.plugin-matrix-bridge"
+as_token: "as-token-value"
+hs_token: "hs-token-value"
+sender_localpart: "_mattermost_bridge"
+namespaces:
+  users:
+    - exclusive: true
+      regex: "@_mattermost_.*:example.com"
+  aliases:
+    - exclusive: true
+      regex: "#_mattermost_.*:example.com"
+    - exclusive: false
+      regex: "#mattermost-bridge-.*:example.com"
+  rooms:
+    - exclusive: false
+      regex: "!.*:example.com"
+rate_limited: false
+protocols: ["mattermost"]
+de.sorunome.msc2409.push_ephemeral: true
+permissions:
+  - "m.room.directory"
+  - "m.room.membership"`
+	assert.Equal(t, want, got)
+}
+
+func TestServerRegistrationCommand(t *testing.T) {
+	h, mp := newServerCommandHandler(t, true)
+	seedServers(t, mp, kvstore.ServerConfig{ServerID: "s1", ServerURL: "https://matrix.example.com", ServerName: "example.com", ASToken: "as", HSToken: "hs"})
+	mp.pluginAPI.On("GetConfig").Return(&model.Config{ServiceSettings: model.ServiceSettings{SiteURL: model.NewPointer("https://mm.example.com")}}).Maybe()
+
+	resp := runServer(h, "/matrix server registration s1")
+	require.NotNil(t, resp)
+	assert.Contains(t, resp.Text, "as_token: \"as\"")
+	assert.Contains(t, resp.Text, "@_mattermost_.*:example.com")
+	assert.Contains(t, resp.Text, "https://mm.example.com/plugins/com.mattermost.plugin-matrix-bridge")
+}
+
+func TestServerRegistrationCommandRequiresAdmin(t *testing.T) {
+	h, _ := newServerCommandHandler(t, false)
+	resp := runServer(h, "/matrix server registration s1")
+	require.NotNil(t, resp)
+	assert.Contains(t, resp.Text, "System Administrator")
 }

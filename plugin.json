@@ -19,39 +19,9 @@
         "bundle_path": "webapp/dist/main.js"
     },
     "settings_schema": {
-        "header": "Configure Matrix bridge settings",
+        "header": "Configure Matrix bridge settings. Matrix homeservers are managed with the /matrix server slash commands (add, remove, list, map, registration); this page holds only the global settings below.",
         "footer": "For more information, see the [Matrix specification](https://spec.matrix.org/v1.14/)",
         "settings": [
-            {
-                "key": "matrix_server_url",
-                "display_name": "Matrix Server URL",
-                "type": "text",
-                "help_text": "The URL of the Matrix homeserver (e.g., https://matrix.org)",
-                "placeholder": "https://matrix.example.com",
-                "default": ""
-            },
-            {
-                "key": "matrix_server_name",
-                "display_name": "Matrix Server Name (Optional)",
-                "type": "text",
-                "help_text": "The domain used in Matrix IDs (e.g., example.com). Leave empty to automatically detect via .well-known/matrix/server or derive from the server URL. Only set this if your Matrix server uses a different domain for Matrix IDs than the homeserver URL hostname.",
-                "placeholder": "example.com",
-                "default": ""
-            },
-            {
-                "key": "matrix_as_token",
-                "display_name": "Matrix Application Service Token",
-                "type": "generated",
-                "help_text": "Application Service token for creating ghost users (required for proper user attribution). Copy this token to your Matrix homeserver registration file as 'as_token'.",
-                "regenerate_help_text": "Generate a new secure token (remember to update your Matrix homeserver registration file)"
-            },
-            {
-                "key": "matrix_hs_token",
-                "display_name": "Matrix Homeserver Token",
-                "type": "generated",
-                "help_text": "Homeserver token for Matrix Application Service registration. Copy this token to your Matrix homeserver registration file as 'hs_token'.",
-                "regenerate_help_text": "Generate a new secure token (remember to update your Matrix homeserver registration file)"
-            },
             {
                 "key": "enable_sync",
                 "display_name": "Enable Message Sync",
@@ -87,17 +57,6 @@
                         "value": "restricted"
                     }
                 ]
-            },
-            {
-                "key": "registration_download",
-                "display_name": "Matrix Application Service Registration",
-                "type": "custom",
-                "help_text": "Download the registration file for your Matrix homeserver.\n \n**Setup Instructions:**\n1. Download the file using the button above\n2. Copy it to your Matrix homeserver\n3. Add the file path to your homeserver.yaml under 'app_service_config_files'\n4. Restart your Matrix homeserver\n\nSee the [Matrix Application Service spec](https://spec.matrix.org/v1.14/application-service-api/) for details."
-            },
-            {
-                "key": "homeserver_config",
-                "display_name": "Matrix Homeserver Configuration",
-                "type": "custom"
             }
         ]
     }

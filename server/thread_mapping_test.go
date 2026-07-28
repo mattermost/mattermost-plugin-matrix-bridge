@@ -11,6 +11,7 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/mocks"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
@@ -141,9 +142,7 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Thread Test Room"))
 
 	// Create plugin instance
-	suite.plugin = &Plugin{
-		remoteID: "test-remote-id",
-	}
+	suite.plugin = &Plugin{}
 	suite.plugin.SetAPI(api)
 
 	// Initialize plugin components
@@ -156,23 +155,25 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		suite.plugin.remoteID,
+		testRemoteID,
 	))
 	suite.plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
-	// Set up configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-	}
-	suite.plugin.configuration = config
+	// Seed the single server entry in the registry.
+	suite.plugin.configuration = &configuration{}
+	seedServerEntry(suite.plugin, kvstore.ServerConfig{
+		ServerID:   testServerID,
+		ServerURL:  suite.matrixContainer.ServerURL,
+		ServerName: suite.matrixContainer.ServerDomain,
+		ASToken:    suite.matrixContainer.ASToken,
+		HSToken:    suite.matrixContainer.HSToken,
+		Enabled:    true,
+		RemoteID:   testRemoteID,
+	})
 
-	// Initialize the logger (required before initBridges)
 	suite.plugin.logger = &testLogger{t: suite.T()}
 
 	// Initialize bridges
-	suite.plugin.initBridges()
 
 	// Set up test data in KV store
 	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
@@ -181,7 +182,7 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
-		suite.plugin.remoteID,
+		testRemoteID,
 	)
 
 	// Set up mock API expectations
@@ -249,7 +250,7 @@ func (suite *ThreadMappingIntegrationTestSuite) TestThreadRootResolution() {
 	api.On("GetPost", threadReplyID).Return(threadReplyPost, nil)
 
 	// Test the thread root resolution function
-	bridge := suite.plugin.matrixToMattermostBridge
+	bridge := testInboundBridge(suite.plugin)
 	// Use mock logger for bridge operations
 	bridge.logger = &testLogger{t: t}
 
@@ -300,7 +301,7 @@ func (suite *ThreadMappingIntegrationTestSuite) TestFileAttachmentThreadMapping(
 	api.On("GetPost", threadRootID).Return(threadRoot, nil)
 	api.On("GetPost", postWithFileID).Return(postWithFile, nil)
 
-	bridge := suite.plugin.matrixToMattermostBridge
+	bridge := testInboundBridge(suite.plugin)
 	// Use mock logger for bridge operations
 	bridge.logger = &testLogger{t: t}
 

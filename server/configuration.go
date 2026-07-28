@@ -24,13 +24,8 @@ const DefaultMatrixUsernamePrefix = "matrix"
 // If you add non-reference types to your configuration struct, be sure to rewrite Clone as a deep
 // copy appropriate for your types.
 type configuration struct {
-	MatrixServerURL      string `json:"matrix_server_url"`
-	MatrixServerName     string `json:"matrix_server_name"`
-	MatrixASToken        string `json:"matrix_as_token"`
-	MatrixHSToken        string `json:"matrix_hs_token"`
-	EnableSync           bool   `json:"enable_sync"`
-	MatrixUsernamePrefix string `json:"matrix_username_prefix"`
-	RateLimitingMode     string `json:"rate_limiting_mode"`
+	EnableSync       bool   `json:"enable_sync"`
+	RateLimitingMode string `json:"rate_limiting_mode"`
 }
 
 // Clone shallow copies the configuration. Your implementation may require a deep copy if
@@ -101,58 +96,20 @@ func (p *Plugin) OnConfigurationChange() error {
 
 	p.setConfiguration(configuration)
 
-	if err := p.initMatrixClient(); err != nil {
+	if err := p.initMatrixClients(); err != nil {
 		return errors.Wrap(err, "failed to initialize Matrix client")
 	}
 
 	return nil
 }
 
-// validateConfiguration checks that required configuration fields are present
+// validateConfiguration normalizes the global settings. Per-server Matrix
+// connection settings are validated where they are entered (the `/matrix server`
+// commands and the registry), not here.
 func (p *Plugin) validateConfiguration(config *configuration) error {
-	if config.EnableSync {
-		if config.MatrixServerURL == "" {
-			return errors.New("Matrix Server URL is required when sync is enabled")
-		}
-		if config.MatrixASToken == "" {
-			return errors.New("Matrix Application Service Token is required when sync is enabled")
-		}
-		if config.MatrixHSToken == "" {
-			return errors.New("Matrix Homeserver Token is required when sync is enabled")
-		}
-	}
-
 	// Validate and normalize rate limiting mode using matrix package
 	parsedMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
 	config.RateLimitingMode = string(parsedMode)
 
-	// Validate and normalize MatrixServerName if provided
-	if config.MatrixServerName != "" {
-		normalized, err := matrix.NormalizeServerName(config.MatrixServerName)
-		if err != nil {
-			return errors.Wrap(err, "invalid Matrix Server Name")
-		}
-		config.MatrixServerName = normalized
-	}
-
 	return nil
-}
-
-// GetMatrixServerURL implements the Configuration interface for command package
-func (c *configuration) GetMatrixServerURL() string {
-	return c.MatrixServerURL
-}
-
-// GetMatrixServerName returns the configured Matrix server name (domain for Matrix IDs)
-// If not set, this should be derived via server discovery
-func (c *configuration) GetMatrixServerName() string {
-	return c.MatrixServerName
-}
-
-// GetMatrixUsernamePrefix returns the username prefix to use for Matrix-originated users
-func (c *configuration) GetMatrixUsernamePrefix() string {
-	if c.MatrixUsernamePrefix == "" {
-		return DefaultMatrixUsernamePrefix
-	}
-	return c.MatrixUsernamePrefix
 }

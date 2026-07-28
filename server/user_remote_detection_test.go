@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
@@ -46,9 +47,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Loop Prevention Test Room"))
 
 	// Create plugin instance
-	suite.plugin = &Plugin{
-		remoteID: "test-remote-id",
-	}
+	suite.plugin = &Plugin{}
 	suite.plugin.SetAPI(api)
 
 	// Initialize plugin components
@@ -61,28 +60,27 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		suite.plugin.remoteID,
+		testRemoteID,
 	))
 	suite.plugin.GetMatrixClient().SetServerDomain(suite.matrixContainer.ServerDomain)
 
-	// Set up configuration
-	config := &configuration{
-		MatrixServerURL:      suite.matrixContainer.ServerURL,
-		MatrixASToken:        suite.matrixContainer.ASToken,
-		MatrixHSToken:        suite.matrixContainer.HSToken,
-		MatrixUsernamePrefix: "testmatrix", // Use different prefix to prove configurability
-	}
-	suite.plugin.configuration = config
+	// Seed the single server entry in the registry with a custom username prefix
+	// to prove configurability.
+	suite.plugin.configuration = &configuration{}
+	seedServerEntry(suite.plugin, kvstore.ServerConfig{
+		ServerID:       testServerID,
+		ServerURL:      suite.matrixContainer.ServerURL,
+		ServerName:     suite.matrixContainer.ServerDomain,
+		ASToken:        suite.matrixContainer.ASToken,
+		HSToken:        suite.matrixContainer.HSToken,
+		UsernamePrefix: "testmatrix",
+		Enabled:        true,
+		RemoteID:       testRemoteID,
+	})
 
-	// Project the flat config into the server registry, as reconcileServerConfig
-	// does at activation, so the per-server username prefix resolves to "testmatrix".
-	seedTestServerConfig(suite.plugin)
-
-	// Initialize the logger (required before initBridges)
 	suite.plugin.logger = &testLogger{t: suite.T()}
 
 	// Initialize bridges
-	suite.plugin.initBridges()
 
 	// Set up test data in KV store
 	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
@@ -91,7 +89,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
-		suite.plugin.remoteID,
+		testRemoteID,
 	)
 
 	// Set up mock API expectations
@@ -141,7 +139,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestGhostUserCreationAndDe
 	assert.False(t, localUser.IsRemote(), "Local Mattermost user should not be remote")
 
 	// Test 2: Create a ghost user for the local user
-	ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(localUserID)
+	ghostUserID, err := testOutboundBridge(suite.plugin).CreateOrGetGhostUser(localUserID)
 	assert.NoError(t, err, "Ghost user creation should succeed")
 	assert.NotEmpty(t, ghostUserID, "Ghost user ID should not be empty")
 
@@ -157,7 +155,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestGhostUserCreationAndDe
 		Id:       model.NewId(),
 		Username: "testmatrix:bob_from_matrix",
 		Email:    "bob@matrix.example.com",
-		RemoteId: &[]string{suite.plugin.remoteID}[0], // Set by Matrix->Mattermost sync
+		RemoteId: &[]string{testRemoteID}[0], // Set by Matrix->Mattermost sync
 	}
 
 	// Test 4: Verify the Matrix-originated user IS considered remote
@@ -194,7 +192,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 	api.On("GetProfileImage", localUserID).Return([]byte("fake-image-data"), nil)
 
 	// Create a ghost user for the local user - this is a proper Matrix user in our namespace
-	ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(localUserID)
+	ghostUserID, err := testOutboundBridge(suite.plugin).CreateOrGetGhostUser(localUserID)
 	assert.NoError(t, err, "Ghost user creation should succeed")
 	assert.NotEmpty(t, ghostUserID, "Ghost user ID should not be empty")
 
@@ -229,7 +227,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 		Id:       model.NewId(),
 		Username: "testmatrix:" + extractUsernameFromMatrixID(ghostUserID),
 		Email:    extractUsernameFromMatrixID(ghostUserID) + "@matrix.bridge.local",
-		RemoteId: &[]string{suite.plugin.remoteID}[0], // This would be set by Matrix->Mattermost sync
+		RemoteId: &[]string{testRemoteID}[0], // This would be set by Matrix->Mattermost sync
 	}
 
 	// Verify this simulated user would be correctly identified as remote
@@ -282,7 +280,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestConfigurableUsernamePr
 
 	// Test username generation uses the configured prefix
 	baseUsername := "alice"
-	generatedUsername := suite.plugin.matrixToMattermostBridge.generateMattermostUsername(baseUsername)
+	generatedUsername := testInboundBridge(suite.plugin).generateMattermostUsername(baseUsername)
 
 	// Should use "testmatrix:" prefix from test configuration
 	expectedUsername := "testmatrix:alice"
@@ -290,12 +288,11 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestConfigurableUsernamePr
 
 	t.Logf("✓ Username generation uses configured prefix: %s", generatedUsername)
 
-	// Test that the configuration getter returns the correct prefix
-	config := suite.plugin.getConfiguration()
-	actualPrefix := config.GetMatrixUsernamePrefix()
-	assert.Equal(t, "testmatrix", actualPrefix, "Configuration should return the set prefix")
+	// The prefix is resolved per-server from the registry.
+	actualPrefix := testInboundBridge(suite.plugin).matrixUsernamePrefix()
+	assert.Equal(t, "testmatrix", actualPrefix, "Registry entry should return the set prefix")
 
-	t.Logf("✓ Configuration returns correct prefix: %s", actualPrefix)
+	t.Logf("✓ Registry returns correct prefix: %s", actualPrefix)
 }
 
 // TestBridgeMetadataConsistency tests that bridge metadata is consistent across operations
@@ -303,7 +300,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestBridgeMetadataConsiste
 	t := suite.T()
 
 	// Test that the bridge's remote ID is consistent
-	assert.NotEmpty(t, suite.plugin.remoteID, "Plugin should have a remote ID")
+	assert.NotEmpty(t, testRemoteID, "Plugin should have a remote ID")
 
 	// Test that ghost users created by this bridge would have the correct metadata
 	localUserID := model.NewId()
@@ -320,7 +317,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestBridgeMetadataConsiste
 	api.On("GetProfileImage", localUserID).Return([]byte("fake-image-data"), nil)
 
 	// Create ghost user
-	ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(localUserID)
+	ghostUserID, err := testOutboundBridge(suite.plugin).CreateOrGetGhostUser(localUserID)
 	assert.NoError(t, err, "Ghost user creation should succeed")
 
 	// Verify the ghost user follows the expected pattern
@@ -335,13 +332,13 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestBridgeMetadataConsiste
 	simulatedGhostAsMattermostUser := &model.User{
 		Id:       model.NewId(),
 		Username: extractUsernameFromMatrixID(ghostUserID),
-		RemoteId: &[]string{suite.plugin.remoteID}[0],
+		RemoteId: &[]string{testRemoteID}[0],
 	}
 
 	assert.True(t, simulatedGhostAsMattermostUser.IsRemote(),
 		"Ghost user represented as Mattermost user should be remote")
 
-	t.Logf("✓ Metadata consistency verified for remote ID: %s", suite.plugin.remoteID)
+	t.Logf("✓ Metadata consistency verified for remote ID: %s", testRemoteID)
 }
 
 // Helper function to extract username from Matrix user ID
@@ -361,24 +358,9 @@ func TestUserRemoteDetectionIntegration(t *testing.T) {
 	suite.Run(t, new(UserRemoteDetectionIntegrationTestSuite))
 }
 
-// TestDefaultUsernamePrefix tests that the default prefix is used when none is configured
-func TestDefaultUsernamePrefix(t *testing.T) {
-	// Test the configuration getter with empty prefix
-	config := &configuration{
-		MatrixUsernamePrefix: "", // Empty should use default
-	}
-
-	prefix := config.GetMatrixUsernamePrefix()
-	assert.Equal(t, DefaultMatrixUsernamePrefix, prefix, "Empty prefix should return default")
-
-	// Test with explicit prefix
-	config.MatrixUsernamePrefix = "customprefix"
-	prefix = config.GetMatrixUsernamePrefix()
-	assert.Equal(t, "customprefix", prefix, "Should return configured prefix")
-
-	t.Logf("✓ Default prefix: %s", DefaultMatrixUsernamePrefix)
-	t.Logf("✓ Custom prefix: %s", prefix)
-}
+// Per-server username-prefix resolution (including the empty→default fallback) is
+// covered by TestMatrixUsernamePrefixResolvesPerServer in servers_test.go, since
+// the prefix now lives in the registry entry rather than the flat configuration.
 
 // TestBasicRemoteDetectionLogic tests the basic logic without requiring Matrix server
 // This is kept as a lightweight unit test for the core logic

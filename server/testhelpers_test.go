@@ -69,6 +69,11 @@ func setupPluginForTest() *Plugin {
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 
+	// Default: no legacy flat config, so the v3 migration's materialize step is a
+	// no-op. Tests that simulate a pre-multi-server install override this via
+	// mockLegacyPluginConfig.
+	api.On("LoadPluginConfiguration", mock.Anything).Return(nil).Maybe()
+
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.logger = &testLogger{}
@@ -93,39 +98,95 @@ func createMatrixClientWithTestLogger(t *testing.T, serverURL, asToken, remoteID
 // in tests. Using a fixed value keeps seeded keys and assertions predictable.
 const testServerID = "testserveridtestserverid00"
 
-// setTestMatrixClient registers a Matrix client as the single server's client and
-// caches the deterministic testServerID, so p.GetMatrixClient() and
-// p.getSingleServerID() behave as they would after initMatrixClient.
+// testRemoteID is the shared-channels remote ID used for the single test server.
+const testRemoteID = "test-remote-id"
+
+// setTestMatrixClient registers a Matrix client as the single server's client
+// under the deterministic testServerID, and ensures a matching one-entry registry
+// exists so p.GetMatrixClient() and p.getSingleServerID() resolve immediately (as
+// they would after initMatrixClient). It creates an in-memory KV store if the
+// plugin has none yet, and only seeds the entry when the registry is empty, so it
+// never clobbers a richer entry set up by seedServerEntry.
 func setTestMatrixClient(p *Plugin, client *matrix.Client) {
+	if p.kvstore == nil {
+		p.kvstore = NewMemoryKVStore()
+	}
+	if servers, err := p.getServers(); err == nil && len(servers) == 0 {
+		data, _ := json.Marshal([]kvstore.ServerConfig{{ServerID: testServerID, Enabled: true, RemoteID: testRemoteID}})
+		_ = p.kvstore.Set(kvstore.KeyServersConfig, data)
+	}
 	p.matrixClientsLock.Lock()
 	defer p.matrixClientsLock.Unlock()
-	p.serverID = testServerID
 	if p.matrixClients == nil {
 		p.matrixClients = make(map[string]*matrix.Client)
 	}
 	p.matrixClients[testServerID] = client
 }
 
-// seedTestServerConfig writes a servers_config registry entry with the
-// deterministic testServerID and caches it, so migrations and bridge KV
-// operations use a predictable serverID. It mirrors what reconcileServerConfig
-// does in production by projecting the plugin's flat configuration (when set)
-// into the registry entry, so per-server reads such as the username prefix
-// resolve to the configured values.
-func seedTestServerConfig(p *Plugin) {
-	entry := kvstore.ServerConfig{ServerID: testServerID, Enabled: true, RemoteID: p.remoteID}
-	if cfg := p.configuration; cfg != nil {
-		entry.ServerURL = cfg.MatrixServerURL
-		entry.ServerName = cfg.MatrixServerName
-		entry.ASToken = cfg.MatrixASToken
-		entry.HSToken = cfg.MatrixHSToken
-		entry.UsernamePrefix = cfg.GetMatrixUsernamePrefix()
+// seedServerEntry writes a single-entry servers_config registry and populates the
+// remote→server and own-remote maps so loop-prevention and per-server lookups
+// behave as after initMatrixClient. It defaults the ServerID to testServerID when
+// unset.
+func seedServerEntry(p *Plugin, entry kvstore.ServerConfig) {
+	if entry.ServerID == "" {
+		entry.ServerID = testServerID
 	}
 	data, _ := json.Marshal([]kvstore.ServerConfig{entry})
 	_ = p.kvstore.Set(kvstore.KeyServersConfig, data)
 	p.matrixClientsLock.Lock()
-	p.serverID = testServerID
-	p.matrixClientsLock.Unlock()
+	defer p.matrixClientsLock.Unlock()
+	if p.remoteToServerID == nil {
+		p.remoteToServerID = map[string]string{}
+	}
+	if p.ownRemoteIDs == nil {
+		p.ownRemoteIDs = map[string]struct{}{}
+	}
+	if entry.RemoteID != "" {
+		p.remoteToServerID[entry.RemoteID] = entry.ServerID
+		p.ownRemoteIDs[entry.RemoteID] = struct{}{}
+	}
+}
+
+// mockLegacyPluginConfig makes the API's LoadPluginConfiguration populate the
+// given legacy flat config, so the v3 migration's materializeServerFromLegacyConfig
+// can seed the registry from a simulated pre-multi-server install.
+func mockLegacyPluginConfig(api *plugintest.API, legacy legacyServerConfig) {
+	// Drop any prior LoadPluginConfiguration expectation (e.g. the empty default from
+	// setupPluginForTest) so this specific one takes effect.
+	kept := api.ExpectedCalls[:0]
+	for _, c := range api.ExpectedCalls {
+		if c.Method != "LoadPluginConfiguration" {
+			kept = append(kept, c)
+		}
+	}
+	api.ExpectedCalls = kept
+	api.On("LoadPluginConfiguration", mock.Anything).Run(func(args mock.Arguments) {
+		if dest, ok := args.Get(0).(*legacyServerConfig); ok {
+			*dest = legacy
+		}
+	}).Return(nil)
+}
+
+// testOutboundBridge returns an outbound (Mattermost→Matrix) bridge bound to the
+// single test server. It replaces the removed default p.mattermostToMatrixBridge
+// handle; per-server bridges are built on demand in production too.
+func testOutboundBridge(p *Plugin) *MattermostToMatrixBridge {
+	return p.newMattermostToMatrixBridge(testServerID)
+}
+
+// testInboundBridge returns an inbound (Matrix→Mattermost) bridge bound to the
+// single test server. It replaces the removed default p.matrixToMattermostBridge
+// handle; per-server bridges are built on demand in production too.
+func testInboundBridge(p *Plugin) *MatrixToMattermostBridge {
+	return p.newMatrixToMattermostBridge(testServerID)
+}
+
+// seedTestServerConfig writes a minimal servers_config registry entry with the
+// deterministic testServerID and testRemoteID and caches it, so migrations and
+// bridge KV operations use a predictable serverID. Configured servers now come
+// only from the registry (there is no flat config to project from).
+func seedTestServerConfig(p *Plugin) {
+	seedServerEntry(p, kvstore.ServerConfig{ServerID: testServerID, Enabled: true, RemoteID: testRemoteID})
 }
 
 // TestMatrixClientTestLogger verifies that matrix client uses test logger correctly
@@ -153,7 +214,7 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	testRoomID := matrixContainer.CreateRoom(t, "Test Room")
 	testGhostUserID := "@_mattermost_" + testUserID + ":" + matrixContainer.ServerDomain
 
-	plugin := &Plugin{remoteID: "test-remote-id"}
+	plugin := &Plugin{}
 	plugin.SetAPI(api)
 
 	// Initialize kvstore with in-memory implementation for testing
@@ -168,12 +229,20 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	// This also caches the deterministic testServerID used to namespace KV keys.
 	setTestMatrixClient(plugin, matrixContainer.Client)
 
-	config := &configuration{
-		MatrixServerURL: matrixContainer.ServerURL,
-		MatrixASToken:   matrixContainer.ASToken,
-		MatrixHSToken:   matrixContainer.HSToken,
-	}
+	config := &configuration{}
 	plugin.configuration = config
+
+	// Seed the single server entry in the registry with the container's connection
+	// details under the deterministic testServerID.
+	seedServerEntry(plugin, kvstore.ServerConfig{
+		ServerID:   testServerID,
+		ServerURL:  matrixContainer.ServerURL,
+		ServerName: matrixContainer.ServerDomain,
+		ASToken:    matrixContainer.ASToken,
+		HSToken:    matrixContainer.HSToken,
+		Enabled:    true,
+		RemoteID:   testRemoteID,
+	})
 
 	// Set up basic mocks
 	setupBasicMocks(api, testUserID)
@@ -183,9 +252,6 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 
 	// Initialize the logger with test implementation
 	plugin.logger = &testLogger{t: t}
-
-	// Initialize bridges for testing
-	plugin.initBridges()
 
 	return &TestSetup{
 		Plugin:      plugin,

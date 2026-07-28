@@ -32,25 +32,20 @@ func newRoutingTestPlugin(t *testing.T) *Plugin {
 	p.pendingFiles = NewPendingFileTracker()
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	p.configuration = &configuration{}
-	p.remoteID = routeRemoteA
 
 	servers := []kvstore.ServerConfig{
 		{ServerID: routeServerA, ServerURL: "https://a.example.org", ServerName: "a.example.org", UsernamePrefix: "matrixa", Enabled: true, RemoteID: routeRemoteA},
-		{ServerID: routeServerB, ServerURL: "https://b.example.org", ServerName: "b.example.org", UsernamePrefix: "matrixb", Enabled: true, RemoteID: routeRemoteB, Injected: true},
+		{ServerID: routeServerB, ServerURL: "https://b.example.org", ServerName: "b.example.org", UsernamePrefix: "matrixb", Enabled: true, RemoteID: routeRemoteB, SiteURL: "https://b.example.org"},
 	}
 	data, err := json.Marshal(servers)
 	require.NoError(t, err)
 	require.NoError(t, p.kvstore.Set(kvstore.KeyServersConfig, data))
 
 	p.matrixClientsLock.Lock()
-	p.serverID = routeServerA
 	p.remoteToServerID = map[string]string{routeRemoteA: routeServerA, routeRemoteB: routeServerB}
 	p.ownRemoteIDs = map[string]struct{}{routeRemoteA: {}, routeRemoteB: {}}
 	p.matrixClientsLock.Unlock()
 
-	// resolveOutboundServers uses the default bridge only for its isDirectChannel
-	// helper (which touches the API, not a Matrix client).
-	p.mattermostToMatrixBridge = p.newMattermostToMatrixBridge(routeServerA)
 	return p
 }
 
@@ -69,9 +64,9 @@ func TestIsOwnRemoteID(t *testing.T) {
 	assert.False(t, p.isOwnRemoteID(routeUnknownR))
 	assert.False(t, p.isOwnRemoteID(""))
 
-	// Falls back to the cached primary remoteID even when the maps are empty.
+	// With no own-remote map there is no fallback: nothing is recognized as own.
 	p.ownRemoteIDs = nil
-	assert.True(t, p.isOwnRemoteID(routeRemoteA))
+	assert.False(t, p.isOwnRemoteID(routeRemoteA))
 	assert.False(t, p.isOwnRemoteID(routeRemoteB))
 }
 
@@ -93,8 +88,8 @@ func TestRemoteIDForServer(t *testing.T) {
 	p := newRoutingTestPlugin(t)
 
 	assert.Equal(t, routeRemoteB, p.remoteIDForServer(routeServerB))
-	// Unknown server falls back to the primary remote.
-	assert.Equal(t, routeRemoteA, p.remoteIDForServer("no-such-server"))
+	// Unknown server has no remote (no fallback).
+	assert.Equal(t, "", p.remoteIDForServer("no-such-server"))
 }
 
 func TestResolveOutboundServers_MappedChannel(t *testing.T) {

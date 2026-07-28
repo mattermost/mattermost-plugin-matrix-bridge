@@ -140,10 +140,16 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		t.Helper()
 		plugin := &Plugin{}
 		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: matrixServerURL}
+		plugin.configuration = &configuration{}
 		plugin.kvstore = NewMemoryKVStore()
 		// Seed the registry so isGhostUser can resolve the server's domain by ID.
-		seedTestServerConfig(plugin)
+		seedServerEntry(plugin, kvstore.ServerConfig{
+			ServerID:   testServerID,
+			ServerURL:  matrixServerURL,
+			ServerName: serverDomain,
+			Enabled:    true,
+			RemoteID:   testRemoteID,
+		})
 		return plugin
 	}
 

@@ -185,8 +185,8 @@ func (s *BridgeUtils) matrixUsernamePrefix() string {
 }
 
 // serverDomain returns the property-key-sanitized domain of this bridge's Matrix
-// server, resolved from the managed server registry (the source of truth for
-// per-server settings). It is used to build the per-server post property key
+// server, resolved from the managed server registry (which holds per-server
+// settings). It is used to build the per-server post property key
 // "matrix_event_id_<domain>".
 //
 // The domain is derived from the homeserver's Matrix server name when set (the
@@ -194,19 +194,19 @@ func (s *BridgeUtils) matrixUsernamePrefix() string {
 // only falls back to the connection URL's host otherwise. Using the server name
 // keeps the key unique across homeservers even when several share a connection
 // host but differ by port (e.g. localhost:8008 vs localhost:8009), where the
-// URL-host-derived key would collide and cross-wire their event IDs. When no
-// registry entry exists (before the first reconcile) it falls back to the flat
-// configuration, which yields the same value in the single-server case.
+// URL-host-derived key would collide and cross-wire their event IDs. The domain
+// is resolved from this bridge's registry entry; returns "" if the entry is
+// missing or unreadable.
 func (s *BridgeUtils) serverDomain() string {
 	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
 	if err != nil {
-		s.logger.LogError("Failed to read server registry for server domain; using config fallback", "server_id", s.serverID, "error", err)
-		return s.configServerDomain()
+		s.logger.LogError("Failed to read server registry for server domain", "server_id", s.serverID, "error", err)
+		return ""
 	}
 	servers, err := kvstore.ParseServersConfig(data)
 	if err != nil {
-		s.logger.LogError("Corrupt server registry; using config fallback for server domain", "server_id", s.serverID, "error", err)
-		return s.configServerDomain()
+		s.logger.LogError("Corrupt server registry while resolving server domain", "server_id", s.serverID, "error", err)
+		return ""
 	}
 	if server, ok := kvstore.ServerConfigForID(servers, s.serverID); ok {
 		if server.ServerName != "" {
@@ -216,18 +216,8 @@ func (s *BridgeUtils) serverDomain() string {
 			return extractServerDomain(s.logger, server.ServerURL)
 		}
 	}
-	// No registry yet (before the first reconcile) or no entry for this server.
-	return s.configServerDomain()
-}
-
-// configServerDomain derives the server domain from the flat configuration,
-// preferring the configured Matrix server name over the connection URL host.
-func (s *BridgeUtils) configServerDomain() string {
-	config := s.getConfiguration()
-	if name := config.GetMatrixServerName(); name != "" {
-		return sanitizeDomainForPropertyKey(name)
-	}
-	return extractServerDomain(s.logger, config.MatrixServerURL)
+	s.logger.LogError("No registry entry for server while resolving server domain", "server_id", s.serverID)
+	return ""
 }
 
 func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {
@@ -487,14 +477,22 @@ func (s *BridgeUtils) isGhostUser(matrixUserID string) bool {
 // DM channel detection and handling utilities
 
 func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) {
-	channel, appErr := s.API.GetChannel(channelID)
+	return detectDirectChannel(s.API, channelID)
+}
+
+// detectDirectChannel reports whether channelID is a direct or group DM and, if
+// so, the IDs of its members. It is server-agnostic — it inspects only the
+// Mattermost channel — so it lives as a free function usable without a Matrix
+// server-bound bridge (see Plugin.isDirectChannel and BridgeUtils.isDirectChannel).
+func detectDirectChannel(api plugin.API, channelID string) (bool, []string, error) {
+	channel, appErr := api.GetChannel(channelID)
 	if appErr != nil {
 		return false, nil, errors.Wrap(appErr, "failed to get channel")
 	}
 
 	if channel.Type == model.ChannelTypeDirect {
 		// Get the two users in the DM
-		members, appErr := s.API.GetChannelMembers(channelID, 0, 10)
+		members, appErr := api.GetChannelMembers(channelID, 0, 10)
 		if appErr != nil {
 			return false, nil, errors.Wrap(appErr, "failed to get channel members")
 		}
@@ -513,7 +511,7 @@ func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) 
 		limit := 100
 
 		for {
-			pageMembers, appErr := s.API.GetChannelMembers(channelID, offset, limit)
+			pageMembers, appErr := api.GetChannelMembers(channelID, offset, limit)
 			if appErr != nil {
 				return false, nil, errors.Wrap(appErr, "failed to get group channel members")
 			}
@@ -540,7 +538,6 @@ func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername str
 	// Mattermost usernames for Matrix users follow the pattern: "prefix:username"
 	// We need to reverse this to get "@username:server.com"
 
-	config := s.configGetter.getConfiguration()
 	prefix := s.matrixUsernamePrefix()
 
 	// Check if username has the expected prefix
@@ -555,20 +552,21 @@ func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername str
 		return "" // Empty username
 	}
 
-	// Extract server domain using ServerDiscovery. Resolve the URL/name from the
-	// managed registry for this bridge's server so a reconstruction on server B
-	// appends B's domain, not the flat config's (single-server) domain. Fall back
-	// to the flat config when there is no registry entry (pre-reconcile), which
-	// yields the same value in the single-server case.
-	serverURL := config.GetMatrixServerURL()
-	configuredServerName := config.GetMatrixServerName()
+	// Resolve the URL/name from this bridge's registry entry (the sole source of
+	// truth) so a reconstruction on server B appends B's domain.
+	var serverURL, configuredServerName string
 	if data, regErr := s.kvstore.Get(kvstore.KeyServersConfig); regErr == nil {
 		if servers, parseErr := kvstore.ParseServersConfig(data); parseErr == nil {
-			if sc, ok := kvstore.ServerConfigForID(servers, s.serverID); ok && sc.ServerURL != "" {
+			if sc, ok := kvstore.ServerConfigForID(servers, s.serverID); ok {
 				serverURL = sc.ServerURL
 				configuredServerName = sc.ServerName
 			}
 		}
+	}
+	if serverURL == "" {
+		s.logger.LogWarn("No registry entry for server; cannot reconstruct Matrix user ID",
+			"server_id", s.serverID, "mattermost_username", mattermostUsername)
+		return ""
 	}
 
 	logger := matrix.NewAPILogger(s.API)

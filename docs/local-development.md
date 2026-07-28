@@ -30,7 +30,7 @@ For local development and testing, you can run a Matrix Synapse server using Doc
 2. Create an admin user:
 
     ```bash
-    docker exec -it mattermost-plugin-matrix-bridge-synapse-1 register_new_matrix_user -c /data/homeserver.yaml -u admin -p admin123 -a http://localhost:8008
+    docker compose exec synapse register_new_matrix_user -c /data/homeserver.yaml -u admin -p admin123 -a http://localhost:8008
     ```
 
 3. The Matrix server will be available at `http://localhost:8888`
@@ -83,7 +83,7 @@ Bring everything up and create an admin user on the second server:
 
 ```bash
 docker-compose up -d
-docker exec -it mattermost-plugin-matrix-bridge-synapse2-1 register_new_matrix_user -c /data/homeserver.yaml -u admin -p admin123 -a http://localhost:8008
+docker compose exec synapse2 register_new_matrix_user -c /data/homeserver.yaml -u admin -p admin123 -a http://localhost:8008
 ```
 
 Configure **Server 1** as usual through the System Console (Matrix Server URL

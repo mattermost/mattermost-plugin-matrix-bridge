@@ -23,40 +23,19 @@ type env struct {
 	api    *plugintest.API
 }
 
-type mockConfiguration struct {
-	serverURL string
-}
-
-func (m *mockConfiguration) GetMatrixServerURL() string {
-	return m.serverURL
-}
-
-func (m *mockConfiguration) GetMatrixServerName() string {
-	return "" // No configured server name in tests
-}
-
 // mockPlugin implements the PluginAccessor interface for testing
 type mockPlugin struct {
 	client       *pluginapi.Client
 	kvstore      kvstore.KVStore
 	matrixClient *matrix.Client
-	config       Configuration
 	pluginAPI    *plugintest.API
-}
-
-func (m *mockPlugin) GetMatrixClient() *matrix.Client {
-	return m.matrixClient
 }
 
 func (m *mockPlugin) GetKVStore() kvstore.KVStore {
 	return m.kvstore
 }
 
-func (m *mockPlugin) GetConfiguration() Configuration {
-	return m.config
-}
-
-func (m *mockPlugin) CreateOrGetGhostUser(mattermostUserID string) (string, error) {
+func (m *mockPlugin) CreateOrGetGhostUserForServer(_, mattermostUserID string) (string, error) {
 	// Mock implementation - return test ghost user
 	return "_mattermost_" + mattermostUserID + ":test.com", nil
 }
@@ -69,12 +48,8 @@ func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client {
 	return m.client
 }
 
-func (m *mockPlugin) GetRemoteID() string {
+func (m *mockPlugin) GetRemoteIDForServer(string) string {
 	return "test-remote-id"
-}
-
-func (m *mockPlugin) GetServerID() string {
-	return "test-server-id"
 }
 
 func (m *mockPlugin) RunKVStoreMigrations() error {
@@ -91,7 +66,7 @@ func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 	}, nil // Mock implementation returns sample results
 }
 
-func (m *mockPlugin) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
+func (m *mockPlugin) GetMatrixUserIDFromMattermostUserForServer(_, mattermostUserID string) (string, error) {
 	// Mock implementation - return test Matrix user
 	return "@test_" + mattermostUserID + ":test.com", nil
 }
@@ -104,7 +79,7 @@ func (m *mockPlugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
 	return kvstore.ParseServersConfig(data)
 }
 
-func (m *mockPlugin) AddManagedServer(serverURL, serverName, asToken, hsToken, usernamePrefix string) (string, error) {
+func (m *mockPlugin) AddServer(serverURL, serverName, asToken, hsToken, usernamePrefix string) (string, error) {
 	servers, _ := m.GetManagedServers()
 	serverID := "srv_" + serverName
 	entry := kvstore.ServerConfig{ServerID: serverID, ServerURL: serverURL, ServerName: serverName, ASToken: asToken, HSToken: hsToken, UsernamePrefix: usernamePrefix, Enabled: true}
@@ -132,7 +107,7 @@ func (m *mockPlugin) GetMatrixClientForServer(string) *matrix.Client {
 	return m.matrixClient
 }
 
-func (m *mockPlugin) RemoveManagedServer(serverID string) (bool, error) {
+func (m *mockPlugin) RemoveServer(serverID string) (bool, error) {
 	servers, _ := m.GetManagedServers()
 	filtered := make([]kvstore.ServerConfig, 0, len(servers))
 	found := false
@@ -151,6 +126,21 @@ func (m *mockPlugin) RemoveManagedServer(serverID string) (bool, error) {
 		return false, err
 	}
 	return true, m.kvstore.Set(kvstore.KeyServersConfig, data)
+}
+
+// mockAllLogs registers permissive matchers for every log level and argument
+// count so deep code paths (e.g. server discovery, matrix client) that log
+// through the plugin API never panic on an unmocked call.
+func mockAllLogs(api *plugintest.API) {
+	for _, lvl := range []string{"LogDebug", "LogInfo", "LogWarn", "LogError"} {
+		for n := 1; n <= 14; n++ {
+			args := make([]any, n)
+			for i := range args {
+				args[i] = mock.Anything
+			}
+			api.On(lvl, args...).Return().Maybe()
+		}
+	}
 }
 
 func setupTest() *env {
@@ -316,20 +306,15 @@ func TestMatrixCreateCommandParsing(t *testing.T) {
 			var capturedPublish bool
 			var createCalled bool
 
-			// Create mock plugin API
-			mockPlugin := &mockPlugin{
-				client:       env.client,
-				kvstore:      kvstore.NewKVStore(env.client),
-				matrixClient: nil, // Will cause create to fail gracefully
-				config:       &mockConfiguration{serverURL: "http://test.com"},
-				pluginAPI:    env.api,
-			}
+			// Create mock plugin API (one server registered, nil Matrix client so
+			// create fails gracefully with "Matrix client not configured").
+			mockPlugin := newSingleServerMockPlugin(t, env)
 
 			testHandler := &testCommandHandler{
 				Handler: &Handler{
 					plugin:    mockPlugin,
 					client:    env.client,
-					kvstore:   kvstore.NewKVStore(env.client),
+					kvstore:   mockPlugin.kvstore,
 					pluginAPI: env.api,
 				},
 				onCreateRoom: func(roomName string, publish bool) {
@@ -447,7 +432,7 @@ func setupCommandRegistration(env *env) {
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
 	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
 
-	serverCmd := model.NewAutocompleteData("server", "[list|add|remove|map]", serverCommandDesc)
+	serverCmd := model.NewAutocompleteData("server", "[list|add|remove|map|unmap|registration|status]", serverCommandDesc)
 	serverCmd.AddCommand(model.NewAutocompleteData("list", "", "List all registered Matrix servers"))
 	serverAddCmd := model.NewAutocompleteData("add", "<server_url> <server_name> <as_token> <hs_token> [username_prefix]", "Register or replace a Matrix server")
 	serverAddCmd.AddTextArgument("Matrix homeserver base URL", "<server_url>", "")
@@ -459,10 +444,19 @@ func setupCommandRegistration(env *env) {
 	serverRemoveCmd := model.NewAutocompleteData("remove", "<server_id>", "Remove a registered Matrix server")
 	serverRemoveCmd.AddTextArgument("Server ID (from /matrix server list)", "<server_id>", "")
 	serverCmd.AddCommand(serverRemoveCmd)
-	serverMapCmd := model.NewAutocompleteData("map", "<server_id> <room_alias|room_id>", "Map the current channel to a room on a specific server")
-	serverMapCmd.AddTextArgument("Server ID (from /matrix server list)", "<server_id>", "")
+	serverMapCmd := model.NewAutocompleteData("map", "[server_id] <room_alias|room_id>", "Map the current channel to a room on a server")
+	serverMapCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
 	serverMapCmd.AddTextArgument("Matrix room alias or room ID", "<room_alias|room_id>", "")
 	serverCmd.AddCommand(serverMapCmd)
+	serverUnmapCmd := model.NewAutocompleteData("unmap", "[server_id]", "Remove the current channel's mapping for a server")
+	serverUnmapCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
+	serverCmd.AddCommand(serverUnmapCmd)
+	serverRegistrationCmd := model.NewAutocompleteData("registration", "[server_id]", "Print the Application Service registration YAML")
+	serverRegistrationCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
+	serverCmd.AddCommand(serverRegistrationCmd)
+	serverStatusCmd := model.NewAutocompleteData("status", "[server_id]", "Show status for a Matrix server")
+	serverStatusCmd.AddTextArgument("Server ID (optional when one server; from /matrix server list)", "[server_id]", "")
+	serverCmd.AddCommand(serverStatusCmd)
 	matrixData.AddCommand(serverCmd)
 
 	env.api.On("RegisterCommand", &model.Command{
@@ -534,13 +528,7 @@ func TestMatrixCreateCommandEdgeCases(t *testing.T) {
 			env.api.On("GetChannel", "test-channel-id").Return(channel, nil)
 
 			// Create command handler
-			mockPlugin := &mockPlugin{
-				client:       env.client,
-				kvstore:      kvstore.NewKVStore(env.client),
-				matrixClient: nil, // No matrix client - will fail gracefully
-				config:       &mockConfiguration{serverURL: "http://test.com"},
-				pluginAPI:    env.api,
-			}
+			mockPlugin := newSingleServerMockPlugin(t, env)
 			cmdHandler := NewCommandHandler(mockPlugin)
 
 			args := &model.CommandArgs{
@@ -594,13 +582,7 @@ func TestMatrixCommandErrors(t *testing.T) {
 			setupCommandRegistration(env)
 
 			// Create command handler
-			mockPlugin := &mockPlugin{
-				client:       env.client,
-				kvstore:      kvstore.NewKVStore(env.client),
-				matrixClient: nil,
-				config:       &mockConfiguration{serverURL: "http://test.com"},
-				pluginAPI:    env.api,
-			}
+			mockPlugin := newSingleServerMockPlugin(t, env)
 			cmdHandler := NewCommandHandler(mockPlugin)
 
 			args := &model.CommandArgs{
@@ -659,18 +641,12 @@ func TestChannelNameFallback(t *testing.T) {
 		env.api.On("GetChannel", "test-channel-id").Return(channel, nil).Once()
 
 		var capturedRoomName string
-		mockPlugin := &mockPlugin{
-			client:       env.client,
-			kvstore:      kvstore.NewKVStore(env.client),
-			matrixClient: nil,
-			config:       &mockConfiguration{serverURL: "http://test.com"},
-			pluginAPI:    env.api,
-		}
+		mockPlugin := newSingleServerMockPlugin(t, env)
 		testHandler := &testCommandHandler{
 			Handler: &Handler{
 				plugin:    mockPlugin,
 				client:    env.client,
-				kvstore:   kvstore.NewKVStore(env.client),
+				kvstore:   mockPlugin.kvstore,
 				pluginAPI: env.api,
 			},
 			onCreateRoom: func(roomName string, _ bool) {
@@ -697,6 +673,34 @@ func TestChannelNameFallback(t *testing.T) {
 type memKV struct{ m map[string][]byte }
 
 func newMemKV() *memKV { return &memKV{m: map[string][]byte{}} }
+
+// seedCommandServer writes a single server into the store so resolveServerID
+// resolves to it in command tests.
+func seedCommandServer(t *testing.T, store kvstore.KVStore, serverID, serverURL, serverName string) {
+	t.Helper()
+	data, err := json.Marshal([]kvstore.ServerConfig{{
+		ServerID: serverID, ServerURL: serverURL, ServerName: serverName,
+		ASToken: "as", HSToken: "hs", UsernamePrefix: "matrix", Enabled: true,
+		SiteURL: "https://" + serverName, RemoteID: "remote-" + serverID,
+	}})
+	require.NoError(t, err)
+	require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
+}
+
+// newSingleServerMockPlugin returns a mockPlugin backed by an in-memory KV that
+// already has exactly one server registered, so resolveServerID succeeds. The
+// Matrix client is nil, so client-requiring commands fail with "Matrix client
+// not configured" — exercising the not-configured path.
+func newSingleServerMockPlugin(t *testing.T, env *env) *mockPlugin {
+	t.Helper()
+	store := newMemKV()
+	seedCommandServer(t, store, "test-server-id", "http://test.com", "test.com")
+	return &mockPlugin{
+		client:    env.client,
+		kvstore:   store,
+		pluginAPI: env.api,
+	}
+}
 
 func (s *memKV) GetTemplateData(string) (string, error) { return "", nil }
 func (s *memKV) Get(k string) ([]byte, error)           { return s.m[k], nil }
@@ -734,7 +738,6 @@ func newUnmapTestHandler(env *env, store kvstore.KVStore) *Handler {
 		plugin: &mockPlugin{
 			client:    env.client,
 			kvstore:   store,
-			config:    &mockConfiguration{serverURL: "http://test.com"},
 			pluginAPI: env.api,
 		},
 		client:    env.client,
@@ -744,7 +747,7 @@ func newUnmapTestHandler(env *env, store kvstore.KVStore) *Handler {
 }
 
 func TestExecuteUnmapCommand(t *testing.T) {
-	// Note: mockPlugin.GetServerID() returns "test-server-id".
+	const serverID = "test-server-id"
 
 	t.Run("ClearsCorruptMapping", func(t *testing.T) {
 		env := setupTest()
@@ -756,7 +759,7 @@ func TestExecuteUnmapCommand(t *testing.T) {
 		require.NoError(t, store.Set(key, []byte("!not-json:server")))
 
 		h := newUnmapTestHandler(env, store)
-		resp := h.executeUnmapCommand(&model.CommandArgs{ChannelId: "chanX"})
+		resp := h.executeUnmapCommand(&model.CommandArgs{ChannelId: "chanX"}, serverID)
 
 		assert.Contains(t, resp.Text, "Corrupt Mapping Cleared")
 		v, _ := store.Get(key)
@@ -774,7 +777,7 @@ func TestExecuteUnmapCommand(t *testing.T) {
 		require.NoError(t, store.Set(key, val))
 
 		h := newUnmapTestHandler(env, store)
-		resp := h.executeUnmapCommand(&model.CommandArgs{ChannelId: "chanY"})
+		resp := h.executeUnmapCommand(&model.CommandArgs{ChannelId: "chanY"}, serverID)
 
 		assert.Contains(t, resp.Text, "No Mapping Found")
 		v, _ := store.Get(key)
@@ -783,19 +786,19 @@ func TestExecuteUnmapCommand(t *testing.T) {
 }
 
 func TestExecuteListMappingsCommand(t *testing.T) {
-	// mockPlugin.GetServerID() returns "test-server-id"; only mappings for that
-	// server must be listed.
+	// list shows mappings across ALL servers, annotated with the serverID; only
+	// corrupt values are skipped.
 	env := setupTest()
 	env.api.On("GetChannel", "chanA").Return(&model.Channel{Id: "chanA", Name: "chan-a"}, nil).Maybe()
 	env.api.On("GetChannel", mock.AnythingOfType("string")).Return(&model.Channel{Id: "x", Name: "x"}, nil).Maybe()
 	env.api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
 
 	store := newMemKV()
-	// Mapping for THIS server.
+	// Mapping for server A.
 	valA, err := kvstore.BuildSingleChannelMapping("test-server-id", "!roomA:server")
 	require.NoError(t, err)
 	require.NoError(t, store.Set(kvstore.BuildChannelMappingKey("chanA"), valA))
-	// Mapping for a DIFFERENT server — must be filtered out.
+	// Mapping for a different server — now also listed (annotated with its serverID).
 	valB, err := kvstore.BuildSingleChannelMapping("other-server", "!roomB:server")
 	require.NoError(t, err)
 	require.NoError(t, store.Set(kvstore.BuildChannelMappingKey("chanB"), valB))
@@ -805,8 +808,8 @@ func TestExecuteListMappingsCommand(t *testing.T) {
 	h := newUnmapTestHandler(env, store)
 	resp := h.executeListMappingsCommand(&model.CommandArgs{ChannelId: "chanZ"})
 
-	assert.Contains(t, resp.Text, "!roomA:server", "this server's mapping should be listed")
-	assert.Contains(t, resp.Text, "1 total", "only the matching-server mapping should be counted")
-	assert.NotContains(t, resp.Text, "!roomB:server", "another server's mapping must not be listed")
+	assert.Contains(t, resp.Text, "!roomA:server", "server A's mapping should be listed")
+	assert.Contains(t, resp.Text, "!roomB:server", "every server's mapping should be listed")
+	assert.Contains(t, resp.Text, "2 channels", "both valid channels should be counted")
 	assert.NotContains(t, resp.Text, "chanC", "a corrupt mapping must be skipped, not crash the listing")
 }

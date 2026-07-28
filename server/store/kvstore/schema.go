@@ -6,9 +6,10 @@ import "encoding/json"
 // and prefixes live in constants.go.
 
 // ServerConfig is a single entry in the managed Matrix server registry,
-// persisted as a JSON array under the KeyServersConfig key. The registry
-// currently holds exactly one entry, derived from the flat plugin.json
-// configuration, but the shape supports multiple homeservers.
+// persisted as a JSON array under the KeyServersConfig key. The registry holds
+// every configured homeserver; entries are managed via the `/matrix server`
+// slash commands and, on upgrade from a single-server install, seeded once by
+// the v3 migration from the legacy flat plugin.json config.
 type ServerConfig struct {
 	// ServerID is a stable identifier derived deterministically from the
 	// homeserver hostname (see deriveServerID). It is the join key for every
@@ -29,14 +30,17 @@ type ServerConfig struct {
 	// Enabled indicates whether this server participates in sync. Populated but
 	// not yet independently toggle-able via UI.
 	Enabled bool `json:"enabled"`
-	// RemoteID is the shared-channels remote identifier, currently the single
-	// global remoteID returned by RegisterPluginForSharedChannels.
+	// RemoteID is the shared-channels remote identifier returned by
+	// RegisterPluginForSharedChannels for this server (one remote per server).
 	RemoteID string `json:"remote_id"`
-	// Injected marks a server added out-of-band (via the `/matrix server add`
-	// admin command for local multi-server testing) rather than derived from the
-	// flat plugin.json configuration. reconcileServerConfig preserves injected
-	// entries and always rebuilds the single non-injected primary.
-	Injected bool `json:"injected,omitempty"`
+	// SiteURL is the value passed to RegisterPluginForSharedChannels to identify
+	// this server's remote. It must be unique and stable per server so each gets
+	// its own remoteID. An empty SiteURL resolves to the legacy
+	// "plugin_<PluginID>" remote and is reserved for the single server migrated
+	// from a pre-multi-server (v2) install, so that upgrade preserves its existing
+	// shared channels without re-keying the remote. Servers added via
+	// `/matrix server add` derive it from the homeserver hostname.
+	SiteURL string `json:"site_url,omitempty"`
 }
 
 // ChannelServerMapping is one element of the value stored under a

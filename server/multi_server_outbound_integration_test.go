@@ -187,7 +187,7 @@ func (suite *MultiServerIntegrationTestSuite) TestOutboundMessageEditFansOut() {
 	require.NoError(t, err)
 
 	for _, r := range rooms {
-		validator := matrixtest.NewEventValidation(t, r.c.ServerDomain, suite.plugin.remoteID)
+		validator := matrixtest.NewEventValidation(t, r.c.ServerDomain, suite.plugin.remoteIDForServer(r.serverID))
 		require.Eventuallyf(t, func() bool {
 			return findEditEvent(r.c.GetRoomEvents(t, r.roomID), originalEventIDs[r.serverID]) != nil
 		}, 15*time.Second, 300*time.Millisecond, "edit should reach %s", r.name)
@@ -241,7 +241,7 @@ func (suite *MultiServerIntegrationTestSuite) TestOutboundReactionFansOut() {
 	require.NoError(t, err)
 
 	for _, r := range rooms {
-		validator := matrixtest.NewEventValidation(t, r.c.ServerDomain, suite.plugin.remoteID)
+		validator := matrixtest.NewEventValidation(t, r.c.ServerDomain, suite.plugin.remoteIDForServer(r.serverID))
 		require.Eventuallyf(t, func() bool {
 			return findReactionEvent(r.c.GetRoomEvents(t, r.roomID), eventIDs[r.serverID]) != nil
 		}, 15*time.Second, 300*time.Millisecond, "reaction should reach %s", r.name)
@@ -320,7 +320,7 @@ func (suite *MultiServerIntegrationTestSuite) TestOutboundAttachmentFansOut() {
 
 	mxcByServer := make(map[string]string, len(rooms))
 	for _, r := range rooms {
-		validator := matrixtest.NewEventValidation(t, r.c.ServerDomain, suite.plugin.remoteID)
+		validator := matrixtest.NewEventValidation(t, r.c.ServerDomain, suite.plugin.remoteIDForServer(r.serverID))
 		var fileEvent *matrixtest.Event
 		require.Eventuallyf(t, func() bool {
 			fileEvent = matrixtest.FindEventByType(r.c.GetRoomEvents(t, r.roomID), "m.room.message")
@@ -453,9 +453,6 @@ func (suite *MultiServerIntegrationTestSuite) TestOutboundDMRoutesToRemotePartic
 
 	const ridA, ridB = "dm-remote-a", "dm-remote-b"
 	suite.seedDistinctServerRemotes(ridA, ridB)
-	// resolveOutboundServers' DM branch uses the default bridge's isDirectChannel,
-	// which SetupTest does not initialize.
-	suite.plugin.mattermostToMatrixBridge = suite.plugin.newMattermostToMatrixBridge(multiServerAID)
 
 	channelID := model.NewId()
 	localUserID := model.NewId()

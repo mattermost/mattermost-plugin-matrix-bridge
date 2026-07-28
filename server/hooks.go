@@ -3,6 +3,8 @@ package main
 import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // OnSharedChannelsSyncMsg is called when messages need to be synced from Mattermost to Matrix
@@ -80,8 +82,11 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, _ *model.RemoteClus
 	return model.SyncResponse{}, nil
 }
 
-// OnSharedChannelsPing is called to check if the bridge is healthy and ready to process messages
-func (p *Plugin) OnSharedChannelsPing(_ *model.RemoteCluster) bool {
+// OnSharedChannelsPing is called to check if the bridge is healthy and ready to
+// process messages. Each Matrix server is registered as its own shared-channels
+// remote, so the ping targets one remote: resolve it (via rc.RemoteId) to the
+// owning server and health-check only that server.
+func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
 	config := p.getConfiguration()
 
 	// If sync is disabled, we're still "healthy" but not actively processing
@@ -90,25 +95,58 @@ func (p *Plugin) OnSharedChannelsPing(_ *model.RemoteCluster) bool {
 		return true
 	}
 
-	// If Matrix client is not configured, we're not healthy
-	matrixClient := p.GetMatrixClient()
-	if matrixClient == nil {
-		p.logger.LogWarn("Ping failed - Matrix client not initialized")
+	servers, err := p.getServers()
+	if err != nil {
+		p.logger.LogWarn("Ping failed - could not read server registry", "error", err)
 		return false
 	}
+	if len(servers) == 0 {
+		// Sync is enabled but no server is configured yet: healthy but idle.
+		p.logger.LogDebug("Ping received but no Matrix server is configured")
+		return true
+	}
 
-	// Test Matrix connection health
-	if config.MatrixServerURL != "" && config.MatrixASToken != "" {
-		if err := matrixClient.TestConnection(); err != nil {
-			p.logger.LogWarn("Ping failed - Matrix connection test failed", "error", err)
+	// Resolve the pinged remote to the server that owns it and check only that
+	// server. If the remote cannot be resolved (nil/empty, or maps not yet
+	// populated), fall back to requiring every enabled server to be healthy.
+	if rc != nil && rc.RemoteId != "" {
+		if serverID, ok := p.serverIDForRemoteID(rc.RemoteId); ok {
+			server, found := kvstore.ServerConfigForID(servers, serverID)
+			if !found || !server.Enabled {
+				// The remote's server is unknown or disabled: healthy but idle for it.
+				p.logger.LogDebug("Ping received for an unknown or disabled server", "server_id", serverID, "remote_id", rc.RemoteId)
+				return true
+			}
+			return p.pingServer(server)
+		}
+		p.logger.LogDebug("Ping remote not resolved to a server; checking all enabled servers", "remote_id", rc.RemoteId)
+	}
+
+	// Fallback: every enabled server must have a healthy connection.
+	for _, server := range servers {
+		if !server.Enabled {
+			continue
+		}
+		if !p.pingServer(server) {
 			return false
 		}
-	} else {
-		p.logger.LogWarn("Ping failed - Matrix configuration incomplete")
-		return false
 	}
 
 	p.logger.LogDebug("Ping successful - Matrix bridge is healthy")
+	return true
+}
+
+// pingServer reports whether a single Matrix server has a live, reachable client.
+func (p *Plugin) pingServer(server kvstore.ServerConfig) bool {
+	matrixClient := p.getMatrixClient(server.ServerID)
+	if matrixClient == nil {
+		p.logger.LogWarn("Ping failed - Matrix client not initialized", "server_id", server.ServerID)
+		return false
+	}
+	if err := matrixClient.TestConnection(); err != nil {
+		p.logger.LogWarn("Ping failed - Matrix connection test failed", "server_id", server.ServerID, "error", err)
+		return false
+	}
 	return true
 }
 

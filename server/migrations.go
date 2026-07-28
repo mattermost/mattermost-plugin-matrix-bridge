@@ -505,22 +505,22 @@ var v3NamespacedPrefixes = []string{
 func (p *Plugin) runMigrationToVersion3WithResults() (*MigrationResult, error) {
 	p.logger.LogInfo("Running migration to version 3: namespacing keys by serverID")
 
-	// The server registry (and thus the serverID) is established by
-	// reconcileServerConfig during initMatrixClient, which runs before
-	// migrations. Reconcile again defensively in case migrations run first.
+	// Seed the managed server registry from the legacy flat plugin.json config.
+	// This is the one-time migration from single-server
+	// config to the registry model; the migrated server keeps the legacy
+	// shared-channels remote (empty SiteURL) so existing channels are preserved.
 	serverID := p.getSingleServerID()
 	if serverID == "" {
-		if _, err := p.reconcileServerConfig(); err != nil {
-			return nil, errors.Wrap(err, "failed to establish server registry for v3 migration")
+		sid, err := p.materializeServerFromLegacyConfig()
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to seed server registry for v3 migration")
 		}
-		serverID = p.getSingleServerID()
+		serverID = sid
 	}
 	if serverID == "" {
-		// No Matrix server is configured yet (e.g. a fresh install with sync
-		// disabled and no server URL). There are no per-server keys to namespace,
-		// so the v3 layout is trivially satisfied. The registry entry and its
-		// namespaced keys are created later, once a server URL is configured and
-		// reconcileServerConfig derives the serverID.
+		// No Matrix server was configured (e.g. a fresh install with no legacy
+		// server URL). There are no per-server keys to namespace, so the v3 layout
+		// is trivially satisfied. A server is added later via `/matrix server add`.
 		p.logger.LogInfo("v3 migration: no Matrix server configured; nothing to namespace")
 		return &MigrationResult{}, nil
 	}

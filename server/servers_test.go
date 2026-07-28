@@ -27,211 +27,79 @@ func stubAllLogging(api *plugintest.API) {
 	}
 }
 
-func TestReconcileServerConfig(t *testing.T) {
-	t.Run("MintsAndDerivesFieldsFromFlatConfig", func(t *testing.T) {
+func TestMaterializeServerFromLegacyConfig(t *testing.T) {
+	t.Run("MintsFromLegacyFlatConfig", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.remoteID = "remote-xyz"
-		plugin.configuration = &configuration{
+		mockLegacyPluginConfig(plugin.API.(*plugintest.API), legacyServerConfig{
 			MatrixServerURL:      "https://matrix.example.com",
 			MatrixServerName:     "example.com",
 			MatrixASToken:        "as-token",
 			MatrixHSToken:        "hs-token",
 			MatrixUsernamePrefix: "mx",
 			EnableSync:           true,
-		}
+		})
 
-		servers, err := plugin.reconcileServerConfig()
+		serverID, err := plugin.materializeServerFromLegacyConfig()
 		require.NoError(t, err)
-		require.Len(t, servers, 1)
-
-		s := servers[0]
 		expectedID, err := deriveServerID("https://matrix.example.com")
 		require.NoError(t, err)
-		assert.Equal(t, expectedID, s.ServerID, "serverID is derived from the URL hostname")
+		assert.Equal(t, expectedID, serverID, "serverID is derived from the URL hostname")
+
+		servers, err := plugin.getServers()
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		s := servers[0]
 		assert.Equal(t, "https://matrix.example.com", s.ServerURL)
 		assert.Equal(t, "example.com", s.ServerName)
 		assert.Equal(t, "as-token", s.ASToken)
 		assert.Equal(t, "hs-token", s.HSToken)
 		assert.Equal(t, "mx", s.UsernamePrefix)
 		assert.True(t, s.Enabled)
-		assert.Equal(t, "remote-xyz", s.RemoteID)
-
-		// The entry is persisted and reloads to the same serverID.
-		reloaded, err := plugin.getServers()
-		require.NoError(t, err)
-		require.Len(t, reloaded, 1)
-		assert.Equal(t, s.ServerID, reloaded[0].ServerID)
+		assert.Empty(t, s.SiteURL, "the migrated server keeps the legacy plugin remote (empty SiteURL)")
+		assert.Empty(t, s.RemoteID, "RemoteID is assigned later by registration, not materialization")
 	})
 
-	t.Run("ServerIDStableWhenHostnameUnchanged", func(t *testing.T) {
+	t.Run("NoEntryWhenLegacyURLEmpty", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: "https://a.example.com"}
+		mockLegacyPluginConfig(plugin.API.(*plugintest.API), legacyServerConfig{})
 
-		first, err := plugin.reconcileServerConfig()
+		serverID, err := plugin.materializeServerFromLegacyConfig()
 		require.NoError(t, err)
-		require.Len(t, first, 1)
-		originalID := first[0].ServerID
-		require.NotEmpty(t, originalID)
-
-		// A config edit that touches other fields but keeps the same hostname
-		// (here also normalizing scheme/port/trailing-slash) must keep the same
-		// serverID, even from a fresh process (cache cleared).
-		plugin.configuration = &configuration{MatrixServerURL: "http://a.example.com:8008/", MatrixASToken: "new"}
-		plugin.serverID = ""
-
-		second, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		require.Len(t, second, 1)
-		assert.Equal(t, originalID, second[0].ServerID, "serverID is stable while the hostname is unchanged")
-		assert.Equal(t, "http://a.example.com:8008/", second[0].ServerURL, "other fields update from flat config")
-	})
-
-	t.Run("ServerIDChangesWhenHostnameChanges", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: "https://a.example.com"}
-
-		first, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		originalID := first[0].ServerID
-
-		// Repointing to a different homeserver hostname derives a new serverID
-		// (records under the old ID are orphaned; a warning is logged).
-		plugin.configuration = &configuration{MatrixServerURL: "https://b.example.com"}
-		plugin.serverID = ""
-
-		second, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		require.Len(t, second, 1)
-		expectedID, err := deriveServerID("https://b.example.com")
-		require.NoError(t, err)
-		assert.Equal(t, expectedID, second[0].ServerID)
-		assert.NotEqual(t, originalID, second[0].ServerID, "a hostname change re-derives the serverID")
-	})
-
-	t.Run("NoEntryWhenServerURLEmpty", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: ""}
-
-		// No URL configured (e.g. sync disabled): reconcile is a no-op that must
-		// not fail activation and must not write a useless entry.
-		servers, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		assert.Empty(t, servers, "no server URL means no registry entry")
+		assert.Empty(t, serverID, "no legacy URL means no server to materialize")
 
 		reloaded, err := plugin.getServers()
 		require.NoError(t, err)
 		assert.Empty(t, reloaded)
 	})
 
-	t.Run("ErrorsOnUnparseableServerURL", func(t *testing.T) {
+	t.Run("IdempotentWhenEntryExists", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: "http://"}
+		mockLegacyPluginConfig(plugin.API.(*plugintest.API), legacyServerConfig{MatrixServerURL: "https://matrix.example.com"})
 
-		_, err := plugin.reconcileServerConfig()
-		require.Error(t, err, "a non-empty but unusable URL must fail loudly, not derive an empty serverID")
-	})
-
-	t.Run("ReReconcileUpdatesDerivedFields", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.remoteID = "remote-1"
-		plugin.configuration = &configuration{MatrixServerURL: "https://a.example.com", EnableSync: true}
-
-		first, err := plugin.reconcileServerConfig()
+		serverID, err := plugin.materializeServerFromLegacyConfig()
 		require.NoError(t, err)
-		require.Len(t, first, 1)
-		assert.Equal(t, "remote-1", first[0].RemoteID)
-		assert.True(t, first[0].Enabled)
-		originalID := first[0].ServerID
 
-		// A later reconcile (e.g. after shared-channels registration and a config
-		// edit that disables sync) refreshes the derived fields but keeps serverID.
-		plugin.remoteID = "remote-2"
-		plugin.configuration = &configuration{MatrixServerURL: "https://a.example.com", EnableSync: false}
-
-		second, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		require.Len(t, second, 1)
-		assert.Equal(t, originalID, second[0].ServerID)
-		assert.Equal(t, "remote-2", second[0].RemoteID)
-		assert.False(t, second[0].Enabled)
-	})
-
-	t.Run("PreservesInjectedServersAcrossReconcile", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: "https://a.example.com", EnableSync: true}
-
-		// Establish the primary, then persist an injected extra server alongside it.
-		first, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		require.Len(t, first, 1)
-		primaryID := first[0].ServerID
-
-		injected := kvstore.ServerConfig{ServerID: "injected01injected01inject1", ServerURL: "https://b.example.com", ServerName: "b.example.com", HSToken: "hs-b", Enabled: true, Injected: true}
-		require.NoError(t, plugin.persistServers(append(first, injected)))
-
-		// A later reconcile (warm cache) keeps the injected server and refreshes the primary.
-		second, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		require.Len(t, second, 2)
-		assert.Equal(t, primaryID, second[0].ServerID, "primary stays first")
-		assert.False(t, second[0].Injected)
-		assert.Equal(t, "injected01injected01inject1", second[1].ServerID, "injected server preserved")
-		assert.True(t, second[1].Injected)
-
-		// A cold reconcile (cleared cache) still preserves the injected server, and a
-		// primary URL change replaces only the primary — the injected extra survives.
-		plugin.serverID = ""
-		plugin.configuration = &configuration{MatrixServerURL: "https://c.example.com", EnableSync: true}
-		third, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
-		require.Len(t, third, 2)
-		newPrimaryID, err := deriveServerID("https://c.example.com")
-		require.NoError(t, err)
-		assert.Equal(t, newPrimaryID, third[0].ServerID)
-		assert.NotEqual(t, primaryID, third[0].ServerID, "old primary replaced, not preserved")
-		assert.Equal(t, "injected01injected01inject1", third[1].ServerID, "injected server still preserved after primary URL change")
-	})
-
-	t.Run("DoesNotMintOnReadError", func(t *testing.T) {
-		base := NewMemoryKVStore()
-		plugin := setupPluginForTest()
-		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: "https://a.example.com"}
-		plugin.kvstore = base
-
-		// An existing registry with a stable serverID.
-		seedTestServerConfig(plugin)
-
-		// Reads of servers_config now fail (transient backend error).
-		plugin.kvstore = &failOnGetKVStore{KVStore: base, failKeySubstr: kvstore.KeyServersConfig}
-		plugin.serverID = "" // force a registry read rather than using the cache
-
-		_, err := plugin.getServers()
-		require.Error(t, err, "a real read failure must surface, not look like an empty registry")
-
-		_, err = plugin.reconcileServerConfig()
-		require.Error(t, err, "reconcile must fail rather than mint a fresh serverID on a read error")
-
-		// The persisted serverID is unchanged — no re-mint, no orphaned records.
-		plugin.kvstore = base
+		// Simulate registration having assigned a RemoteID to the entry.
 		servers, err := plugin.getServers()
 		require.NoError(t, err)
-		require.Len(t, servers, 1)
-		assert.Equal(t, testServerID, servers[0].ServerID)
+		servers[0].RemoteID = "assigned-remote"
+		require.NoError(t, plugin.persistServers(servers))
+
+		// A second materialize is a no-op: it must not overwrite the existing entry.
+		again, err := plugin.materializeServerFromLegacyConfig()
+		require.NoError(t, err)
+		assert.Equal(t, serverID, again)
+
+		after, err := plugin.getServers()
+		require.NoError(t, err)
+		require.Len(t, after, 1, "no duplicate entry")
+		assert.Equal(t, "assigned-remote", after[0].RemoteID, "existing entry is preserved")
 	})
 
 	t.Run("GetServersNilKVStore", func(t *testing.T) {
@@ -248,6 +116,26 @@ func TestReconcileServerConfig(t *testing.T) {
 
 		_, err := plugin.getServers()
 		assert.Error(t, err)
+	})
+
+	t.Run("GetSingleServerIDAmbiguousWithMultipleServers", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.logger = &testLogger{t: t}
+		data, err := json.Marshal([]kvstore.ServerConfig{
+			{ServerID: "s1", ServerURL: "https://a.example.com"},
+			{ServerID: "s2", ServerURL: "https://b.example.com"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		assert.Empty(t, plugin.getSingleServerID(), "with multiple servers there is no single server")
+
+		// Exactly one server resolves.
+		single, err := json.Marshal([]kvstore.ServerConfig{{ServerID: "only", ServerURL: "https://a.example.com"}})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, single))
+		assert.Equal(t, "only", plugin.getSingleServerID())
 	})
 }
 
@@ -276,7 +164,7 @@ func TestManagedServers(t *testing.T) {
 		t.Helper()
 		api := &plugintest.API{}
 		stubAllLogging(api)
-		// AddManagedServer registers every server for shared channels. Stub the
+		// AddServer registers every server for shared channels. Stub the
 		// creator lookup and return a remoteID keyed by SiteURL, faithfully modeling
 		// the real API so distinct servers get distinct remotes and re-registration
 		// is idempotent.
@@ -287,15 +175,21 @@ func TestManagedServers(t *testing.T) {
 		plugin.SetAPI(api)
 		plugin.logger = &testLogger{t: t}
 		plugin.kvstore = NewMemoryKVStore()
-		plugin.remoteID = "rid-primary"
-		plugin.configuration = &configuration{MatrixServerURL: primaryURL, EnableSync: true}
+		plugin.configuration = &configuration{EnableSync: true}
+		// Seed a "primary" server (the migrated single server: legacy empty SiteURL).
+		primaryID, err := deriveServerID(primaryURL)
+		require.NoError(t, err)
+		seedServerEntry(plugin, kvstore.ServerConfig{
+			ServerID: primaryID, ServerURL: primaryURL, ServerName: "primary.example.com",
+			Enabled: true, RemoteID: "rid-primary", SiteURL: "",
+		})
 		return plugin
 	}
 
-	t.Run("AddStampsInjectedAndSurvivesReconcile", func(t *testing.T) {
+	t.Run("AddStampsSiteURLAndPersists", func(t *testing.T) {
 		plugin := newPlugin(t)
 
-		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as-x", "hs-x", "mx")
+		serverID, err := plugin.AddServer(extraURL, "extra.example.com", "as-x", "hs-x", "mx")
 		require.NoError(t, err)
 		expectedID, err := deriveServerID(extraURL)
 		require.NoError(t, err)
@@ -303,31 +197,30 @@ func TestManagedServers(t *testing.T) {
 
 		servers, err := plugin.GetManagedServers()
 		require.NoError(t, err)
-		require.Len(t, servers, 2, "primary plus the injected extra")
+		require.Len(t, servers, 2, "primary plus the added extra")
 
 		extra, ok := kvstore.ServerConfigForID(servers, serverID)
 		require.True(t, ok)
-		assert.True(t, extra.Injected, "an added server is marked injected")
+		assert.Equal(t, "https://extra.example.com", extra.SiteURL, "an added server derives its SiteURL from the hostname")
 		assert.Equal(t, "hs-x", extra.HSToken)
 		assert.Equal(t, "as-x", extra.ASToken)
 		assert.Equal(t, "mx", extra.UsernamePrefix)
 		assert.True(t, extra.Enabled)
 
-		// A later reconcile (driven by any config change) must not drop the injected
-		// server: the Injected flag is exactly what makes it survive.
-		reconciled, err := plugin.reconcileServerConfig()
+		// The added server is a permanent registry record (registry is authoritative).
+		reloaded, err := plugin.getServers()
 		require.NoError(t, err)
-		_, stillThere := kvstore.ServerConfigForID(reconciled, serverID)
-		assert.True(t, stillThere, "injected server survives reconcile")
+		_, stillThere := kvstore.ServerConfigForID(reloaded, serverID)
+		assert.True(t, stillThere, "added server persists")
 	})
 
 	t.Run("AddUpsertsInPlaceAndKeepsStableRemoteID", func(t *testing.T) {
 		plugin := newPlugin(t)
 
-		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as-1", "hs-1", "mx")
+		serverID, err := plugin.AddServer(extraURL, "extra.example.com", "as-1", "hs-1", "mx")
 		require.NoError(t, err)
 
-		// AddManagedServer registers the injected server, which assigns its distinct
+		// AddServer registers the injected server, which assigns its distinct
 		// remote ID immediately.
 		servers, err := plugin.getServers()
 		require.NoError(t, err)
@@ -337,7 +230,7 @@ func TestManagedServers(t *testing.T) {
 
 		// Re-adding the same URL updates fields in place; registration is idempotent
 		// so the remote ID is unchanged.
-		_, err = plugin.AddManagedServer(extraURL, "extra.example.com", "as-2", "hs-2", "mx2")
+		_, err = plugin.AddServer(extraURL, "extra.example.com", "as-2", "hs-2", "mx2")
 		require.NoError(t, err)
 
 		after, err := plugin.GetManagedServers()
@@ -352,7 +245,7 @@ func TestManagedServers(t *testing.T) {
 	t.Run("AddAssignsDistinctRemoteResolvableToServer", func(t *testing.T) {
 		plugin := newPlugin(t)
 
-		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as", "hs", "mx")
+		serverID, err := plugin.AddServer(extraURL, "extra.example.com", "as", "hs", "mx")
 		require.NoError(t, err)
 
 		servers, err := plugin.GetManagedServers()
@@ -360,7 +253,7 @@ func TestManagedServers(t *testing.T) {
 		extra, ok := kvstore.ServerConfigForID(servers, serverID)
 		require.True(t, ok)
 
-		assert.NotEqual(t, plugin.remoteID, extra.RemoteID, "the added server's remote differs from the primary's")
+		assert.NotEqual(t, "rid-primary", extra.RemoteID, "the added server's remote differs from the primary's")
 
 		// The property this wiring fixes: loop attribution resolves the added server's
 		// remote to the added server, immediately (no restart).
@@ -376,9 +269,9 @@ func TestManagedServers(t *testing.T) {
 		// The SiteURL (and thus the remote) must key off the unique hostname, not the
 		// shared ServerName, or the two servers would collapse onto one remoteID.
 		const dupName = "shared.example.com"
-		id1, err := plugin.AddManagedServer("https://one.example.com", dupName, "as1", "hs1", "mx")
+		id1, err := plugin.AddServer("https://one.example.com", dupName, "as1", "hs1", "mx")
 		require.NoError(t, err)
-		id2, err := plugin.AddManagedServer("https://two.example.com", dupName, "as2", "hs2", "mx")
+		id2, err := plugin.AddServer("https://two.example.com", dupName, "as2", "hs2", "mx")
 		require.NoError(t, err)
 		require.NotEqual(t, id1, id2, "distinct hostnames yield distinct serverIDs")
 
@@ -403,11 +296,11 @@ func TestManagedServers(t *testing.T) {
 
 	t.Run("Remove", func(t *testing.T) {
 		plugin := newPlugin(t)
-		serverID, err := plugin.AddManagedServer(extraURL, "extra.example.com", "as", "hs", "mx")
+		serverID, err := plugin.AddServer(extraURL, "extra.example.com", "as", "hs", "mx")
 		require.NoError(t, err)
 
 		// Removing an injected server drops it.
-		removed, err := plugin.RemoveManagedServer(serverID)
+		removed, err := plugin.RemoveServer(serverID)
 		require.NoError(t, err)
 		assert.True(t, removed)
 		servers, err := plugin.GetManagedServers()
@@ -416,29 +309,26 @@ func TestManagedServers(t *testing.T) {
 		assert.False(t, present, "injected server is removed")
 
 		// Removing an unknown server reports not-found.
-		removed, err = plugin.RemoveManagedServer("no-such-server")
+		removed, err = plugin.RemoveServer("no-such-server")
 		require.NoError(t, err)
 		assert.False(t, removed)
 	})
 
-	t.Run("RemovePrimaryReappearsAfterReconcile", func(t *testing.T) {
+	t.Run("RemoveIsPermanent", func(t *testing.T) {
 		plugin := newPlugin(t)
-		// Establish the primary.
-		_, err := plugin.reconcileServerConfig()
-		require.NoError(t, err)
 		primaryID, err := deriveServerID(primaryURL)
 		require.NoError(t, err)
 
-		removed, err := plugin.RemoveManagedServer(primaryID)
+		removed, err := plugin.RemoveServer(primaryID)
 		require.NoError(t, err)
-		assert.True(t, removed, "the primary entry is found and removed")
+		assert.True(t, removed, "the entry is found and removed")
 
-		// RemoveManagedServer rebuilds via reconcile, which re-derives the primary
-		// from the flat config, so it comes back.
+		// The registry is authoritative: a removed server stays removed (no reconcile
+		// re-adds it from a flat config that no longer exists).
 		servers, err := plugin.GetManagedServers()
 		require.NoError(t, err)
 		_, present := kvstore.ServerConfigForID(servers, primaryID)
-		assert.True(t, present, "the primary is re-added from the flat configuration")
+		assert.False(t, present, "the removed server does not reappear")
 	})
 }
 
@@ -492,8 +382,8 @@ func TestDeriveServerID(t *testing.T) {
 }
 
 // TestMatrixUsernamePrefixResolvesPerServer verifies the username prefix is
-// resolved from the per-server registry entry (the source of truth), and that
-// the flat global config is not consulted at resolution time.
+// resolved from the per-server registry entry, and that the flat global config
+// is not consulted at resolution time.
 func TestMatrixUsernamePrefixResolvesPerServer(t *testing.T) {
 	newBridge := func(t *testing.T) *Plugin {
 		plugin := setupPluginForTest()
@@ -503,11 +393,10 @@ func TestMatrixUsernamePrefixResolvesPerServer(t *testing.T) {
 		plugin.maxFileSize = DefaultMaxFileSize
 		plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 		plugin.pendingFiles = NewPendingFileTracker()
-		// A custom global prefix that must NOT leak into resolution; only the
-		// registry entry (or the static default) may be returned.
-		plugin.configuration = &configuration{MatrixUsernamePrefix: "globalprefix"}
+		// The username prefix is resolved only from the registry entry (or the static
+		// default); there is no global prefix config anymore.
+		plugin.configuration = &configuration{}
 		setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
-		plugin.initBridges()
 		return plugin
 	}
 
@@ -518,14 +407,14 @@ func TestMatrixUsernamePrefixResolvesPerServer(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
 
-		assert.Equal(t, "serverprefix", plugin.mattermostToMatrixBridge.matrixUsernamePrefix())
+		assert.Equal(t, "serverprefix", testOutboundBridge(plugin).matrixUsernamePrefix())
 	})
 
 	t.Run("DefaultsWhenNoRegistryEntry", func(t *testing.T) {
 		plugin := newBridge(t)
 		// No servers_config seeded: resolves to the static default, NOT the
 		// configured global prefix.
-		assert.Equal(t, DefaultMatrixUsernamePrefix, plugin.mattermostToMatrixBridge.matrixUsernamePrefix())
+		assert.Equal(t, DefaultMatrixUsernamePrefix, testOutboundBridge(plugin).matrixUsernamePrefix())
 	})
 
 	t.Run("DefaultsWhenEntryPrefixEmpty", func(t *testing.T) {
@@ -535,7 +424,7 @@ func TestMatrixUsernamePrefixResolvesPerServer(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
 
-		assert.Equal(t, DefaultMatrixUsernamePrefix, plugin.mattermostToMatrixBridge.matrixUsernamePrefix())
+		assert.Equal(t, DefaultMatrixUsernamePrefix, testOutboundBridge(plugin).matrixUsernamePrefix())
 	})
 
 	t.Run("IgnoresOtherServersEntry", func(t *testing.T) {
@@ -547,7 +436,7 @@ func TestMatrixUsernamePrefixResolvesPerServer(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
 
-		assert.Equal(t, DefaultMatrixUsernamePrefix, plugin.mattermostToMatrixBridge.matrixUsernamePrefix())
+		assert.Equal(t, DefaultMatrixUsernamePrefix, testOutboundBridge(plugin).matrixUsernamePrefix())
 	})
 }
 
@@ -563,8 +452,7 @@ func TestGetMatrixRoomIDServerIsolation(t *testing.T) {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
 	setTestMatrixClient(plugin, createMatrixClientWithTestLogger(t, "", "", ""))
-	plugin.initBridges()
-	bridge := plugin.mattermostToMatrixBridge
+	bridge := testOutboundBridge(plugin)
 
 	channelID := "channelABC"
 	key := kvstore.BuildChannelMappingKey(channelID)
