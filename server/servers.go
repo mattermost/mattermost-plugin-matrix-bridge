@@ -126,14 +126,6 @@ func (p *Plugin) materializeServerFromLegacyConfig() (string, error) {
 		return "", err
 	}
 
-	servers, err := p.getServers()
-	if err != nil {
-		return "", err
-	}
-	if _, ok := kvstore.ServerConfigForID(servers, serverID); ok {
-		return serverID, nil // already materialized (idempotent)
-	}
-
 	prefix := legacy.MatrixUsernamePrefix
 	if prefix == "" {
 		prefix = DefaultMatrixUsernamePrefix
@@ -156,11 +148,22 @@ func (p *Plugin) materializeServerFromLegacyConfig() (string, error) {
 		// Empty SiteURL re-adopts the legacy single-server shared-channels remote.
 		SiteURL: "",
 	}
-	servers = append(servers, entry)
-	if err := p.persistServers(servers); err != nil {
+
+	appended := false
+	if err := p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		if _, ok := kvstore.ServerConfigForID(servers, serverID); ok {
+			appended = false
+			return servers, nil // already materialized (idempotent): no-op
+		}
+		appended = true
+		return append(servers, entry), nil
+	}); err != nil {
 		return "", err
 	}
-	p.logger.LogInfo("Seeded managed server registry from legacy single-server config", "server_id", serverID)
+
+	if appended {
+		p.logger.LogInfo("Seeded managed server registry from legacy single-server config", "server_id", serverID)
+	}
 	return serverID, nil
 }
 
@@ -176,16 +179,28 @@ func hostSiteURL(serverURL string) string {
 	return serverURL
 }
 
-// persistServers marshals and stores the managed server registry.
-func (p *Plugin) persistServers(servers []kvstore.ServerConfig) error {
-	data, err := json.Marshal(servers)
-	if err != nil {
-		return errors.Wrap(err, "failed to marshal servers_config")
-	}
-	if err := p.kvstore.Set(kvstore.KeyServersConfig, data); err != nil {
-		return errors.Wrap(err, "failed to persist servers_config")
-	}
-	return nil
+// mutateServers atomically updates the managed server registry: it reads the
+// current servers_config value, applies mutator to compute the desired slice,
+// and writes it back using compare-and-set semantics, retrying on conflict.
+// mutator may be invoked more than once if a concurrent writer wins the race, so
+// it must be a pure function of the servers slice it is handed - no network or
+// Mattermost API calls inside it.
+func (p *Plugin) mutateServers(mutator func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error)) error {
+	return p.kvstore.SetAtomicWithRetries(kvstore.KeyServersConfig, func(oldValue []byte) ([]byte, error) {
+		servers, err := kvstore.ParseServersConfig(oldValue)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to unmarshal servers_config")
+		}
+		newServers, err := mutator(servers)
+		if err != nil {
+			return nil, err
+		}
+		data, err := json.Marshal(newServers)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to marshal servers_config")
+		}
+		return data, nil
+	})
 }
 
 // GetManagedServers returns the current managed Matrix server registry.
@@ -206,46 +221,38 @@ func (p *Plugin) AddServer(serverURL, serverName, asToken, hsToken, usernamePref
 		return "", err
 	}
 
-	servers, err := p.getServers()
-	if err != nil {
-		return "", err
-	}
-
 	if usernamePrefix == "" {
 		usernamePrefix = DefaultMatrixUsernamePrefix
 	}
-	entry := kvstore.ServerConfig{
-		ServerID:       serverID,
-		ServerURL:      serverURL,
-		ServerName:     serverName,
-		ASToken:        asToken,
-		HSToken:        hsToken,
-		UsernamePrefix: usernamePrefix,
-		Enabled:        true,
-		SiteURL:        hostSiteURL(serverURL),
-	}
 
-	replaced := false
-	for i := range servers {
-		if servers[i].ServerID == serverID {
-			// Keep the existing RemoteID and SiteURL so re-adding a server does not
-			// drop its shared-channels registration or re-key its remote. In
-			// particular this preserves the reserved empty SiteURL of the migrated
-			// server if it is re-added by URL.
-			if servers[i].RemoteID != "" {
-				entry.RemoteID = servers[i].RemoteID
-			}
-			entry.SiteURL = servers[i].SiteURL
-			servers[i] = entry
-			replaced = true
-			break
+	err = p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		entry := kvstore.ServerConfig{
+			ServerID:       serverID,
+			ServerURL:      serverURL,
+			ServerName:     serverName,
+			ASToken:        asToken,
+			HSToken:        hsToken,
+			UsernamePrefix: usernamePrefix,
+			Enabled:        true,
+			SiteURL:        hostSiteURL(serverURL),
 		}
-	}
-	if !replaced {
-		servers = append(servers, entry)
-	}
-
-	if err := p.persistServers(servers); err != nil {
+		for i := range servers {
+			if servers[i].ServerID == serverID {
+				// Keep the existing RemoteID and SiteURL so re-adding a server does
+				// not drop its shared-channels registration or re-key its remote. In
+				// particular this preserves the reserved empty SiteURL of the
+				// migrated server if it is re-added by URL.
+				if servers[i].RemoteID != "" {
+					entry.RemoteID = servers[i].RemoteID
+				}
+				entry.SiteURL = servers[i].SiteURL
+				servers[i] = entry
+				return servers, nil
+			}
+		}
+		return append(servers, entry), nil
+	})
+	if err != nil {
 		return "", err
 	}
 
@@ -275,26 +282,24 @@ func (p *Plugin) AddServer(serverURL, serverName, asToken, hsToken, usernamePref
 // rebuilds the live client registry. It returns false if no entry matched. The
 // registry is authoritative, so the removal is permanent.
 func (p *Plugin) RemoveServer(serverID string) (bool, error) {
-	servers, err := p.getServers()
+	found := false
+	err := p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		found = false
+		filtered := make([]kvstore.ServerConfig, 0, len(servers))
+		for _, s := range servers {
+			if s.ServerID == serverID {
+				found = true
+				continue
+			}
+			filtered = append(filtered, s)
+		}
+		return filtered, nil
+	})
 	if err != nil {
 		return false, err
 	}
-
-	filtered := make([]kvstore.ServerConfig, 0, len(servers))
-	found := false
-	for _, s := range servers {
-		if s.ServerID == serverID {
-			found = true
-			continue
-		}
-		filtered = append(filtered, s)
-	}
 	if !found {
 		return false, nil
-	}
-
-	if err := p.persistServers(filtered); err != nil {
-		return false, err
 	}
 
 	if err := p.initMatrixClients(); err != nil {

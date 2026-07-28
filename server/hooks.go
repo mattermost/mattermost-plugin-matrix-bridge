@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 
@@ -187,6 +189,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 		return errors.Wrap(appErr, "failed to get file data from Mattermost")
 	}
 
+	var uploadErrs []string
 	for _, serverID := range serverIDs {
 		matrixClient := p.getMatrixClient(serverID)
 		if matrixClient == nil {
@@ -198,6 +201,7 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 		mxcURI, err := matrixClient.UploadMedia(fileData, fi.Name, fi.MimeType)
 		if err != nil {
 			p.logger.LogError("Failed to upload file to Matrix", "error", err, "file_id", fi.Id, "server_id", serverID)
+			uploadErrs = append(uploadErrs, serverID)
 			continue
 		}
 
@@ -214,6 +218,9 @@ func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *mod
 		p.logger.LogDebug("Successfully uploaded attachment to Matrix (pending post)", "filename", fi.Name, "size", fi.Size, "post_id", post.Id, "mxc_uri", mxcURI, "server_id", serverID)
 	}
 
+	if len(uploadErrs) > 0 {
+		return errors.Errorf("failed to upload attachment %s to Matrix server(s): %s", fi.Id, strings.Join(uploadErrs, ", "))
+	}
 	return nil
 }
 
@@ -322,11 +329,12 @@ func (p *Plugin) inviteRemoteUserToMatrixRoomForServer(serverID string, user *mo
 	}
 	bridge := p.newMattermostToMatrixBridge(serverID)
 
-	// Check if this channel is mapped to a Matrix room on this server
+	// Check if this channel is mapped to a Matrix room on this server. An error
+	// here means a real KV read/parse failure, not an unmapped channel - that case
+	// returns ("", nil) and is handled by the matrixRoomID == "" check below.
 	matrixRoomID, err := bridge.GetMatrixRoomID(channelID)
 	if err != nil {
-		p.logger.LogDebug("Channel not mapped to Matrix room, skipping remote user invite", "channel_id", channelID, "user_id", user.Id, "server_id", serverID)
-		return nil // Not an error - channel might not be bridged
+		return errors.Wrap(err, "failed to look up Matrix room mapping for remote user invite")
 	}
 
 	if matrixRoomID == "" {

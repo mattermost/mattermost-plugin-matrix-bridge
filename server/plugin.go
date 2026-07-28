@@ -395,7 +395,11 @@ func (p *Plugin) registerForSharedChannels() error {
 	// Register the plugin once per Matrix server so each homeserver is a distinct
 	// shared-channels remote (its own remoteID, sync cursors and loop attribution).
 	// Re-registration with the same SiteURL is idempotent and preserves cursors.
-	updated := false
+	// This makes one real network/API call per server, so it must run outside any
+	// KV compare-and-set retry loop (a retry would just re-issue the calls). The
+	// resulting remoteIDs are collected here and merged into the registry in a
+	// single, separate atomic step below.
+	remoteIDs := make(map[string]string, len(servers))
 	for i := range servers {
 		opts := model.RegisterPluginOpts{
 			Displayname:  displayNameForServer(servers[i]),
@@ -412,23 +416,29 @@ func (p *Plugin) registerForSharedChannels() error {
 				"error", appErr, "server_id", servers[i].ServerID, "site_url", opts.SiteURL)
 			continue
 		}
-
-		if servers[i].RemoteID != remoteID {
-			servers[i].RemoteID = remoteID
-			updated = true
-		}
+		remoteIDs[servers[i].ServerID] = remoteID
 
 		p.logger.LogInfo("Registered Matrix server for shared channels",
 			"server_id", servers[i].ServerID, "remote_id", remoteID, "site_url", opts.SiteURL)
 	}
 
-	if updated {
-		if err := p.persistServers(servers); err != nil {
-			return errors.Wrap(err, "failed to persist server registry after registration")
-		}
+	if len(remoteIDs) == 0 {
+		return nil
 	}
 
-	return nil
+	// Merge the newly-assigned remote IDs into whatever the registry looks like at
+	// write time (not the snapshot read above), so a concurrent AddServer/
+	// RemoveServer racing with this call is never clobbered. A server removed
+	// concurrently is simply absent from `current` and its remoteID is dropped,
+	// which is correct.
+	return p.mutateServers(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		for i := range current {
+			if remoteID, ok := remoteIDs[current[i].ServerID]; ok {
+				current[i].RemoteID = remoteID
+			}
+		}
+		return current, nil
+	})
 }
 
 // siteURLForServer returns the shared-channels SiteURL identifying a Matrix

@@ -14,10 +14,22 @@ For local development and testing, you can run a Matrix Synapse server using Doc
 
 ## Prerequisites
 
-1. Install and configure the Mattermost Matrix Bridge plugin first
-    - **Matrix Server URL**: `http://localhost:8888`
-2. Generate the bridge registration file through the plugin configuration
-3. Copy the generated registration file to `docker/mattermost-bridge-registration.yaml`
+1. Install the plugin and enable **Enable Message Sync** under **System Console >
+   Plugins > Mattermost bridge for Matrix**. Homeservers are managed with the
+   `/matrix server` slash commands.
+2. Register the homeserver with the plugin, choosing your own Application Service
+   and homeserver tokens (any strings; keep them secret):
+
+    ```text
+    /matrix server add http://localhost:8888 localhost <as_token> <hs_token>
+    ```
+
+3. Fetch the generated registration file and save it as
+   `docker/mattermost-bridge-registration.yaml`:
+
+    ```text
+    /matrix server registration
+    ```
 
 ## Starting the Matrix Synapse Server
 
@@ -86,12 +98,11 @@ docker-compose up -d
 docker compose exec synapse2 register_new_matrix_user -c /data/homeserver.yaml -u admin -p admin123 -a http://localhost:8008
 ```
 
-Configure **Server 1** as usual through the System Console (Matrix Server URL
-`http://localhost:8888`). The System Console UI can only manage a single server, so
-register **Server 2** with the admin-only slash command (the tokens come from
+Register **Server 1** as usual (see [Prerequisites](#prerequisites)), then register
+**Server 2** with the same `/matrix server add` command (the tokens come from
 `docker/mattermost-bridge-registration2.yaml`):
 
-```
+```text
 /matrix server add http://synapse2.localhost:8889 synapse2.localhost syn2_5Kd9WmXpQ2rLtVnB7cYhFgJ4sZaEuNi syn2_Tb3Rk8VpMxWq6NcYdL2fHgJ7sUaZ0eYi matrix2
 ```
 
@@ -103,21 +114,21 @@ Other server-management commands:
 ### Connecting a channel to a room on the second server
 
 The regular `/matrix map` and `/matrix create` commands always target the primary
-server (the one configured in the System Console). To bridge a channel to a room on
-the **second** server, use the server-scoped map command:
+server (the first one registered). To bridge a channel to a room on the **second**
+server, use the server-scoped map command:
 
 1. Create (or find) a room on server 2 — for example, sign in at
    `http://localhost:8881` (Element for server 2) and create a room.
 2. Find the second server's ID with `/matrix server list`.
 3. In the Mattermost channel you want to bridge, run:
 
-    ```
+    ```text
     /matrix server map <server_id> <room_alias_or_id>
     ```
 
     for example:
 
-    ```
+    ```text
     /matrix server map yjfnsajexkwmmmphkd4ceyte9a #room:synapse2.localhost
     ```
 

@@ -94,8 +94,9 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Mention Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			mv, _ := kvstore.BuildSingleChannelMapping(testServerID, freshRoomID)
-			_ = setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mv)
+			mv, err := kvstore.BuildSingleChannelMapping(testServerID, freshRoomID)
+			require.NoError(t, err)
+			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mv))
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
@@ -117,7 +118,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			}
 
 			// Sync post to Matrix
-			err := testOutboundBridge(setup.Plugin).SyncPostToMatrix(post, setup.ChannelID)
+			err = testOutboundBridge(setup.Plugin).SyncPostToMatrix(post, setup.ChannelID)
 			require.NoError(t, err)
 
 			// Wait for Matrix to process with polling
@@ -295,8 +296,9 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Edge Case Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			mv, _ := kvstore.BuildSingleChannelMapping(testServerID, freshRoomID)
-			_ = setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mv)
+			mv, err := kvstore.BuildSingleChannelMapping(testServerID, freshRoomID)
+			require.NoError(t, err)
+			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mv))
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
@@ -317,7 +319,7 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			}
 
 			// Sync post to Matrix
-			err := testOutboundBridge(setup.Plugin).SyncPostToMatrix(post, setup.ChannelID)
+			err = testOutboundBridge(setup.Plugin).SyncPostToMatrix(post, setup.ChannelID)
 			require.NoError(t, err)
 
 			// Wait for processing with polling

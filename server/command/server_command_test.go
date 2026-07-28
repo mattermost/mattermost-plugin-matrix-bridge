@@ -271,14 +271,15 @@ func TestParseOptionalServerArg(t *testing.T) {
 }
 
 func TestBuildRegistrationYAML(t *testing.T) {
-	server := kvstore.ServerConfig{
+	server := kvstore.ServerConfig{ //nolint:gosec // test fixture tokens
 		ServerID:   "srv1",
 		ServerURL:  "https://matrix.example.com",
 		ServerName: "example.com",
 		ASToken:    "as-token-value",
 		HSToken:    "hs-token-value",
 	}
-	got := buildRegistrationYAML(server, "https://mm.example.com")
+	got, err := buildRegistrationYAML(server, "https://mm.example.com")
+	require.NoError(t, err)
 
 	// Byte-compatible with the format the webapp previously produced.
 	want := `id: "mattermost-bridge"

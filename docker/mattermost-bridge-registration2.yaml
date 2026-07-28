@@ -1,5 +1,5 @@
 id: "mattermost-bridge"
-url: "https://pasokon-2.tail893a6.ts.net/plugins/com.mattermost.plugin-matrix-bridge"
+url: "http://host.docker.internal:8065/plugins/com.mattermost.plugin-matrix-bridge"
 # Each homeserver must present a UNIQUE hs_token: the plugin routes inbound
 # Application Service traffic to the right server by matching this token.
 as_token: "syn2_5Kd9WmXpQ2rLtVnB7cYhFgJ4sZaEuNi"

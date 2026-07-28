@@ -26,6 +26,12 @@ services:
         ports:
             - "8888:8008"
             - "8448:8448"
+        # Lets the container reach the Mattermost server running on the host (the
+        # registration file's `url` points at host.docker.internal). Docker Desktop
+        # (Mac/Windows) provides this automatically; host-gateway makes it work on
+        # Linux too.
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
         depends_on:
             - synapse-init
             - postgres
@@ -80,6 +86,8 @@ services:
         ports:
             - "8889:8008"
             - "8449:8448"
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
         depends_on:
             - synapse2-init
             - postgres2

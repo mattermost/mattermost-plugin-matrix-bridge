@@ -483,23 +483,19 @@ func (c *Handler) mapChannelToRoom(args *model.CommandArgs, serverID, roomIdenti
 	}
 
 	// Save both directions of the mapping. Upsert the forward value so a channel
-	// already bridged to another server keeps that entry.
+	// already bridged to another server keeps that entry. Use compare-and-set with
+	// retries because the value is shared across servers: two /matrix server map
+	// calls for different servers racing on the same channel would otherwise
+	// read-modify-write over each other and drop an entry.
 	mappingKey := kvstore.BuildChannelMappingKey(args.ChannelId)
-	existingMapping, err := c.kvstore.Get(mappingKey)
-	if err != nil {
-		c.client.Log.Error("Failed to read channel mapping", "error", err, "channel_id", args.ChannelId)
-		return ephemeral(fmt.Sprintf("❌ Failed to read the existing channel mapping. Check plugin logs for details.%s", joinStatus))
-	}
-	channelMappings, err := kvstore.ParseChannelServerMappings(existingMapping)
-	if err != nil {
-		c.client.Log.Error("Corrupt channel mapping value", "error", err, "channel_id", args.ChannelId)
-		return ephemeral(fmt.Sprintf("❌ The existing channel mapping is corrupt. Use `/matrix unmap` and try again.%s", joinStatus))
-	}
-	channelMappings = kvstore.UpsertChannelServerMapping(channelMappings, serverID, roomIdentifier)
-	mappingValue, err := kvstore.MarshalChannelServerMappings(channelMappings)
-	if err == nil {
-		err = c.kvstore.Set(mappingKey, mappingValue)
-	}
+	err := c.kvstore.SetAtomicWithRetries(mappingKey, func(old []byte) ([]byte, error) {
+		existing, perr := kvstore.ParseChannelServerMappings(old)
+		if perr != nil {
+			return nil, perr
+		}
+		return kvstore.MarshalChannelServerMappings(
+			kvstore.UpsertChannelServerMapping(existing, serverID, roomIdentifier))
+	})
 	if err != nil {
 		c.client.Log.Error("Failed to save channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", roomIdentifier)
 		return &model.CommandResponse{
@@ -668,33 +664,32 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs, serverID string) 
 	c.client.Log.Info("Successfully cleared Matrix room state", "room_id", matrixRoomIdentifier)
 
 	// Remove only this server's entry from the channel->room mapping, preserving
-	// any other servers this channel is bridged to. Delete the key entirely only
-	// when no mappings remain.
-	remaining := make([]kvstore.ChannelServerMapping, 0, len(mappings))
-	for _, m := range mappings {
-		if m.ServerID != serverID {
-			remaining = append(remaining, m)
+	// any other servers this channel is bridged to. Use compare-and-set with
+	// retries, re-deriving `remaining` from the value read at CAS time (not the
+	// `mappings` snapshot read earlier in this function) so a concurrent map/unmap
+	// for another server isn't clobbered. When no mappings remain, this stores an
+	// empty value rather than deleting the key outright - every read path already
+	// treats a zero-length parsed mapping list as "unmapped", so this is
+	// functionally equivalent while keeping the removal itself race-free.
+	var remaining []kvstore.ChannelServerMapping
+	err = c.kvstore.SetAtomicWithRetries(channelMappingKey, func(old []byte) ([]byte, error) {
+		current, perr := kvstore.ParseChannelServerMappings(old)
+		if perr != nil {
+			return nil, perr
 		}
-	}
-	if len(remaining) == 0 {
-		if err := c.kvstore.Delete(channelMappingKey); err != nil {
-			c.client.Log.Error("Failed to remove channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
-			return &model.CommandResponse{
-				ResponseType: model.CommandResponseTypeEphemeral,
-				Text:         "❌ **Error:** Failed to remove channel mapping. Check plugin logs for details.",
+		remaining = make([]kvstore.ChannelServerMapping, 0, len(current))
+		for _, m := range current {
+			if m.ServerID != serverID {
+				remaining = append(remaining, m)
 			}
 		}
-	} else {
-		value, mErr := kvstore.MarshalChannelServerMappings(remaining)
-		if mErr == nil {
-			mErr = c.kvstore.Set(channelMappingKey, value)
-		}
-		if mErr != nil {
-			c.client.Log.Error("Failed to update channel mapping", "error", mErr, "channel_id", args.ChannelId)
-			return &model.CommandResponse{
-				ResponseType: model.CommandResponseTypeEphemeral,
-				Text:         "❌ **Error:** Failed to update channel mapping. Check plugin logs for details.",
-			}
+		return kvstore.MarshalChannelServerMappings(remaining)
+	})
+	if err != nil {
+		c.client.Log.Error("Failed to update channel mapping", "error", err, "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
+		return &model.CommandResponse{
+			ResponseType: model.CommandResponseTypeEphemeral,
+			Text:         "❌ **Error:** Failed to update channel mapping. Check plugin logs for details.",
 		}
 	}
 
@@ -703,6 +698,17 @@ func (c *Handler) executeUnmapCommand(args *model.CommandArgs, serverID string) 
 	if err := c.kvstore.Delete(roomMappingKey); err != nil {
 		c.client.Log.Warn("Failed to remove room mapping", "error", err, "room_identifier", matrixRoomIdentifier, "channel_id", args.ChannelId)
 		// Continue - the main mapping was removed
+	}
+
+	// If the mapping was stored as an alias, mapChannelToRoom also wrote a second
+	// reverse mapping keyed by the resolved room ID (the key inbound events match
+	// on). Remove that one too so it doesn't survive the unmap.
+	if strings.HasPrefix(matrixRoomIdentifier, "#") {
+		if resolvedRoomID, err := matrixClient.ResolveRoomAlias(matrixRoomIdentifier); err == nil && resolvedRoomID != "" {
+			if err := c.kvstore.Delete(kvstore.BuildRoomMappingKey(serverID, resolvedRoomID)); err != nil {
+				c.client.Log.Warn("Failed to remove resolved room-ID mapping", "error", err, "room_id", resolvedRoomID, "channel_id", args.ChannelId)
+			}
+		}
 	}
 
 	c.client.Log.Info("Removed Matrix room mapping", "channel_id", args.ChannelId, "room_identifier", matrixRoomIdentifier)
@@ -923,11 +929,11 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 					channelName = channel.Name
 				}
 			}
-			responseText.WriteString(fmt.Sprintf("**Current Channel:** %s → %s\n\n", channelName, renderRooms(current)))
+			fmt.Fprintf(&responseText, "**Current Channel:** %s → %s\n\n", channelName, renderRooms(current))
 		}
 
 		// Show all mappings
-		responseText.WriteString(fmt.Sprintf("**All Mappings (%d channels):**\n", len(mappings)))
+		fmt.Fprintf(&responseText, "**All Mappings (%d channels):**\n", len(mappings))
 		for channelID, entries := range mappings {
 			// Get channel info
 			channel, appErr := c.client.Channel.Get(channelID)
@@ -945,7 +951,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 				currentMarker = " *(current)*"
 			}
 
-			responseText.WriteString(fmt.Sprintf("• %s → %s%s\n", channelName, renderRooms(entries), currentMarker))
+			fmt.Fprintf(&responseText, "• %s → %s%s\n", channelName, renderRooms(entries), currentMarker)
 		}
 	}
 
@@ -1333,7 +1339,11 @@ func (c *Handler) executeServerRegistrationCommand(fields []string) *model.Comma
 	if cfg := c.pluginAPI.GetConfig(); cfg != nil && cfg.ServiceSettings.SiteURL != nil {
 		siteURL = *cfg.ServiceSettings.SiteURL
 	}
-	yaml := buildRegistrationYAML(server, siteURL)
+	yaml, err := buildRegistrationYAML(server, siteURL)
+	if err != nil {
+		c.client.Log.Warn("Failed to build registration YAML", "error", err, "server_id", server.ServerID)
+		return ephemeral(fmt.Sprintf("❌ **Error:** %s", err))
+	}
 	return ephemeral(fmt.Sprintf("**Application Service registration for `%s`**\n\nSave this as `mattermost-bridge-registration.yaml` on the homeserver:\n\n```yaml\n%s\n```", server.ServerName, yaml))
 }
 
@@ -1450,15 +1460,17 @@ func serverDisplayName(s kvstore.ServerConfig) string {
 // server from its registry entry. The namespace domain is the server's Matrix
 // domain (ServerName when set, else the URL host) so it matches how ghost users
 // and room aliases are named. The output matches the format the webapp previously
-// produced for the single-server install.
-func buildRegistrationYAML(server kvstore.ServerConfig, mattermostSiteURL string) string {
+// produced for the single-server install. It errors rather than guessing a
+// domain, matching extractServerDomain's convention, so callers never emit a
+// registration file claiming the wrong homeserver's namespaces.
+func buildRegistrationYAML(server kvstore.ServerConfig, mattermostSiteURL string) (string, error) {
 	domain := server.ServerName
 	if domain == "" {
-		if host, err := matrix.ExtractServerDomain(server.ServerURL); err == nil && host != "" {
-			domain = host
-		} else {
-			domain = "matrix.org"
+		host, err := matrix.ExtractServerDomain(server.ServerURL)
+		if err != nil || host == "" {
+			return "", errors.Errorf("cannot determine Matrix domain for server %q: set ServerName or use a resolvable ServerURL", server.ServerID)
 		}
+		domain = host
 	}
 	return fmt.Sprintf(`id: "mattermost-bridge"
 url: "%s/plugins/com.mattermost.plugin-matrix-bridge"
@@ -1483,7 +1495,7 @@ de.sorunome.msc2409.push_ephemeral: true
 permissions:
   - "m.room.directory"
   - "m.room.membership"`,
-		mattermostSiteURL, server.ASToken, server.HSToken, domain, domain, domain, domain)
+		mattermostSiteURL, server.ASToken, server.HSToken, domain, domain, domain, domain), nil
 }
 
 func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandResponse {
@@ -1505,7 +1517,7 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 		}
 	}
 
-	responseText.WriteString(fmt.Sprintf("✅ **Server URL:** %s\n", server.ServerURL))
+	fmt.Fprintf(&responseText, "✅ **Server URL:** %s\n", server.ServerURL)
 
 	// Get the target server's Matrix client and check if configured
 	matrixClient := c.plugin.GetMatrixClientForServer(serverID)
@@ -1524,7 +1536,7 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	err := matrixClient.TestConnection()
 	if err != nil {
 		responseText.WriteString("❌ **Connection:** Failed to connect to Matrix server\n")
-		responseText.WriteString(fmt.Sprintf("🔍 **Error:** %s\n", err.Error()))
+		fmt.Fprintf(&responseText, "🔍 **Error:** %s\n", err.Error())
 		responseText.WriteString("📝 **Actions:**\n")
 		responseText.WriteString("   • Verify Matrix server URL is correct and reachable\n")
 		responseText.WriteString("   • Check that Application Service registration file is installed\n")
@@ -1541,9 +1553,9 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	serverInfo, infoErr := matrixClient.GetServerInfo()
 	if infoErr == nil && serverInfo != nil {
 		if serverInfo.Name != "Matrix Server" || serverInfo.Version != "Unknown" {
-			responseText.WriteString(fmt.Sprintf("📊 **Matrix Server:** %s", serverInfo.Name))
+			fmt.Fprintf(&responseText, "📊 **Matrix Server:** %s", serverInfo.Name)
 			if serverInfo.Version != "Unknown" {
-				responseText.WriteString(fmt.Sprintf(" v%s", serverInfo.Version))
+				fmt.Fprintf(&responseText, " v%s", serverInfo.Version)
 			}
 			responseText.WriteString("\n")
 		}
@@ -1553,7 +1565,7 @@ func (c *Handler) executeTestCommand(_ *model.CommandArgs) *model.CommandRespons
 	asErr := matrixClient.TestApplicationServicePermissions()
 	if asErr != nil {
 		responseText.WriteString("❌ **Application Service:** Permission test failed\n")
-		responseText.WriteString(fmt.Sprintf("🔍 **Error:** %s\n", asErr.Error()))
+		fmt.Fprintf(&responseText, "🔍 **Error:** %s\n", asErr.Error())
 		responseText.WriteString("📝 **Actions:**\n")
 		responseText.WriteString("   • Verify Application Service registration file is properly installed\n")
 		responseText.WriteString("   • Check that homeserver and AS tokens match the registration file\n")

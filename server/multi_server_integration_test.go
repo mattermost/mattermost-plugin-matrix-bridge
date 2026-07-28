@@ -49,12 +49,12 @@ type MultiServerIntegrationTestSuite struct {
 func (suite *MultiServerIntegrationTestSuite) SetupSuite() {
 	// Two independent homeservers with distinct domains (each gets its own
 	// dynamically-assigned port from testcontainers).
-	suite.containerA = matrixtest.StartMatrixContainer(suite.T(), matrixtest.MatrixTestConfig{
+	suite.containerA = matrixtest.StartMatrixContainer(suite.T(), matrixtest.MatrixTestConfig{ //nolint:gosec // test-only fixture tokens
 		ServerName: "synapse-a.local",
 		ASToken:    "as_token_server_a",
 		HSToken:    "hs_token_server_a",
 	})
-	suite.containerB = matrixtest.StartMatrixContainer(suite.T(), matrixtest.MatrixTestConfig{
+	suite.containerB = matrixtest.StartMatrixContainer(suite.T(), matrixtest.MatrixTestConfig{ //nolint:gosec // test-only fixture tokens
 		ServerName: "synapse-b.local",
 		ASToken:    "as_token_server_b",
 		HSToken:    "hs_token_server_b",

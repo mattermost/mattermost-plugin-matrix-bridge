@@ -86,10 +86,10 @@ func TestMaterializeServerFromLegacyConfig(t *testing.T) {
 		require.NoError(t, err)
 
 		// Simulate registration having assigned a RemoteID to the entry.
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		servers[0].RemoteID = "assigned-remote"
-		require.NoError(t, plugin.persistServers(servers))
+		require.NoError(t, plugin.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+			servers[0].RemoteID = "assigned-remote"
+			return servers, nil
+		}))
 
 		// A second materialize is a no-op: it must not overwrite the existing entry.
 		again, err := plugin.materializeServerFromLegacyConfig()
