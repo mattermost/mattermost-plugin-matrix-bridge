@@ -347,9 +347,17 @@ func (p *Plugin) resolveOutboundServers(channelID string) ([]string, error) {
 	}
 
 	// Unmapped: only DMs auto-create a room on first message. Route by the DM's
-	// remote participant's homeserver.
+	// remote participant's homeserver. In a group DM spanning more than one
+	// homeserver, the first participant whose remote resolves wins.
 	isDM, userIDs, err := p.isDirectChannel(channelID)
-	if err != nil || !isDM {
+	if err != nil {
+		// A lookup failure is not the same as "not a DM": surface it rather than
+		// silently dropping an outbound event that may have needed a new room.
+		p.logger.LogWarn("Failed to determine whether unmapped channel is a DM; skipping outbound routing",
+			"error", err, "channel_id", channelID)
+		return nil, nil
+	}
+	if !isDM {
 		return nil, nil
 	}
 	for _, userID := range userIDs {

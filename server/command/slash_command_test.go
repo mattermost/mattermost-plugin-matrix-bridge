@@ -1,7 +1,10 @@
 package command
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
@@ -179,6 +182,63 @@ func TestStatusCommand(t *testing.T) {
 		resp := runServer(handler, "/matrix status")
 		assert.Contains(t, resp.Text, "disabled (not syncing)")
 		assert.NotContains(t, resp.Text, "Connection:", "a disabled server is not connection-probed")
+	})
+
+	t.Run("AllConfiguredServersAreListed", func(t *testing.T) {
+		handler, mp := newServerCommandHandler(t, true)
+		seedServers(t, mp,
+			kvstore.ServerConfig{ServerID: "srv1", ServerName: "a.example.org", ServerURL: "https://a.example.org", Enabled: true},
+			kvstore.ServerConfig{ServerID: "srv2", ServerName: "b.example.org", ServerURL: "https://b.example.org", Enabled: false},
+			kvstore.ServerConfig{ServerID: "srv3", ServerName: "c.example.org", ServerURL: "https://c.example.org", Enabled: true},
+		)
+		// Each server gets a distinct mapped-channel count, so a single shared KV
+		// scan must still attribute counts to the right server.
+		for channelID, serverID := range map[string]string{"chan-1": "srv1", "chan-2": "srv3", "chan-3": "srv3"} {
+			val, err := kvstore.BuildSingleChannelMapping(serverID, "!room:"+serverID)
+			require.NoError(t, err)
+			require.NoError(t, mp.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), val))
+		}
+
+		resp := runServer(handler, "/matrix status")
+		assert.Contains(t, resp.Text, "3 server(s) configured")
+		for _, name := range []string{"**a.example.org**", "**b.example.org**", "**c.example.org**"} {
+			assert.Contains(t, resp.Text, name, "every registered server appears in /matrix status")
+		}
+		assert.Contains(t, resp.Text, "Mapped channels: 1", "srv1 has one mapped channel")
+		assert.Contains(t, resp.Text, "Mapped channels: 2", "srv3 has two mapped channels")
+		assert.Contains(t, resp.Text, "Mapped channels: 0", "srv2 has none")
+	})
+
+	// A homeserver that never answers must not hold up the whole command: the
+	// Matrix HTTP client allows 30s per request, so without a shared deadline
+	// /matrix status would outlast Mattermost's slash-command timeout.
+	t.Run("SlowProbeReportsTimeoutInsteadOfBlocking", func(t *testing.T) {
+		handler, mp := newServerCommandHandler(t, true)
+		seedServers(t, mp, kvstore.ServerConfig{
+			ServerID: "srv1", ServerName: "slow.example.org", ServerURL: "https://slow.example.org", Enabled: true,
+		})
+
+		blocked := make(chan struct{})
+		hung := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			<-blocked // hang until the test releases it
+		}))
+		t.Cleanup(func() {
+			close(blocked)
+			hung.Close()
+		})
+		mp.matrixClient = matrix.NewClientWithLoggerAndRateLimit(hung.URL, "as", "remote", "slow.example.org", matrix.NewTestLogger(t), matrix.TestRateLimitConfig())
+
+		original := statusProbeTimeout
+		statusProbeTimeout = 100 * time.Millisecond
+		t.Cleanup(func() { statusProbeTimeout = original })
+
+		start := time.Now()
+		resp := runServer(handler, "/matrix status")
+		elapsed := time.Since(start)
+
+		assert.Contains(t, resp.Text, "timed out", "an unresponsive server is reported as timed out")
+		assert.Contains(t, resp.Text, "**slow.example.org**", "the server is still listed")
+		assert.Less(t, elapsed, 5*time.Second, "the command returns at the deadline, not the HTTP client's 30s timeout")
 	})
 
 	t.Run("ServerStatusSubcommandTargetsOne", func(t *testing.T) {

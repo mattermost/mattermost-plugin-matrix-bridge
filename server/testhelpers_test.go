@@ -295,7 +295,10 @@ func setupBasicMocks(api *plugintest.API, testUserID string) {
 // setupTestKVData sets up initial test data in the KV store
 func setupTestKVData(store kvstore.KVStore, testChannelID, testRoomID string) {
 	// Set up channel mapping in the server-scoped value shape used since v3
-	mappingValue, _ := kvstore.BuildSingleChannelMapping(testServerID, testRoomID)
+	mappingValue, err := kvstore.BuildSingleChannelMapping(testServerID, testRoomID)
+	if err != nil {
+		panic(fmt.Sprintf("setupTestKVData: failed to build channel mapping: %v", err))
+	}
 	_ = store.Set(kvstore.BuildChannelMappingKey(testChannelID), mappingValue)
 
 	// Ghost users and ghost rooms are intentionally not set up here

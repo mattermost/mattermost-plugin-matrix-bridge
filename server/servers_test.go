@@ -139,9 +139,9 @@ func TestMaterializeServerFromLegacyConfig(t *testing.T) {
 	})
 }
 
-// TestDeriveServerID verifies the deterministic serverID derivation: same
-// hostname (regardless of scheme/port/path/case) yields the same 26-char base32
-// ID, distinct hostnames yield distinct IDs, and an unusable URL errors.
+// TestManagedServers verifies the managed-server registry: adding stamps a
+// hostname-derived SiteURL, upserts in place with a stable remoteID, gives each
+// homeserver a distinct remote, and removal is permanent.
 func TestManagedServers(t *testing.T) {
 	const primaryURL = "https://primary.example.com"
 	const extraURL = "https://extra.example.com"
@@ -332,6 +332,9 @@ func TestManagedServers(t *testing.T) {
 	})
 }
 
+// TestDeriveServerID verifies the deterministic serverID derivation: same
+// hostname (regardless of scheme/port/path/case) yields the same 26-char base32
+// ID, distinct hostnames yield distinct IDs, and an unusable URL errors.
 func TestDeriveServerID(t *testing.T) {
 	const base32Alphabet = "ybndrfg8ejkmcpqxot1uwisza345h769"
 

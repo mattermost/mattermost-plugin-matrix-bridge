@@ -4,6 +4,7 @@ package command
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
@@ -491,7 +492,8 @@ func (c *Handler) mapChannelToRoom(args *model.CommandArgs, serverID, roomIdenti
 	err := c.kvstore.SetAtomicWithRetries(mappingKey, func(old []byte) ([]byte, error) {
 		existing, perr := kvstore.ParseChannelServerMappings(old)
 		if perr != nil {
-			return nil, perr
+			c.client.Log.Warn("Corrupt channel mapping value; overwriting", "error", perr, "channel_id", args.ChannelId)
+			existing = nil
 		}
 		return kvstore.MarshalChannelServerMappings(
 			kvstore.UpsertChannelServerMapping(existing, serverID, roomIdentifier))
@@ -1105,6 +1107,7 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Registered Matrix servers (%d):**\n", len(servers))
+	counts := c.countMappedChannelsByServer()
 	for _, s := range servers {
 		enabled := "disabled"
 		if s.Enabled {
@@ -1117,7 +1120,7 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 		fmt.Fprintf(&b, "\n• **%s** (`%s`)\n", displayName, s.ServerID)
 		fmt.Fprintf(&b, "  - URL: `%s`\n", s.ServerURL)
 		fmt.Fprintf(&b, "  - Username prefix: `%s`\n", s.UsernamePrefix)
-		fmt.Fprintf(&b, "  - Mapped channels: %d\n", c.countMappedChannels(s.ServerID))
+		fmt.Fprintf(&b, "  - Mapped channels: %d\n", counts[s.ServerID])
 		fmt.Fprintf(&b, "  - Status: %s\n", enabled)
 	}
 	return ephemeral(b.String())
@@ -1186,9 +1189,11 @@ func (c *Handler) executeStatusCommand() *model.CommandResponse {
 	}
 
 	fmt.Fprintf(&b, "\n%d server(s) configured:\n", len(servers))
+	connections := c.probeServerConnections(servers)
+	counts := c.countMappedChannelsByServer()
 	for _, s := range servers {
 		b.WriteString("\n")
-		c.writeServerStatus(&b, s)
+		c.writeServerStatus(&b, s, connections, counts)
 	}
 	return ephemeral(b.String())
 }
@@ -1213,23 +1218,75 @@ func (c *Handler) executeServerStatusCommand(fields []string) *model.CommandResp
 
 	var b strings.Builder
 	b.WriteString("**Matrix Server Status**\n\n")
-	c.writeServerStatus(&b, server)
+	one := []kvstore.ServerConfig{server}
+	c.writeServerStatus(&b, server, c.probeServerConnections(one), c.countMappedChannelsByServer())
 	return ephemeral(b.String())
 }
 
 // writeServerStatus appends a per-server status block: display name/ID, enabled
 // flag, live connection health (only probed for enabled servers), and mapped
-// channel count.
-func (c *Handler) writeServerStatus(b *strings.Builder, s kvstore.ServerConfig) {
+// channel count. Connection results and mapped-channel counts are gathered once
+// for all servers by the caller and passed in, so rendering performs no I/O.
+func (c *Handler) writeServerStatus(b *strings.Builder, s kvstore.ServerConfig, connections map[string]string, counts map[string]int) {
 	fmt.Fprintf(b, "• **%s** (`%s`)\n", serverDisplayName(s), s.ServerID)
 	fmt.Fprintf(b, "  - URL: `%s`\n", s.ServerURL)
 	if !s.Enabled {
 		b.WriteString("  - Status: ⏸️ disabled (not syncing)\n")
 	} else {
 		b.WriteString("  - Status: enabled\n")
-		fmt.Fprintf(b, "  - Connection: %s\n", c.serverConnectionStatus(s.ServerID))
+		connection, probed := connections[s.ServerID]
+		if !probed {
+			// Absent means the probe missed the deadline. Say so rather than
+			// implying the server is healthy or reporting a failure we never saw.
+			connection = "⏱️ timed out (server slow or unreachable)"
+		}
+		fmt.Fprintf(b, "  - Connection: %s\n", connection)
 	}
-	fmt.Fprintf(b, "  - Mapped channels: %d\n", c.countMappedChannels(s.ServerID))
+	fmt.Fprintf(b, "  - Mapped channels: %d\n", counts[s.ServerID])
+}
+
+// statusProbeTimeout bounds the combined wait for all homeserver connection
+// probes in the status commands. The Matrix HTTP client allows 30s per request,
+// so probing several servers one after another could outlast Mattermost's
+// slash-command timeout and make `/matrix status` look broken. Probes therefore
+// run concurrently under this shared deadline. It is a var so tests can shorten
+// it instead of waiting out the real deadline.
+var statusProbeTimeout = 8 * time.Second
+
+// probeServerConnections tests connectivity for every enabled server
+// concurrently, returning the rendered result keyed by serverID. Servers whose
+// probe has not completed by statusProbeTimeout are omitted, so one unreachable
+// homeserver degrades a single line of output instead of stalling the command.
+func (c *Handler) probeServerConnections(servers []kvstore.ServerConfig) map[string]string {
+	type probe struct {
+		serverID string
+		status   string
+	}
+	// Buffered to the number of probes so a goroutine finishing after the
+	// deadline can still send and exit rather than leaking on a blocked send.
+	results := make(chan probe, len(servers))
+	pending := 0
+	for _, s := range servers {
+		if !s.Enabled {
+			continue
+		}
+		pending++
+		go func(serverID string) {
+			results <- probe{serverID: serverID, status: c.serverConnectionStatus(serverID)}
+		}(s.ServerID)
+	}
+
+	statuses := make(map[string]string, pending)
+	deadline := time.After(statusProbeTimeout)
+	for range pending {
+		select {
+		case r := <-results:
+			statuses[r.serverID] = r.status
+		case <-deadline:
+			return statuses
+		}
+	}
+	return statuses
 }
 
 // serverConnectionStatus returns a human-readable connectivity result for a
@@ -1246,14 +1303,24 @@ func (c *Handler) serverConnectionStatus(serverID string) string {
 	return "✅ connected"
 }
 
-// countMappedChannels returns how many channels are bridged to the given server.
-func (c *Handler) countMappedChannels(serverID string) int {
-	count := 0
+// countMappedChannelsByServer returns how many channels are bridged to each
+// server, keyed by serverID. It scans the channel_mapping_ keyspace once for
+// every server: counting per server separately made the status and list commands
+// do O(servers × channels) KV reads for the same data.
+func (c *Handler) countMappedChannelsByServer() map[string]int {
+	counts := make(map[string]int)
 	page := 0
 	batchSize := 1000
 	for {
 		keys, err := c.kvstore.ListKeysWithPrefix(page, batchSize, kvstore.KeyPrefixChannelMapping)
-		if err != nil || len(keys) == 0 {
+		if err != nil {
+			// Stop rather than loop, but do not let a partial count pass silently
+			// as though it were complete.
+			c.client.Log.Warn("Failed to list channel mapping keys; mapped channel counts may be incomplete",
+				"error", err, "page", page)
+			break
+		}
+		if len(keys) == 0 {
 			break
 		}
 		for _, key := range keys {
@@ -1265,8 +1332,10 @@ func (c *Handler) countMappedChannels(serverID string) int {
 			if pErr != nil {
 				continue
 			}
-			if kvstore.RoomIDForServer(mappings, serverID) != "" {
-				count++
+			for _, m := range mappings {
+				if m.RoomID != "" {
+					counts[m.ServerID]++
+				}
 			}
 		}
 		if len(keys) < batchSize {
@@ -1274,7 +1343,7 @@ func (c *Handler) countMappedChannels(serverID string) int {
 		}
 		page++
 	}
-	return count
+	return counts
 }
 
 // executeServerMapCommand maps the current channel to a Matrix room on a specific

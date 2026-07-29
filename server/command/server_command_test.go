@@ -180,6 +180,42 @@ func TestServerCommandMapStoresMappingUnderServer(t *testing.T) {
 	assert.Equal(t, "chan-1", string(rev))
 }
 
+// TestServerCommandMapRecoversFromCorruptMapping verifies /matrix server map
+// self-heals a corrupt channel-mapping value instead of aborting with no
+// recovery path, matching /matrix unmap's existing corrupt-value recovery.
+func TestServerCommandMapRecoversFromCorruptMapping(t *testing.T) {
+	handler, mp := newServerCommandHandler(t, true)
+
+	require.Contains(t, runServer(handler, "/matrix server add http://synapse2.localhost:8889 synapse2.localhost as hs matrix2").Text, "Server registered")
+	mp.matrixClient = matrix.NewClientWithLoggerAndRateLimit("http://127.0.0.1:1", "as", "remote", "synapse2.localhost", matrix.NewTestLogger(t), matrix.TestRateLimitConfig())
+
+	// Seed a corrupt (unparseable) value under the shared channel-mapping key.
+	require.NoError(t, mp.kvstore.Set(kvstore.BuildChannelMappingKey("chan-1"), []byte("!not-json:server")))
+
+	env := handler.pluginAPI.(*plugintest.API)
+	env.On("GetChannel", "chan-1").Return(&model.Channel{Id: "chan-1", Name: "town-square"}, nil).Maybe()
+	env.On("GetChannelMembers", "chan-1", mock.Anything, mock.Anything).Return(model.ChannelMembers{}, nil).Maybe()
+	env.On("ShareChannel", mock.Anything).Return(nil, nil).Maybe()
+	env.On("UpdateChannel", mock.Anything).Return(nil, nil).Maybe()
+	env.On("InviteRemoteToChannel", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	env.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
+
+	resp := handler.executeMatrixCommand(&model.CommandArgs{
+		Command:   "/matrix server map srv_synapse2.localhost !room2:synapse2.localhost",
+		UserId:    "admin-user",
+		ChannelId: "chan-1",
+		TeamId:    "team-1",
+	})
+	require.Contains(t, resp.Text, "Mapping Saved", "a corrupt existing value must not abort the map with no recovery path")
+
+	fwd, err := mp.kvstore.Get(kvstore.BuildChannelMappingKey("chan-1"))
+	require.NoError(t, err)
+	mappings, err := kvstore.ParseChannelServerMappings(fwd)
+	require.NoError(t, err)
+	assert.Equal(t, "!room2:synapse2.localhost", kvstore.RoomIDForServer(mappings, "srv_synapse2.localhost"))
+	assert.Len(t, mappings, 1, "corrupt prior data must be discarded, not preserved alongside the new entry")
+}
+
 // seedServers writes the given servers into the mock plugin's registry.
 func seedServers(t *testing.T, mp *mockPlugin, servers ...kvstore.ServerConfig) {
 	t.Helper()
