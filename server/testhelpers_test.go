@@ -502,6 +502,100 @@ func (m *MemoryKVStore) Size() int {
 	return len(m.data)
 }
 
+// casConflictKVStore wraps a MemoryKVStore and gives SetAtomicWithRetries real
+// compare-and-set retry semantics: it tracks a version per key and re-invokes valueFunc
+// against a fresh read whenever the version changes between this call's read and write.
+// MemoryKVStore's own SetAtomicWithRetries is a single-shot read-compute-write with no
+// such check, so it cannot model a real conflict; this type exists so tests can install
+// onFirstRead to simulate a concurrent writer winning the race for one call, forcing a
+// real retry - the regression mutateServers's CAS design exists to survive.
+type casConflictKVStore struct {
+	kvstore.KVStore
+
+	mu       sync.Mutex
+	versions map[string]int
+	reads    map[string]int
+
+	// onFirstRead, if set, is invoked exactly once per key, after that key's first read
+	// in SetAtomicWithRetries but before this call's write - simulating a concurrent
+	// writer's real Set landing in between. Receives the underlying store so it can read
+	// and write like an independent caller would.
+	onFirstRead func(store kvstore.KVStore)
+}
+
+func newCASConflictKVStore() *casConflictKVStore {
+	return &casConflictKVStore{
+		KVStore:  NewMemoryKVStore(),
+		versions: make(map[string]int),
+		reads:    make(map[string]int),
+	}
+}
+
+func (c *casConflictKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error {
+	for {
+		// The read, the (at most once) injected concurrent write, and the version it
+		// establishes must all happen under one lock hold - otherwise a third caller
+		// could observe the bumped version before the injected write actually lands and
+		// wrongly conclude there is no conflict, the same lost-update bug this type
+		// exists to let tests exercise deliberately, not suffer from itself.
+		c.mu.Lock()
+		oldValue, err := c.Get(key)
+		if err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		oldVersion := c.versions[key]
+		c.reads[key]++
+		if c.reads[key] == 1 && c.onFirstRead != nil {
+			c.onFirstRead(c.KVStore)
+			c.versions[key]++
+		}
+		c.mu.Unlock()
+
+		newValue, err := valueFunc(oldValue)
+		if err != nil {
+			return err
+		}
+
+		c.mu.Lock()
+		if c.versions[key] != oldVersion {
+			// Lost the race: someone else's write landed since our read. Retry with a
+			// fresh read, exactly like the real KV store's SetAtomicWithRetries would.
+			c.mu.Unlock()
+			continue
+		}
+		// The version bump must happen together with the write, under the same lock
+		// hold, so no concurrent caller can pass its own version check against a bumped
+		// version whose corresponding write hasn't landed yet.
+		if err := c.Set(key, newValue); err != nil {
+			c.mu.Unlock()
+			return err
+		}
+		c.versions[key]++
+		c.mu.Unlock()
+		return nil
+	}
+}
+
+// erroringKVStore wraps a KVStore and fails Get for one specific key, for tests that
+// need to simulate a registry-read failure (e.g. a corrupt or unreachable backing store)
+// without a full hand-written fake.
+type erroringKVStore struct {
+	kvstore.KVStore
+	errOnGetKey string
+	getErr      error
+}
+
+func (e *erroringKVStore) Get(key string) ([]byte, error) {
+	if key == e.errOnGetKey {
+		if e.getErr != nil {
+			return nil, e.getErr
+		}
+		return nil, errors.New("simulated KV store read failure")
+	}
+	return e.KVStore.Get(key)
+}
+
 // TestMemoryKVStore tests the in-memory KV store implementation
 func TestMemoryKVStore(t *testing.T) {
 	store := NewMemoryKVStore()
