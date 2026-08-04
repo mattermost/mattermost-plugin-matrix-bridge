@@ -26,11 +26,6 @@ var (
 	htmlEntityRegex = regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
 )
 
-// ConfigurationGetter interface for getting plugin configuration
-type ConfigurationGetter interface {
-	getConfiguration() *configuration
-}
-
 // BridgeUtilsConfig contains all dependencies needed for BridgeUtils
 type BridgeUtilsConfig struct {
 	Logger              Logger
@@ -38,21 +33,27 @@ type BridgeUtilsConfig struct {
 	KVStore             kvstore.KVStore
 	MatrixClient        *matrix.Client
 	RemoteID            string
+	ServerID            string
 	MaxProfileImageSize int64
 	MaxFileSize         int64
-	ConfigGetter        ConfigurationGetter
+	// ChannelMapper is the one choke point for channel<->room mapping writes (see
+	// channel_mapping.go). Always the Plugin itself in production.
+	ChannelMapper ChannelMapper
 }
 
-// BridgeUtils contains common utilities used by both bridge types
+// BridgeUtils contains common utilities used by both bridge types. There is one
+// instance per (bridge direction, server) pair, built on demand - see
+// Plugin.bridgeUtilsForServer.
 type BridgeUtils struct {
 	logger              Logger
 	API                 plugin.API
 	kvstore             kvstore.KVStore
 	matrixClient        *matrix.Client
 	remoteID            string
+	serverID            string
 	maxProfileImageSize int64
 	maxFileSize         int64
-	configGetter        ConfigurationGetter
+	channelMapper       ChannelMapper
 }
 
 // NewBridgeUtils creates a new BridgeUtils instance
@@ -63,54 +64,69 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 		kvstore:             config.KVStore,
 		matrixClient:        config.MatrixClient,
 		remoteID:            config.RemoteID,
+		serverID:            config.ServerID,
 		maxProfileImageSize: config.MaxProfileImageSize,
 		maxFileSize:         config.MaxFileSize,
-		configGetter:        config.ConfigGetter,
+		channelMapper:       config.ChannelMapper,
 	}
 }
 
 // Shared utility methods that both bridge types need
 
-// GetMatrixRoomID retrieves the Matrix room ID for a given Mattermost channel ID
+// GetMatrixRoomID retrieves the Matrix room ID mapped to this bridge's server for a
+// given Mattermost channel ID. Returns ("", nil) both when the channel is entirely
+// unmapped and when it is mapped only to another server - that is not an error. A
+// corrupt stored value is.
 func (s *BridgeUtils) GetMatrixRoomID(channelID string) (string, error) {
-	roomID, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
+	data, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
 	if err != nil {
 		// KV store error (typically key not found) - unmapped channels are expected
 		return "", nil
 	}
-	return string(roomID), nil
+
+	mappings, err := kvstore.ParseChannelServerMappings(data)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to parse channel server mapping")
+	}
+
+	return kvstore.RoomIDForServer(mappings, s.serverID), nil
 }
 
+// setChannelRoomMapping maps channelID to matrixRoomIdentifier on this bridge's server,
+// going through the ChannelMapper choke point so the one-server-per-channel policy is
+// enforced consistently with the /matrix map and /matrix server map command paths.
 func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier string) error {
-	// Always resolve to room ID for consistent forward mapping storage
-	var roomID string
-	var err error
+	// Capture the previous room mapped to this server (if any) so its now-stale reverse
+	// key can be cleaned up when this call re-maps the same server to a new room.
+	previousRoomID, _ := s.GetMatrixRoomID(channelID)
 
-	// Resolve room identifier to room ID (handles both aliases and room IDs)
-	roomID, err = s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
+	// Always resolve to room ID for consistent forward mapping storage
+	roomID, err := s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
 	if err != nil {
 		s.logger.LogWarn("Failed to resolve room identifier during mapping creation", "room_identifier", matrixRoomIdentifier, "error", err)
 		// Fallback: store the original identifier (better than failing completely)
 		roomID = matrixRoomIdentifier
 	}
 
-	// Store forward mapping: channel_mapping_<channelID> -> room_id (always room ID)
-	err = s.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), []byte(roomID))
-	if err != nil {
+	if _, err := s.channelMapper.SetChannelMapping(channelID, s.serverID, roomID); err != nil {
 		return errors.Wrap(err, "failed to store channel room mapping")
 	}
 
+	if previousRoomID != "" && previousRoomID != roomID {
+		if err := s.kvstore.Delete(kvstore.BuildRoomMappingKey(s.serverID, previousRoomID)); err != nil {
+			s.logger.LogWarn("Failed to delete stale reverse room mapping", "channel_id", channelID, "server_id", s.serverID, "old_room_id", previousRoomID, "error", err)
+		}
+	}
+
 	// Store reverse mapping for the room ID
-	err = s.kvstore.Set(kvstore.BuildRoomMappingKey(roomID), []byte(channelID))
-	if err != nil {
+	if err := s.kvstore.Set(kvstore.BuildRoomMappingKey(s.serverID, roomID), []byte(channelID)); err != nil {
 		return errors.Wrap(err, "failed to store reverse room mapping")
 	}
 
 	// If we started with an alias, also create reverse mapping for the alias
 	// This allows lookups by both alias and room ID
 	if strings.HasPrefix(matrixRoomIdentifier, "#") && roomID != matrixRoomIdentifier {
-		err = s.kvstore.Set(kvstore.BuildRoomMappingKey(matrixRoomIdentifier), []byte(channelID))
-		if err != nil {
+		if err := s.kvstore.Set(kvstore.BuildRoomMappingKey(s.serverID, matrixRoomIdentifier), []byte(channelID)); err != nil {
 			s.logger.LogWarn("Failed to create alias reverse mapping", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "error", err)
 		} else {
 			s.logger.LogDebug("Created reverse mappings for alias", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "room_id", roomID)
@@ -120,8 +136,66 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	return nil
 }
 
-func (s *BridgeUtils) getConfiguration() *configuration {
-	return s.configGetter.getConfiguration()
+// serverConfig returns this bridge's server's current registry entry, read live from
+// the KV store (never cached), so a runtime change to e.g. UsernamePrefix takes effect
+// immediately.
+func (s *BridgeUtils) serverConfig() (kvstore.ServerConfig, error) {
+	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
+	if err != nil {
+		return kvstore.ServerConfig{}, errors.Wrap(err, "failed to read servers config")
+	}
+	servers, err := kvstore.ParseServersConfig(data)
+	if err != nil {
+		return kvstore.ServerConfig{}, err
+	}
+	for _, sv := range servers {
+		if sv.ServerID == s.serverID {
+			return sv, nil
+		}
+	}
+	return kvstore.ServerConfig{}, errors.Errorf("server %s is not registered", s.serverID)
+}
+
+// matrixUsernamePrefix returns this bridge's server's configured username prefix,
+// falling back to DefaultMatrixUsernamePrefix if the server can't be looked up or has
+// none set.
+func (s *BridgeUtils) matrixUsernamePrefix() string {
+	server, err := s.serverConfig()
+	if err != nil || server.UsernamePrefix == "" {
+		return DefaultMatrixUsernamePrefix
+	}
+	return server.UsernamePrefix
+}
+
+// serverDomain returns this bridge's server's ServerName (the domain used in this
+// homeserver's Matrix IDs), or "" if the server can't be looked up.
+func (s *BridgeUtils) serverDomain() string {
+	server, err := s.serverConfig()
+	if err != nil {
+		s.logger.LogWarn("Failed to read server config for domain lookup", "server_id", s.serverID, "error", err)
+		return ""
+	}
+	return server.ServerName
+}
+
+// eventDomain returns this bridge's server's EventDomain - the sanitized, immutable
+// value that keys the matrix_event_id_<EventDomain> post property. Always read from the
+// stored registry field, never recomputed: it may legitimately differ from a live
+// derivation of ServerName/endpoint (see §3.6), and recomputing would make every
+// previously-written property key unreachable.
+func (s *BridgeUtils) eventDomain() string {
+	server, err := s.serverConfig()
+	if err != nil {
+		s.logger.LogWarn("Failed to read server config for event domain lookup", "server_id", s.serverID, "error", err)
+		return ""
+	}
+	return server.EventDomain
+}
+
+// matrixEventIDPropertyKey returns the post property key under which this bridge's
+// server stores the Matrix event ID for a synced post.
+func (s *BridgeUtils) matrixEventIDPropertyKey() string {
+	return "matrix_event_id_" + s.eventDomain()
 }
 
 func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {
@@ -284,7 +358,7 @@ func (s *BridgeUtils) getMattermostUsernameFromMatrix(matrixUserID string) strin
 		mattermostUserID = ghostMattermostUserID
 	} else {
 		// Check if we have a mapping for this regular Matrix user
-		userMapKey := "matrix_user_" + matrixUserID
+		userMapKey := kvstore.BuildMatrixUserKey(s.serverID, matrixUserID)
 		userIDBytes, err := s.kvstore.Get(userMapKey)
 		if err != nil || len(userIDBytes) == 0 {
 			s.logger.LogDebug("No Mattermost user found for Matrix mention", "matrix_user_id", matrixUserID)
@@ -433,9 +507,7 @@ func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) 
 func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername string) string {
 	// Mattermost usernames for Matrix users follow the pattern: "prefix:username"
 	// We need to reverse this to get "@username:server.com"
-
-	config := s.configGetter.getConfiguration()
-	prefix := config.GetMatrixUsernamePrefixForServer(config.GetMatrixServerURL())
+	prefix := s.matrixUsernamePrefix()
 
 	// Check if username has the expected prefix
 	expectedPrefix := prefix + ":"
@@ -449,24 +521,12 @@ func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername str
 		return "" // Empty username
 	}
 
-	// Extract server domain using ServerDiscovery
-	serverURL := config.GetMatrixServerURL()
-	configuredServerName := config.GetMatrixServerName()
-
-	logger := matrix.NewAPILogger(s.API)
-	discovery := matrix.NewServerDiscovery(logger)
-	serverName, err := discovery.DiscoverServerName(serverURL, configuredServerName)
-	if err != nil {
-		s.logger.LogWarn("Failed to discover server name; cannot reconstruct Matrix user ID",
-			"error", err,
-			"server_url", serverURL,
-			"mattermost_username", mattermostUsername)
-		return ""
-	}
-
+	// ServerName is resolved once at server add and stored - never re-derived here, so
+	// this stays correct even if the connection host changes under .well-known delegation.
+	serverName := s.serverDomain()
 	if serverName == "" {
-		s.logger.LogWarn("Empty server name after discovery; cannot reconstruct Matrix user ID",
-			"server_url", serverURL,
+		s.logger.LogWarn("Empty server name for this bridge's server; cannot reconstruct Matrix user ID",
+			"server_id", s.serverID,
 			"mattermost_username", mattermostUsername)
 		return ""
 	}

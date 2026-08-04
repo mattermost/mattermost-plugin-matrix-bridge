@@ -19,9 +19,13 @@ type UserRemoteDetectionIntegrationTestSuite struct {
 	suite.Suite
 	matrixContainer *matrixtest.Container
 	plugin          *Plugin
+	serverID        string
+	remoteID        string
 	testChannelID   string
 	testRoomID      string
 	validator       *matrixtest.EventValidation
+	m2mx            *MattermostToMatrixBridge
+	mx2m            *MatrixToMattermostBridge
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -46,48 +50,42 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Loop Prevention Test Room"))
 
 	// Create plugin instance
-	suite.plugin = &Plugin{
-		remoteID: "test-remote-id",
-	}
+	suite.plugin = &Plugin{}
 	suite.plugin.SetAPI(api)
 
 	// Initialize plugin components
 	suite.plugin.kvstore = NewMemoryKVStore()
 	suite.plugin.pendingFiles = NewPendingFileTracker()
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	suite.plugin.configuration = &configuration{}
 
-	// Create Matrix client
-	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+	// Initialize the logger (required before registering the test server)
+	suite.plugin.logger = &testLogger{t: suite.T()}
+
+	// Create Matrix client and register it as this test's single server
+	matrixClient := createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		suite.plugin.remoteID,
+		"",
 	)
-	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	suite.serverID, suite.remoteID = registerTestServer(suite.T(), suite.plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
 
-	// Set up configuration
-	config := &configuration{
-		MatrixServerURL:      suite.matrixContainer.ServerURL,
-		MatrixASToken:        suite.matrixContainer.ASToken,
-		MatrixHSToken:        suite.matrixContainer.HSToken,
-		MatrixUsernamePrefix: "testmatrix", // Use different prefix to prove configurability
-	}
-	suite.plugin.configuration = config
+	// Use a different prefix than the default to prove configurability
+	setTestServerUsernamePrefix(suite.T(), suite.plugin, suite.serverID, "testmatrix")
 
-	// Initialize the logger (required before initBridges)
-	suite.plugin.logger = &testLogger{t: suite.T()}
-
-	// Initialize bridges
-	suite.plugin.initBridges()
+	// Build bridges
+	suite.m2mx, suite.mx2m = suite.plugin.testBridges(suite.T(), suite.serverID)
 
 	// Set up test data in KV store
-	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
+	setupTestKVData(suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
 	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
-		suite.plugin.remoteID,
+		suite.remoteID,
 	)
 
 	// Set up mock API expectations
@@ -137,7 +135,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestGhostUserCreationAndDe
 	assert.False(t, localUser.IsRemote(), "Local Mattermost user should not be remote")
 
 	// Test 2: Create a ghost user for the local user
-	ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(localUserID)
+	ghostUserID, err := suite.m2mx.CreateOrGetGhostUser(localUserID)
 	assert.NoError(t, err, "Ghost user creation should succeed")
 	assert.NotEmpty(t, ghostUserID, "Ghost user ID should not be empty")
 
@@ -153,7 +151,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestGhostUserCreationAndDe
 		Id:       model.NewId(),
 		Username: "testmatrix:bob_from_matrix",
 		Email:    "bob@matrix.example.com",
-		RemoteId: &[]string{suite.plugin.remoteID}[0], // Set by Matrix->Mattermost sync
+		RemoteId: &suite.remoteID, // Set by Matrix->Mattermost sync
 	}
 
 	// Test 4: Verify the Matrix-originated user IS considered remote
@@ -190,14 +188,14 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 	api.On("GetProfileImage", localUserID).Return([]byte("fake-image-data"), nil)
 
 	// Create a ghost user for the local user - this is a proper Matrix user in our namespace
-	ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(localUserID)
+	ghostUserID, err := suite.m2mx.CreateOrGetGhostUser(localUserID)
 	assert.NoError(t, err, "Ghost user creation should succeed")
 	assert.NotEmpty(t, ghostUserID, "Ghost user ID should not be empty")
 
 	t.Logf("✓ Created ghost user: %s", ghostUserID)
 
 	// Join the test room as the ghost user
-	err = suite.plugin.matrixClient.JoinRoomAsUser(suite.testRoomID, ghostUserID)
+	err = suite.plugin.getMatrixClient(suite.serverID).JoinRoomAsUser(suite.testRoomID, ghostUserID)
 	assert.NoError(t, err, "Ghost user should be able to join room")
 
 	// Send a message as the ghost user to demonstrate real Matrix operations
@@ -206,14 +204,14 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 		GhostUserID: ghostUserID,
 		Message:     "Hello from ghost user for loop prevention test",
 	}
-	response, err := suite.plugin.matrixClient.SendMessage(messageReq)
+	response, err := suite.plugin.getMatrixClient(suite.serverID).SendMessage(messageReq)
 	assert.NoError(t, err, "Should be able to send message as ghost user")
 	assert.NotEmpty(t, response.EventID, "Should receive event ID")
 
 	t.Logf("✓ Ghost user %s sent message with event ID: %s", ghostUserID, response.EventID)
 
 	// Test: Get the ghost user's profile to simulate what the bridge would do
-	profile, err := suite.plugin.matrixClient.GetUserProfile(ghostUserID)
+	profile, err := suite.plugin.getMatrixClient(suite.serverID).GetUserProfile(ghostUserID)
 	assert.NoError(t, err, "Should be able to get ghost user profile")
 	assert.NotNil(t, profile, "Profile should not be nil")
 
@@ -225,7 +223,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestRealMatrixUserInteract
 		Id:       model.NewId(),
 		Username: "testmatrix:" + extractUsernameFromMatrixID(ghostUserID),
 		Email:    extractUsernameFromMatrixID(ghostUserID) + "@matrix.bridge.local",
-		RemoteId: &[]string{suite.plugin.remoteID}[0], // This would be set by Matrix->Mattermost sync
+		RemoteId: &suite.remoteID, // This would be set by Matrix->Mattermost sync
 	}
 
 	// Verify this simulated user would be correctly identified as remote
@@ -278,7 +276,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestConfigurableUsernamePr
 
 	// Test username generation uses the configured prefix
 	baseUsername := "alice"
-	generatedUsername := suite.plugin.matrixToMattermostBridge.generateMattermostUsername(baseUsername)
+	generatedUsername := suite.mx2m.generateMattermostUsername(baseUsername)
 
 	// Should use "testmatrix:" prefix from test configuration
 	expectedUsername := "testmatrix:alice"
@@ -286,10 +284,9 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestConfigurableUsernamePr
 
 	t.Logf("✓ Username generation uses configured prefix: %s", generatedUsername)
 
-	// Test that the configuration getter returns the correct prefix
-	config := suite.plugin.getConfiguration()
-	actualPrefix := config.GetMatrixUsernamePrefix()
-	assert.Equal(t, "testmatrix", actualPrefix, "Configuration should return the set prefix")
+	// Test that the registry returns the correct per-server prefix
+	actualPrefix := suite.m2mx.matrixUsernamePrefix()
+	assert.Equal(t, "testmatrix", actualPrefix, "Registry should return the set per-server prefix")
 
 	t.Logf("✓ Configuration returns correct prefix: %s", actualPrefix)
 }
@@ -299,7 +296,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestBridgeMetadataConsiste
 	t := suite.T()
 
 	// Test that the bridge's remote ID is consistent
-	assert.NotEmpty(t, suite.plugin.remoteID, "Plugin should have a remote ID")
+	assert.NotEmpty(t, suite.remoteID, "Plugin should have a remote ID")
 
 	// Test that ghost users created by this bridge would have the correct metadata
 	localUserID := model.NewId()
@@ -316,7 +313,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestBridgeMetadataConsiste
 	api.On("GetProfileImage", localUserID).Return([]byte("fake-image-data"), nil)
 
 	// Create ghost user
-	ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(localUserID)
+	ghostUserID, err := suite.m2mx.CreateOrGetGhostUser(localUserID)
 	assert.NoError(t, err, "Ghost user creation should succeed")
 
 	// Verify the ghost user follows the expected pattern
@@ -331,13 +328,13 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestBridgeMetadataConsiste
 	simulatedGhostAsMattermostUser := &model.User{
 		Id:       model.NewId(),
 		Username: extractUsernameFromMatrixID(ghostUserID),
-		RemoteId: &[]string{suite.plugin.remoteID}[0],
+		RemoteId: &suite.remoteID,
 	}
 
 	assert.True(t, simulatedGhostAsMattermostUser.IsRemote(),
 		"Ghost user represented as Mattermost user should be remote")
 
-	t.Logf("✓ Metadata consistency verified for remote ID: %s", suite.plugin.remoteID)
+	t.Logf("✓ Metadata consistency verified for remote ID: %s", suite.remoteID)
 }
 
 // Helper function to extract username from Matrix user ID
@@ -357,29 +354,26 @@ func TestUserRemoteDetectionIntegration(t *testing.T) {
 	suite.Run(t, new(UserRemoteDetectionIntegrationTestSuite))
 }
 
-// TestDefaultUsernamePrefix tests that the default prefix is used when none is configured
+// TestDefaultUsernamePrefix tests that the default prefix is used when a server has none
+// configured, and that a configured per-server prefix takes precedence.
 func TestDefaultUsernamePrefix(t *testing.T) {
-	// Test the configuration getter with empty prefix
-	config := &configuration{
-		MatrixUsernamePrefix: "", // Empty should use default
-	}
+	plugin := setupPluginForTest()
+	plugin.kvstore = NewMemoryKVStore()
+	matrixClient := createMatrixClientWithTestLogger(t, "https://matrix.example.com", "as-token", "")
+	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 
-	prefix := config.GetMatrixUsernamePrefix()
+	m2mx, _ := plugin.testBridges(t, serverID)
+
+	prefix := m2mx.matrixUsernamePrefix()
 	assert.Equal(t, DefaultMatrixUsernamePrefix, prefix, "Empty prefix should return default")
 
-	// Test with explicit prefix
-	config.MatrixUsernamePrefix = "customprefix"
-	prefix = config.GetMatrixUsernamePrefix()
-	assert.Equal(t, "customprefix", prefix, "Should return configured prefix")
+	// Test with an explicit per-server prefix
+	setTestServerUsernamePrefix(t, plugin, serverID, "customprefix")
+	prefix = m2mx.matrixUsernamePrefix()
+	assert.Equal(t, "customprefix", prefix, "Should return the configured per-server prefix")
 
 	t.Logf("✓ Default prefix: %s", DefaultMatrixUsernamePrefix)
 	t.Logf("✓ Custom prefix: %s", prefix)
-
-	// Test server-specific prefix method (for future extensibility)
-	serverPrefix := config.GetMatrixUsernamePrefixForServer("https://matrix.example.com")
-	assert.Equal(t, "customprefix", serverPrefix, "Server-specific prefix should return same as global for now")
-
-	t.Logf("✓ Server-specific prefix: %s", serverPrefix)
 }
 
 // TestBasicRemoteDetectionLogic tests the basic logic without requiring Matrix server

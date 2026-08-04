@@ -16,6 +16,11 @@ const DefaultMatrixUsernamePrefix = "matrix"
 // configuration, as well as values computed from the configuration. Any public fields will be
 // deserialized from the Mattermost server configuration in OnConfigurationChange.
 //
+// Per-homeserver connection settings (URL, tokens, server name, username prefix, enabled
+// state) are NOT part of this struct - they live in the KV-backed server registry
+// (server/servers.go), managed through /matrix server commands. This struct now holds
+// only settings that are genuinely global to the plugin.
+//
 // As plugins are inherently concurrent (hooks being called asynchronously), and the plugin
 // configuration can change at any time, access to the configuration must be synchronized. The
 // strategy used in this plugin is to guard a pointer to the configuration, and clone the entire
@@ -24,13 +29,7 @@ const DefaultMatrixUsernamePrefix = "matrix"
 // If you add non-reference types to your configuration struct, be sure to rewrite Clone as a deep
 // copy appropriate for your types.
 type configuration struct {
-	MatrixServerURL      string `json:"matrix_server_url"`
-	MatrixServerName     string `json:"matrix_server_name"`
-	MatrixASToken        string `json:"matrix_as_token"`
-	MatrixHSToken        string `json:"matrix_hs_token"`
-	EnableSync           bool   `json:"enable_sync"`
-	MatrixUsernamePrefix string `json:"matrix_username_prefix"`
-	RateLimitingMode     string `json:"rate_limiting_mode"`
+	RateLimitingMode string `json:"rate_limiting_mode"`
 }
 
 // Clone shallow copies the configuration. Your implementation may require a deep copy if
@@ -101,64 +100,16 @@ func (p *Plugin) OnConfigurationChange() error {
 
 	p.setConfiguration(configuration)
 
-	p.initMatrixClient()
-
-	return nil
+	// Rate limit mode feeds Matrix client construction; rebuild every per-server client.
+	// initMatrixClients no-ops when p.kvstore is nil (this can fire before OnActivate).
+	return p.initMatrixClients()
 }
 
-// validateConfiguration checks that required configuration fields are present
+// validateConfiguration normalizes the rate-limit-mode setting. Per-server connection
+// settings are validated in AddServer, not here - there is no per-server input left in
+// this struct.
 func (p *Plugin) validateConfiguration(config *configuration) error {
-	if config.EnableSync {
-		if config.MatrixServerURL == "" {
-			return errors.New("Matrix Server URL is required when sync is enabled")
-		}
-		if config.MatrixASToken == "" {
-			return errors.New("Matrix Application Service Token is required when sync is enabled")
-		}
-		if config.MatrixHSToken == "" {
-			return errors.New("Matrix Homeserver Token is required when sync is enabled")
-		}
-	}
-
-	// Validate and normalize rate limiting mode using matrix package
 	parsedMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
 	config.RateLimitingMode = string(parsedMode)
-
-	// Validate and normalize MatrixServerName if provided
-	if config.MatrixServerName != "" {
-		normalized, err := matrix.NormalizeServerName(config.MatrixServerName)
-		if err != nil {
-			return errors.Wrap(err, "invalid Matrix Server Name")
-		}
-		config.MatrixServerName = normalized
-	}
-
 	return nil
-}
-
-// GetMatrixServerURL implements the Configuration interface for command package
-func (c *configuration) GetMatrixServerURL() string {
-	return c.MatrixServerURL
-}
-
-// GetMatrixServerName returns the configured Matrix server name (domain for Matrix IDs)
-// If not set, this should be derived via server discovery
-func (c *configuration) GetMatrixServerName() string {
-	return c.MatrixServerName
-}
-
-// GetMatrixUsernamePrefix returns the username prefix to use for Matrix-originated users
-func (c *configuration) GetMatrixUsernamePrefix() string {
-	if c.MatrixUsernamePrefix == "" {
-		return DefaultMatrixUsernamePrefix
-	}
-	return c.MatrixUsernamePrefix
-}
-
-// GetMatrixUsernamePrefixForServer returns the username prefix for a specific Matrix server
-// This allows for future extensibility to support different prefixes per server
-func (c *configuration) GetMatrixUsernamePrefixForServer(_ string) string {
-	// For now, return the global prefix
-	// In the future, this could check a map of server-specific prefixes
-	return c.GetMatrixUsernamePrefix()
 }

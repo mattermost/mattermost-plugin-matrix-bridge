@@ -310,6 +310,15 @@ func (c *Client) SetServerDomain(domain string) {
 	c.serverDomain = domain
 }
 
+// SetRemoteID updates the shared-channels remote ID this client attributes its
+// created posts/users to. Exposed primarily for tests that must construct a client
+// before a remote ID is minted (e.g. before the plugin registers it for shared
+// channels); production code passes the final remote ID directly to
+// NewClientWithRateLimit / NewClientWithLoggerAndRateLimit instead.
+func (c *Client) SetRemoteID(remoteID string) {
+	c.remoteID = remoteID
+}
+
 // SetServerURL updates the server URL for the client
 func (c *Client) SetServerURL(serverURL string) {
 	c.serverURL = serverURL
@@ -514,6 +523,57 @@ func (c *Client) TestConnection() error {
 	}
 
 	return nil
+}
+
+// KeyServerResponse represents the (partial) response from GET /_matrix/key/v2/server.
+type KeyServerResponse struct {
+	ServerName string `json:"server_name"`
+}
+
+// GetServerNameFromKeyEndpoint queries GET /_matrix/key/v2/server on this client's
+// configured server URL and returns the server_name field. This is a federation
+// endpoint and is unauthenticated - no Application Service token is required (and
+// none may exist yet, since this is used to discover a server's name before it is
+// registered). Callers should treat any error (network, non-200, malformed body,
+// missing/empty server_name) as "discovery unavailable" and fall through to the next
+// resolution step rather than failing outright.
+func (c *Client) GetServerNameFromKeyEndpoint() (string, error) {
+	if c.serverURL == "" {
+		return "", errors.New("matrix client not configured")
+	}
+
+	requestURL := c.serverURL + "/_matrix/key/v2/server"
+
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create key server request")
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send key server request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read key server response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("key server endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response KeyServerResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", errors.Wrap(err, "failed to parse key server response")
+	}
+
+	if response.ServerName == "" {
+		return "", errors.New("key server response missing server_name")
+	}
+
+	return response.ServerName, nil
 }
 
 // JoinRoom joins a Matrix room using either a room ID or room alias.

@@ -9,606 +9,423 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-type env struct {
-	client *pluginapi.Client
-	api    *plugintest.API
-}
-
-type mockConfiguration struct {
-	serverURL string
-}
-
-func (m *mockConfiguration) GetMatrixServerURL() string {
-	return m.serverURL
-}
-
-func (m *mockConfiguration) GetMatrixServerName() string {
-	return "" // No configured server name in tests
-}
-
-func (m *mockConfiguration) GetMatrixUsernamePrefixForServer(_ string) string {
-	return "matrix" // Use default prefix for tests
-}
-
-// mockPlugin implements the PluginAccessor interface for testing
+// mockPlugin implements PluginAccessor for testing, backed by an in-memory server list
+// instead of a real KV store or Matrix client.
 type mockPlugin struct {
-	client       *pluginapi.Client
-	kvstore      kvstore.KVStore
-	matrixClient *matrix.Client
-	config       Configuration
-	pluginAPI    *plugintest.API
+	client    *pluginapi.Client
+	kvstore   kvstore.KVStore
+	pluginAPI plugin.API
+
+	servers []kvstore.ServerConfig
+
+	addServerErr error
+	addServerID  string
+
+	removeServerOK  bool
+	removeServerErr error
+
+	setEnabledErr error
+
+	mapErr   error
+	unmapErr error
+
+	migrationErr    error
+	migrationResult *MigrationResult
 }
 
-func (m *mockPlugin) GetMatrixClient() *matrix.Client {
-	return m.matrixClient
+func (m *mockPlugin) GetKVStore() kvstore.KVStore { return m.kvstore }
+
+func (m *mockPlugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
+	return m.servers, nil
 }
 
-func (m *mockPlugin) GetKVStore() kvstore.KVStore {
-	return m.kvstore
+func (m *mockPlugin) AddServer(serverURL, _, _, _, serverID, _ string) (string, error) {
+	if m.addServerErr != nil {
+		return "", m.addServerErr
+	}
+	id := m.addServerID
+	if id == "" {
+		id = serverID
+	}
+	if id == "" {
+		id = model.NewId()
+	}
+	m.servers = append(m.servers, kvstore.ServerConfig{
+		ServerID:   id,
+		ServerURL:  serverURL,
+		ServerName: serverURL,
+		Enabled:    true,
+	})
+	return id, nil
 }
 
-func (m *mockPlugin) GetConfiguration() Configuration {
-	return m.config
+func (m *mockPlugin) RemoveServer(serverID string) (bool, error) {
+	if m.removeServerErr != nil {
+		return false, m.removeServerErr
+	}
+	if !m.removeServerOK {
+		return false, nil
+	}
+	for i, s := range m.servers {
+		if s.ServerID == serverID {
+			m.servers = append(m.servers[:i], m.servers[i+1:]...)
+			break
+		}
+	}
+	return true, nil
 }
 
-func (m *mockPlugin) CreateOrGetGhostUser(mattermostUserID string) (string, error) {
-	// Mock implementation - return test ghost user
-	return "_mattermost_" + mattermostUserID + ":test.com", nil
+func (m *mockPlugin) SetServerEnabled(serverID string, enabled bool) error {
+	if m.setEnabledErr != nil {
+		return m.setEnabledErr
+	}
+	for i := range m.servers {
+		if m.servers[i].ServerID == serverID {
+			m.servers[i].Enabled = enabled
+			return nil
+		}
+	}
+	return assert.AnError
 }
 
-func (m *mockPlugin) GetPluginAPI() plugin.API {
-	return m.pluginAPI
+func (m *mockPlugin) GetMatrixClientForServer(_ string) *matrix.Client { return nil }
+func (m *mockPlugin) GetRemoteIDForServer(serverID string) string      { return "remote-" + serverID }
+
+func (m *mockPlugin) CreateOrGetGhostUserForServer(serverID, mattermostUserID string) (string, error) {
+	return "@_mattermost_" + mattermostUserID + ":" + serverID, nil
 }
 
-func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client {
-	return m.client
+func (m *mockPlugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermostUserID string) (string, error) {
+	return "@" + mattermostUserID + ":" + serverID, nil
 }
 
-func (m *mockPlugin) GetRemoteID() string {
-	return "test-remote-id"
-}
+func (m *mockPlugin) MapChannelToServer(_, _, _ string) error  { return m.mapErr }
+func (m *mockPlugin) UnmapChannelFromServer(_, _ string) error { return m.unmapErr }
 
-func (m *mockPlugin) RunKVStoreMigrations() error {
-	return nil // Mock implementation always succeeds
-}
+func (m *mockPlugin) GetPluginAPI() plugin.API              { return m.pluginAPI }
+func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client { return m.client }
 
+func (m *mockPlugin) RunKVStoreMigrations() error { return m.migrationErr }
 func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error) {
-	return &MigrationResult{
-		UserMappingsCreated:      5,
-		ChannelMappingsCreated:   3,
-		RoomMappingsCreated:      2,
-		DMMappingsCreated:        1,
-		ReverseDMMappingsCreated: 1,
-	}, nil // Mock implementation returns sample results
+	if m.migrationErr != nil {
+		return nil, m.migrationErr
+	}
+	if m.migrationResult != nil {
+		return m.migrationResult, nil
+	}
+	return &MigrationResult{}, nil
 }
 
-func (m *mockPlugin) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
-	// Mock implementation - return test Matrix user
-	return "@test_" + mattermostUserID + ":test.com", nil
+// memoryKVStore is a minimal in-memory kvstore.KVStore for command tests that touch
+// keyspace scans (e.g. countMappedChannelsPerServer).
+type memoryKVStore struct {
+	data map[string][]byte
 }
 
-func setupTest() *env {
+func newMemoryKVStore() kvstore.KVStore {
+	return &memoryKVStore{data: make(map[string][]byte)}
+}
+
+func (m *memoryKVStore) GetTemplateData(_ string) (string, error) { return "", nil }
+
+func (m *memoryKVStore) Get(key string) ([]byte, error) {
+	return m.data[key], nil
+}
+
+func (m *memoryKVStore) Set(key string, value []byte) error {
+	m.data[key] = value
+	return nil
+}
+
+func (m *memoryKVStore) Delete(key string) error {
+	delete(m.data, key)
+	return nil
+}
+
+func (m *memoryKVStore) ListKeys(page, perPage int) ([]string, error) {
+	return m.ListKeysWithPrefix(page, perPage, "")
+}
+
+func (m *memoryKVStore) ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error) {
+	var keys []string
+	for k := range m.data {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	start := page * perPage
+	if start >= len(keys) {
+		return []string{}, nil
+	}
+	end := min(start+perPage, len(keys))
+	return keys[start:end], nil
+}
+
+func (m *memoryKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) ([]byte, error)) error {
+	newValue, err := valueFunc(m.data[key])
+	if err != nil {
+		return err
+	}
+	return m.Set(key, newValue)
+}
+
+// newTestHandler builds a Handler with a fresh mockPlugin and mock Mattermost API,
+// without going through NewCommandHandler (which registers a real slash command).
+func newTestHandler(t *testing.T, servers ...kvstore.ServerConfig) (*Handler, *mockPlugin, *plugintest.API) {
+	t.Helper()
+
 	api := &plugintest.API{}
-	driver := &plugintest.Driver{}
-	client := pluginapi.NewClient(api, driver)
+	client := pluginapi.NewClient(api, nil)
+	store := newMemoryKVStore()
 
-	return &env{
-		client: client,
-		api:    api,
+	mp := &mockPlugin{
+		client:    client,
+		pluginAPI: api,
+		kvstore:   store,
+		servers:   servers,
 	}
+
+	return &Handler{
+		plugin:    mp,
+		client:    client,
+		kvstore:   store,
+		pluginAPI: api,
+	}, mp, api
 }
 
-func TestMatrixCreateCommandParsing(t *testing.T) {
+func TestResolveServerIDArg(t *testing.T) {
+	serverA := kvstore.ServerConfig{ServerID: "serverA", ServerName: "a.example.com", ServerURL: "https://a.example.com"}
+	serverB := kvstore.ServerConfig{ServerID: "serverB", ServerName: "b.example.com", ServerURL: "https://b.example.com"}
+
+	t.Run("empty arg with zero servers errors", func(t *testing.T) {
+		h, _, _ := newTestHandler(t)
+		_, err := h.resolveServerIDArg("")
+		require.Error(t, err)
+	})
+
+	t.Run("empty arg with exactly one server resolves it", func(t *testing.T) {
+		h, _, _ := newTestHandler(t, serverA)
+		id, err := h.resolveServerIDArg("")
+		require.NoError(t, err)
+		assert.Equal(t, "serverA", id)
+	})
+
+	t.Run("empty arg with multiple servers is ambiguous", func(t *testing.T) {
+		h, _, _ := newTestHandler(t, serverA, serverB)
+		_, err := h.resolveServerIDArg("")
+		require.Error(t, err)
+	})
+
+	t.Run("matches by server_id", func(t *testing.T) {
+		h, _, _ := newTestHandler(t, serverA, serverB)
+		id, err := h.resolveServerIDArg("serverB")
+		require.NoError(t, err)
+		assert.Equal(t, "serverB", id)
+	})
+
+	t.Run("matches by server name", func(t *testing.T) {
+		h, _, _ := newTestHandler(t, serverA, serverB)
+		id, err := h.resolveServerIDArg("a.example.com")
+		require.NoError(t, err)
+		assert.Equal(t, "serverA", id)
+	})
+
+	t.Run("matches by URL host", func(t *testing.T) {
+		serverC := kvstore.ServerConfig{ServerID: "serverC", ServerName: "different-name.example.org", ServerURL: "https://c.example.com"}
+		h, _, _ := newTestHandler(t, serverC)
+		id, err := h.resolveServerIDArg("c.example.com")
+		require.NoError(t, err)
+		assert.Equal(t, "serverC", id)
+	})
+
+	t.Run("no match errors", func(t *testing.T) {
+		h, _, _ := newTestHandler(t, serverA)
+		_, err := h.resolveServerIDArg("nonexistent")
+		require.Error(t, err)
+	})
+}
+
+func TestStripFlags(t *testing.T) {
+	t.Run("no flags present", func(t *testing.T) {
+		positional, flags, err := stripFlags([]string{"a", "b", "c"}, "server-id", "server-name")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a", "b", "c"}, positional)
+		assert.Empty(t, flags)
+	})
+
+	t.Run("space-separated flag value", func(t *testing.T) {
+		positional, flags, err := stripFlags([]string{"url", "as", "hs", "--server-id", "abc123"}, "server-id", "server-name")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"url", "as", "hs"}, positional)
+		assert.Equal(t, "abc123", flags["server-id"])
+	})
+
+	t.Run("equals-separated flag value", func(t *testing.T) {
+		positional, flags, err := stripFlags([]string{"url", "as", "hs", "--server-id=abc123"}, "server-id", "server-name")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"url", "as", "hs"}, positional)
+		assert.Equal(t, "abc123", flags["server-id"])
+	})
+
+	t.Run("flag before positional username_prefix does not shift it", func(t *testing.T) {
+		positional, flags, err := stripFlags([]string{"url", "as", "hs", "--server-id", "abc123", "myprefix"}, "server-id", "server-name")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"url", "as", "hs", "myprefix"}, positional)
+		assert.Equal(t, "abc123", flags["server-id"])
+	})
+
+	t.Run("flag in the middle does not shift trailing positional args", func(t *testing.T) {
+		positional, flags, err := stripFlags([]string{"url", "--server-name=my.name", "as", "hs", "myprefix"}, "server-id", "server-name")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"url", "as", "hs", "myprefix"}, positional)
+		assert.Equal(t, "my.name", flags["server-name"])
+	})
+
+	t.Run("both flags present in either form", func(t *testing.T) {
+		positional, flags, err := stripFlags([]string{"url", "as", "hs", "--server-id=abc123", "--server-name", "my.name"}, "server-id", "server-name")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"url", "as", "hs"}, positional)
+		assert.Equal(t, "abc123", flags["server-id"])
+		assert.Equal(t, "my.name", flags["server-name"])
+	})
+
+	t.Run("unknown flag errors instead of becoming positional", func(t *testing.T) {
+		_, _, err := stripFlags([]string{"url", "as", "hs", "--bogus", "value"}, "server-id", "server-name")
+		require.Error(t, err)
+	})
+
+	t.Run("missing value for flag errors", func(t *testing.T) {
+		_, _, err := stripFlags([]string{"url", "as", "hs", "--server-id"}, "server-id", "server-name")
+		require.Error(t, err)
+	})
+}
+
+func TestExecuteServerGroupAdminGate(t *testing.T) {
+	h, _, api := newTestHandler(t)
+
+	userID := model.NewId()
+	api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(false)
+
+	resp := h.executeServerGroup(&model.CommandArgs{UserId: userID}, []string{"list"})
+	assert.Contains(t, resp.Text, "System Admin")
+}
+
+func TestExecuteServerGroupAddRemoveList(t *testing.T) {
+	h, mp, api := newTestHandler(t)
+
+	userID := model.NewId()
+	api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+	args := &model.CommandArgs{UserId: userID}
+
+	t.Run("add requires at least 3 positional args", func(t *testing.T) {
+		resp := h.executeServerGroup(args, []string{"add", "https://matrix.example.com"})
+		assert.Contains(t, resp.Text, "Usage")
+	})
+
+	t.Run("add happy path registers a server", func(t *testing.T) {
+		resp := h.executeServerGroup(args, []string{"add", "https://matrix.example.com", "as-token", "hs-token"})
+		assert.Contains(t, resp.Text, "added")
+		assert.Len(t, mp.servers, 1)
+	})
+
+	t.Run("add failure surfaces the error", func(t *testing.T) {
+		h2, mp2, api2 := newTestHandler(t)
+		api2.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+		mp2.addServerErr = assert.AnError
+		resp := h2.executeServerGroup(args, []string{"add", "https://matrix.example.com", "as-token", "hs-token"})
+		assert.Contains(t, resp.Text, "Failed to add server")
+	})
+
+	t.Run("list shows the registered server", func(t *testing.T) {
+		resp := h.executeServerGroup(args, []string{"list"})
+		assert.Contains(t, resp.Text, mp.servers[0].ServerID)
+	})
+
+	t.Run("remove requires a server_id", func(t *testing.T) {
+		resp := h.executeServerGroup(args, []string{"remove"})
+		assert.Contains(t, resp.Text, "Usage")
+	})
+
+	t.Run("remove of unknown server reports not found", func(t *testing.T) {
+		h3, mp3, api3 := newTestHandler(t)
+		api3.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+		mp3.removeServerOK = false
+		resp := h3.executeServerGroup(args, []string{"remove", "nonexistent"})
+		assert.Contains(t, resp.Text, "No server found")
+	})
+
+	t.Run("remove happy path prints the recovery key", func(t *testing.T) {
+		serverID := mp.servers[0].ServerID
+		mp.removeServerOK = true
+		resp := h.executeServerGroup(args, []string{"remove", serverID})
+		assert.Contains(t, resp.Text, serverID)
+		assert.Contains(t, resp.Text, "--server-id")
+	})
+}
+
+func TestExecuteServerGroupEnableDisable(t *testing.T) {
+	serverA := kvstore.ServerConfig{ServerID: "serverA", ServerName: "a.example.com", Enabled: false}
+	h, _, api := newTestHandler(t, serverA)
+
+	userID := model.NewId()
+	api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+	args := &model.CommandArgs{UserId: userID}
+
+	resp := h.executeServerGroup(args, []string{"enable", "serverA"})
+	assert.Contains(t, resp.Text, "enabled")
+
+	resp = h.executeServerGroup(args, []string{"disable", "serverA"})
+	assert.Contains(t, resp.Text, "disabled")
+
+	resp = h.executeServerGroup(args, []string{"enable"})
+	assert.Contains(t, resp.Text, "Usage")
+}
+
+func TestExecuteServerGroupUnknownSubcommand(t *testing.T) {
+	h, _, api := newTestHandler(t)
+	userID := model.NewId()
+	api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+	resp := h.executeServerGroup(&model.CommandArgs{UserId: userID}, []string{"bogus"})
+	assert.Contains(t, resp.Text, "Usage")
+}
+
+func TestExecuteMigrateCommandRefusesWithMultipleServers(t *testing.T) {
+	serverA := kvstore.ServerConfig{ServerID: "serverA"}
+	serverB := kvstore.ServerConfig{ServerID: "serverB"}
+	h, _, _ := newTestHandler(t, serverA, serverB)
+
+	resp := h.executeMigrateCommand(&model.CommandArgs{})
+	assert.Contains(t, resp.Text, "refuses to run")
+}
+
+func TestSanitizeShareName(t *testing.T) {
 	tests := []struct {
-		name             string
-		command          string
-		expectedRoomName string
-		expectedPublish  bool
-		shouldCallCreate bool
-		description      string
+		name     string
+		input    string
+		expected string
 	}{
-		{
-			name:             "create with no arguments",
-			command:          "/matrix create",
-			expectedRoomName: "",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use channel name and not publish",
-		},
-		{
-			name:             "create with publish true only",
-			command:          "/matrix create true",
-			expectedRoomName: "",
-			expectedPublish:  true,
-			shouldCallCreate: true,
-			description:      "should use channel name and publish",
-		},
-		{
-			name:             "create with publish false only",
-			command:          "/matrix create false",
-			expectedRoomName: "",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use channel name and not publish",
-		},
-		{
-			name:             "create with publish=true only",
-			command:          "/matrix create publish=true",
-			expectedRoomName: "",
-			expectedPublish:  true,
-			shouldCallCreate: true,
-			description:      "should use channel name and publish",
-		},
-		{
-			name:             "create with publish=false only",
-			command:          "/matrix create publish=false",
-			expectedRoomName: "",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use channel name and not publish",
-		},
-		{
-			name:             "create with room name only",
-			command:          "/matrix create TestRoom",
-			expectedRoomName: "TestRoom",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use custom room name and not publish",
-		},
-		{
-			name:             "create with multi-word room name",
-			command:          "/matrix create My Test Room",
-			expectedRoomName: "My Test Room",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use multi-word room name and not publish",
-		},
-		{
-			name:             "create with room name and true",
-			command:          "/matrix create TestRoom true",
-			expectedRoomName: "TestRoom",
-			expectedPublish:  true,
-			shouldCallCreate: true,
-			description:      "should use custom room name and publish",
-		},
-		{
-			name:             "create with room name and false",
-			command:          "/matrix create TestRoom false",
-			expectedRoomName: "TestRoom",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use custom room name and not publish",
-		},
-		{
-			name:             "create with room name and publish=true",
-			command:          "/matrix create TestRoom publish=true",
-			expectedRoomName: "TestRoom",
-			expectedPublish:  true,
-			shouldCallCreate: true,
-			description:      "should use custom room name and publish",
-		},
-		{
-			name:             "create with room name and publish=false",
-			command:          "/matrix create TestRoom publish=false",
-			expectedRoomName: "TestRoom",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use custom room name and not publish",
-		},
-		{
-			name:             "create with multi-word room name and true",
-			command:          "/matrix create My Test Room true",
-			expectedRoomName: "My Test Room",
-			expectedPublish:  true,
-			shouldCallCreate: true,
-			description:      "should use multi-word room name and publish",
-		},
-		{
-			name:             "create with multi-word room name and publish=false",
-			command:          "/matrix create My Test Room publish=false",
-			expectedRoomName: "My Test Room",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should use multi-word room name and not publish",
-		},
-		{
-			name:             "create with double-quoted room name",
-			command:          `/matrix create "connected-channel-1c"`,
-			expectedRoomName: "connected-channel-1c",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should strip surrounding double quotes from room name",
-		},
-		{
-			name:             "create with single-quoted room name",
-			command:          `/matrix create 'my room'`,
-			expectedRoomName: "my room",
-			expectedPublish:  false,
-			shouldCallCreate: true,
-			description:      "should strip surrounding single quotes from room name",
-		},
+		{"simple name", "General", "general"},
+		{"name with spaces", "My Cool Channel", "my-cool-channel"},
+		{"name with special chars", "Test!@#Channel", "testchannel"},
+		{"empty after sanitization", "!@#$%", "matrixbridge"},
+		{"leading/trailing hyphens removed", "-test-", "test"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert := assert.New(t)
-			env := setupTest()
-
-			// Set up expectations for command registration
-			setupCommandRegistration(env)
-
-			// Set up channel get expectation
-			channel := &model.Channel{
-				Id:          "test-channel-id",
-				DisplayName: "Test Channel",
-				Name:        "test-channel",
-			}
-			env.api.On("GetChannel", "test-channel-id").Return(channel, nil)
-
-			// Create a custom test handler to capture the create command parameters
-			var capturedRoomName string
-			var capturedPublish bool
-			var createCalled bool
-
-			// Create mock plugin API
-			mockPlugin := &mockPlugin{
-				client:       env.client,
-				kvstore:      kvstore.NewKVStore(env.client),
-				matrixClient: nil, // Will cause create to fail gracefully
-				config:       &mockConfiguration{serverURL: "http://test.com"},
-				pluginAPI:    env.api,
-			}
-
-			testHandler := &testCommandHandler{
-				Handler: &Handler{
-					plugin:    mockPlugin,
-					client:    env.client,
-					kvstore:   kvstore.NewKVStore(env.client),
-					pluginAPI: env.api,
-				},
-				onCreateRoom: func(roomName string, publish bool) {
-					capturedRoomName = roomName
-					capturedPublish = publish
-					createCalled = true
-				},
-			}
-
-			args := &model.CommandArgs{
-				Command:   tt.command,
-				ChannelId: "test-channel-id",
-			}
-
-			response, err := testHandler.Handle(args)
-
-			if tt.shouldCallCreate {
-				assert.Nil(err)
-				assert.True(createCalled, "create command should have been called")
-				assert.Equal(tt.expectedRoomName, capturedRoomName, "room name should match expected")
-				assert.Equal(tt.expectedPublish, capturedPublish, "publish flag should match expected")
-
-				// If room name is empty, the handler should use the channel name
-				if tt.expectedRoomName == "" {
-					assert.Contains(response.Text, "Matrix client not configured", "should fail gracefully when no matrix client")
-				}
-			}
+			result := sanitizeShareName(tt.input)
+			assert.Equal(t, tt.expected, result)
+			// A ShareName must start and end with alphanumeric.
+			assert.False(t, strings.HasPrefix(result, "-") || strings.HasPrefix(result, "_"))
+			assert.False(t, strings.HasSuffix(result, "-") || strings.HasSuffix(result, "_"))
 		})
-	}
-}
-
-// testCommandHandler wraps the Handler to intercept create room calls for testing
-type testCommandHandler struct {
-	*Handler
-	onCreateRoom func(roomName string, publish bool)
-}
-
-func (t *testCommandHandler) Handle(args *model.CommandArgs) (*model.CommandResponse, error) {
-	// Override the executeCreateRoomCommand to capture parameters
-	originalHandler := t.Handler
-	t.Handler = &Handler{
-		plugin:    originalHandler.plugin,
-		client:    originalHandler.client,
-		kvstore:   originalHandler.kvstore,
-		pluginAPI: originalHandler.pluginAPI,
-	}
-
-	// Parse the command to extract create parameters
-	fields := strings.Fields(args.Command)
-	if len(fields) >= 2 && fields[1] == "create" {
-		// Duplicate the parsing logic from the actual command
-		var roomName string
-		publish := false
-
-		switch {
-		case len(fields) == 2:
-			roomName = ""
-		case len(fields) == 3:
-			arg := fields[2]
-			if arg == "true" || arg == "false" || strings.HasPrefix(arg, "publish=") {
-				roomName = ""
-				if publishValue, ok := strings.CutPrefix(arg, "publish="); ok {
-					publish = publishValue == "true"
-				} else {
-					publish = arg == "true"
-				}
-			} else {
-				roomName = arg
-			}
-		default:
-			lastField := fields[len(fields)-1]
-			if lastField == "true" || lastField == "false" || strings.HasPrefix(lastField, "publish=") {
-				if publishValue, ok := strings.CutPrefix(lastField, "publish="); ok {
-					publish = publishValue == "true"
-				} else {
-					publish = lastField == "true"
-				}
-				roomName = strings.Join(fields[2:len(fields)-1], " ")
-			} else {
-				roomName = strings.Join(fields[2:], " ")
-			}
-		}
-
-		// Strip surrounding quotes that users may add around room names
-		roomName = strings.Trim(roomName, "\"'")
-
-		if t.onCreateRoom != nil {
-			t.onCreateRoom(roomName, publish)
-		}
-	}
-
-	return originalHandler.Handle(args)
-}
-
-func setupCommandRegistration(env *env) {
-	// Matrix command registration
-	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", testCommandDesc))
-
-	// Create command with argument completion
-	createCmd := model.NewAutocompleteData("create", createCommandHint, createCommandDesc)
-	createCmd.AddTextArgument("Optional room name (defaults to channel name)", "[room_name]", "")
-	createCmd.AddTextArgument("Optional publish flag", "[publish=true|false]", "")
-	matrixData.AddCommand(createCmd)
-
-	// Map command with argument completion
-	mapCmd := model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc)
-	mapCmd.AddTextArgument("Matrix room alias or room ID", "[room_alias|room_id]", "")
-	matrixData.AddCommand(mapCmd)
-
-	// Unmap command
-	matrixData.AddCommand(model.NewAutocompleteData("unmap", unmapCommandHint, unmapCommandDesc))
-
-	matrixData.AddCommand(model.NewAutocompleteData("list", "", listCommandDesc))
-	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
-	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
-
-	env.api.On("RegisterCommand", &model.Command{
-		Trigger:          matrixCommandTrigger,
-		AutoComplete:     true,
-		AutoCompleteDesc: "Matrix bridge commands",
-		AutoCompleteHint: "[subcommand]",
-		AutocompleteData: matrixData,
-	}).Return(nil)
-}
-
-func TestMatrixCreateCommandEdgeCases(t *testing.T) {
-	tests := []struct {
-		name           string
-		command        string
-		channelName    string
-		channelDisplay string
-		expectedResult string
-		description    string
-	}{
-		{
-			name:           "create with edge case room names",
-			command:        "/matrix create Room-With_Special.Chars",
-			channelName:    "test-channel",
-			channelDisplay: "Test Channel",
-			expectedResult: "Room-With_Special.Chars",
-			description:    "should handle special characters in room names",
-		},
-		{
-			name:           "create uses display name when available",
-			command:        "/matrix create",
-			channelName:    "test-channel",
-			channelDisplay: "My Display Name",
-			expectedResult: "", // Empty means use channel name, will become "My Display Name"
-			description:    "should use channel display name when room name is empty",
-		},
-		{
-			name:           "create uses channel name when no display name",
-			command:        "/matrix create",
-			channelName:    "test-channel-name",
-			channelDisplay: "",
-			expectedResult: "", // Empty means use channel name, will become "test-channel-name"
-			description:    "should use channel name when no display name available",
-		},
-		{
-			name:           "create with publish parameter edge cases",
-			command:        "/matrix create publish=True", // Capital T
-			channelName:    "test-channel",
-			channelDisplay: "Test Channel",
-			expectedResult: "",
-			description:    "should handle case-sensitive publish parameter gracefully",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert := assert.New(t)
-			env := setupTest()
-
-			// Set up expectations for command registration
-			setupCommandRegistration(env)
-
-			// Set up channel get expectation
-			channel := &model.Channel{
-				Id:          "test-channel-id",
-				DisplayName: tt.channelDisplay,
-				Name:        tt.channelName,
-			}
-			env.api.On("GetChannel", "test-channel-id").Return(channel, nil)
-
-			// Create command handler
-			mockPlugin := &mockPlugin{
-				client:       env.client,
-				kvstore:      kvstore.NewKVStore(env.client),
-				matrixClient: nil, // No matrix client - will fail gracefully
-				config:       &mockConfiguration{serverURL: "http://test.com"},
-				pluginAPI:    env.api,
-			}
-			cmdHandler := NewCommandHandler(mockPlugin)
-
-			args := &model.CommandArgs{
-				Command:   tt.command,
-				ChannelId: "test-channel-id",
-			}
-
-			response, err := cmdHandler.Handle(args)
-
-			// Should not error on parsing
-			assert.Nil(err)
-			// Should get some response (even if Matrix client not configured)
-			assert.NotNil(response)
-		})
-	}
-}
-
-func TestMatrixCommandErrors(t *testing.T) {
-	tests := []struct {
-		name        string
-		command     string
-		expectError bool
-		description string
-	}{
-		{
-			name:        "unknown subcommand",
-			command:     "/matrix unknown",
-			expectError: false, // Returns error response, not error
-			description: "should handle unknown subcommands gracefully",
-		},
-		{
-			name:        "matrix command with no subcommand",
-			command:     "/matrix",
-			expectError: false,
-			description: "should handle missing subcommand",
-		},
-		{
-			name:        "unknown command",
-			command:     "/unknown",
-			expectError: false,
-			description: "should handle unknown commands gracefully",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert := assert.New(t)
-			env := setupTest()
-
-			// Set up expectations for command registration
-			setupCommandRegistration(env)
-
-			// Create command handler
-			mockPlugin := &mockPlugin{
-				client:       env.client,
-				kvstore:      kvstore.NewKVStore(env.client),
-				matrixClient: nil,
-				config:       &mockConfiguration{serverURL: "http://test.com"},
-				pluginAPI:    env.api,
-			}
-			cmdHandler := NewCommandHandler(mockPlugin)
-
-			args := &model.CommandArgs{
-				Command:   tt.command,
-				ChannelId: "test-channel-id",
-			}
-
-			response, err := cmdHandler.Handle(args)
-
-			if tt.expectError {
-				assert.NotNil(err)
-			} else {
-				assert.Nil(err)
-				assert.NotNil(response)
-			}
-		})
-	}
-}
-
-func TestChannelNameFallback(t *testing.T) {
-	assert := assert.New(t)
-	env := setupTest()
-
-	// Set up expectations for command registration
-	setupCommandRegistration(env)
-
-	// Test with different channel configurations
-	testCases := []struct {
-		displayName  string
-		name         string
-		expectedName string
-	}{
-		{
-			displayName:  "My Display Name",
-			name:         "channel-name",
-			expectedName: "My Display Name",
-		},
-		{
-			displayName:  "",
-			name:         "channel-name",
-			expectedName: "channel-name",
-		},
-		{
-			displayName:  "",
-			name:         "",
-			expectedName: "test-channel-id", // Falls back to channel ID
-		},
-	}
-
-	for _, tc := range testCases {
-		channel := &model.Channel{
-			Id:          "test-channel-id",
-			DisplayName: tc.displayName,
-			Name:        tc.name,
-		}
-		env.api.On("GetChannel", "test-channel-id").Return(channel, nil).Once()
-
-		var capturedRoomName string
-		mockPlugin := &mockPlugin{
-			client:       env.client,
-			kvstore:      kvstore.NewKVStore(env.client),
-			matrixClient: nil,
-			config:       &mockConfiguration{serverURL: "http://test.com"},
-			pluginAPI:    env.api,
-		}
-		testHandler := &testCommandHandler{
-			Handler: &Handler{
-				plugin:    mockPlugin,
-				client:    env.client,
-				kvstore:   kvstore.NewKVStore(env.client),
-				pluginAPI: env.api,
-			},
-			onCreateRoom: func(roomName string, _ bool) {
-				capturedRoomName = roomName
-			},
-		}
-
-		args := &model.CommandArgs{
-			Command:   "/matrix create",
-			ChannelId: "test-channel-id",
-		}
-
-		_, err := testHandler.Handle(args)
-		assert.Nil(err)
-
-		// The captured room name should be empty (meaning use channel name)
-		// The actual room name resolution happens in executeCreateRoomCommand
-		assert.Equal("", capturedRoomName)
 	}
 }

@@ -112,10 +112,13 @@ type ThreadMappingIntegrationTestSuite struct {
 	suite.Suite
 	matrixContainer *matrixtest.Container
 	plugin          *Plugin
+	serverID        string
+	remoteID        string
 	testChannelID   string
 	testUserID      string
 	testRoomID      string
 	validator       *matrixtest.EventValidation
+	mx2m            *MatrixToMattermostBridge
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -141,47 +144,39 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Thread Test Room"))
 
 	// Create plugin instance
-	suite.plugin = &Plugin{
-		remoteID: "test-remote-id",
-	}
+	suite.plugin = &Plugin{}
 	suite.plugin.SetAPI(api)
 
 	// Initialize plugin components
 	suite.plugin.kvstore = NewMemoryKVStore()
 	suite.plugin.pendingFiles = NewPendingFileTracker()
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	suite.plugin.configuration = &configuration{}
 
-	// Create Matrix client
-	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+	// Initialize the logger (required before registering the test server)
+	suite.plugin.logger = &testLogger{t: suite.T()}
+
+	// Create Matrix client and register it as this test's single server
+	matrixClient := createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		suite.plugin.remoteID,
+		"",
 	)
-	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	suite.serverID, suite.remoteID = registerTestServer(suite.T(), suite.plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
 
-	// Set up configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-	}
-	suite.plugin.configuration = config
-
-	// Initialize the logger (required before initBridges)
-	suite.plugin.logger = &testLogger{t: suite.T()}
-
-	// Initialize bridges
-	suite.plugin.initBridges()
+	// Build bridges
+	_, suite.mx2m = suite.plugin.testBridges(suite.T(), suite.serverID)
 
 	// Set up test data in KV store
-	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
+	setupTestKVData(suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
 	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
-		suite.plugin.remoteID,
+		suite.remoteID,
 	)
 
 	// Set up mock API expectations
@@ -249,7 +244,7 @@ func (suite *ThreadMappingIntegrationTestSuite) TestThreadRootResolution() {
 	api.On("GetPost", threadReplyID).Return(threadReplyPost, nil)
 
 	// Test the thread root resolution function
-	bridge := suite.plugin.matrixToMattermostBridge
+	bridge := suite.mx2m
 	// Use mock logger for bridge operations
 	bridge.logger = &testLogger{t: t}
 
@@ -300,7 +295,7 @@ func (suite *ThreadMappingIntegrationTestSuite) TestFileAttachmentThreadMapping(
 	api.On("GetPost", threadRootID).Return(threadRoot, nil)
 	api.On("GetPost", postWithFileID).Return(postWithFile, nil)
 
-	bridge := suite.plugin.matrixToMattermostBridge
+	bridge := suite.mx2m
 	// Use mock logger for bridge operations
 	bridge.logger = &testLogger{t: t}
 

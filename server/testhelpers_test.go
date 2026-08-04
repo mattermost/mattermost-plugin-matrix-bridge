@@ -14,6 +14,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
@@ -52,6 +53,8 @@ func (l *testLogger) LogError(message string, keyValuePairs ...any) {
 // TestSetup contains common test setup data for integration tests
 type TestSetup struct {
 	Plugin      *Plugin
+	ServerID    string
+	RemoteID    string
 	ChannelID   string
 	UserID      string
 	RoomID      string
@@ -67,6 +70,11 @@ func setupPluginForTest() *Plugin {
 	api.On("LogDebug", mock.Anything, mock.Anything).Maybe()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+
+	// Migration code paths call LoadPluginConfiguration to check for legacy flat
+	// configuration; default to "none configured" (a fresh install) unless a test
+	// overrides this expectation.
+	api.On("LoadPluginConfiguration", mock.Anything).Return(nil).Maybe()
 
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
@@ -113,7 +121,10 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	testRoomID := matrixContainer.CreateRoom(t, "Test Room")
 	testGhostUserID := "@_mattermost_" + testUserID + ":" + matrixContainer.ServerDomain
 
-	plugin := &Plugin{remoteID: "test-remote-id"}
+	serverID := model.NewId()
+	remoteID := "test-remote-id"
+
+	plugin := &Plugin{}
 	plugin.SetAPI(api)
 
 	// Initialize kvstore with in-memory implementation for testing
@@ -122,38 +133,150 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	// Initialize required plugin components
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	plugin.configuration = &configuration{}
+	plugin.logger = &testLogger{t: t}
 
-	// Reuse the container's Matrix client to share rate limiting state
-	// This prevents rate limit conflicts between container setup and plugin operations
-	plugin.matrixClient = matrixContainer.Client
-
-	config := &configuration{
-		MatrixServerURL: matrixContainer.ServerURL,
-		MatrixASToken:   matrixContainer.ASToken,
-		MatrixHSToken:   matrixContainer.HSToken,
+	// Register a single server backed by the container, and reuse the container's
+	// Matrix client to share rate limiting state - this prevents rate limit conflicts
+	// between container setup and plugin operations.
+	serverConfig := kvstore.ServerConfig{
+		ServerID:    serverID,
+		ServerURL:   matrixContainer.ServerURL,
+		Endpoint:    matrixContainer.ServerURL,
+		ServerName:  matrixContainer.ServerDomain,
+		EventDomain: sanitizeForEventDomain(matrixContainer.ServerDomain),
+		ASToken:     matrixContainer.ASToken,
+		HSToken:     matrixContainer.HSToken,
+		Enabled:     true,
+		RemoteID:    remoteID,
+		SiteURL:     "https://" + matrixContainer.ServerDomain,
 	}
-	plugin.configuration = config
+	serversData, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{serverConfig})
+	if err != nil {
+		t.Fatalf("failed to marshal test server config: %v", err)
+	}
+	if err := plugin.kvstore.Set(kvstore.KeyServersConfig, serversData); err != nil {
+		t.Fatalf("failed to seed test server config: %v", err)
+	}
+
+	plugin.matrixClients = map[string]*matrix.Client{serverID: matrixContainer.Client}
+	plugin.remoteToServerID = map[string]string{remoteID: serverID}
+	plugin.ownRemoteIDs = map[string]struct{}{remoteID: {}}
 
 	// Set up basic mocks
 	setupBasicMocks(api, testUserID)
 
 	// Set up test data in KV store
-	setupTestKVData(plugin.kvstore, testChannelID, testRoomID)
-
-	// Initialize the logger with test implementation
-	plugin.logger = &testLogger{t: t}
-
-	// Initialize bridges for testing
-	plugin.initBridges()
+	setupTestKVData(plugin.kvstore, serverID, testChannelID, testRoomID)
 
 	return &TestSetup{
 		Plugin:      plugin,
+		ServerID:    serverID,
+		RemoteID:    remoteID,
 		ChannelID:   testChannelID,
 		UserID:      testUserID,
 		RoomID:      testRoomID,
 		GhostUserID: testGhostUserID,
 		API:         api,
 	}
+}
+
+// sanitizeForEventDomain mirrors eventDomainFromEndpoint's sanitization, for test setup.
+func sanitizeForEventDomain(s string) string {
+	return strings.NewReplacer(".", "_", ":", "_").Replace(s)
+}
+
+// registerTestServer seeds a single server registry entry backed by matrixClient into
+// plugin's kvstore and per-node caches, returning the minted serverID and remoteID. Most
+// unit tests that need "a" Matrix server, without caring about the specifics of
+// multi-server routing, should use this instead of hand-building a ServerConfig.
+func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName string, matrixClient *matrix.Client) (serverID, remoteID string) {
+	t.Helper()
+
+	serverID = model.NewId()
+	remoteID = "test-remote-" + serverID[:8]
+
+	serverConfig := kvstore.ServerConfig{
+		ServerID:    serverID,
+		ServerURL:   serverURL,
+		Endpoint:    serverURL,
+		ServerName:  serverName,
+		EventDomain: sanitizeForEventDomain(serverName),
+		Enabled:     true,
+		RemoteID:    remoteID,
+		SiteURL:     "https://" + serverName,
+	}
+
+	existing, err := plugin.getServers()
+	if err != nil {
+		t.Fatalf("failed to read existing test servers: %v", err)
+	}
+
+	data, err := kvstore.MarshalServersConfig(append(existing, serverConfig))
+	if err != nil {
+		t.Fatalf("failed to marshal test server config: %v", err)
+	}
+	if err := plugin.kvstore.Set(kvstore.KeyServersConfig, data); err != nil {
+		t.Fatalf("failed to seed test server config: %v", err)
+	}
+
+	if plugin.matrixClients == nil {
+		plugin.matrixClients = map[string]*matrix.Client{}
+	}
+	if plugin.remoteToServerID == nil {
+		plugin.remoteToServerID = map[string]string{}
+	}
+	if plugin.ownRemoteIDs == nil {
+		plugin.ownRemoteIDs = map[string]struct{}{}
+	}
+	// The caller typically constructs matrixClient before this remoteID is minted (it
+	// doesn't exist yet). Stamp it now so posts/users the client creates attribute to
+	// the right remote, matching what initMatrixClients does in production.
+	if matrixClient != nil {
+		matrixClient.SetRemoteID(remoteID)
+	}
+	plugin.matrixClients[serverID] = matrixClient
+	plugin.remoteToServerID[remoteID] = serverID
+	plugin.ownRemoteIDs[remoteID] = struct{}{}
+
+	return serverID, remoteID
+}
+
+// setTestServerUsernamePrefix overwrites serverID's UsernamePrefix in the registry, for
+// tests that verify per-server username prefix configurability.
+func setTestServerUsernamePrefix(t *testing.T, plugin *Plugin, serverID, prefix string) {
+	t.Helper()
+
+	servers, err := plugin.getServers()
+	require.NoError(t, err)
+
+	found := false
+	for i := range servers {
+		if servers[i].ServerID == serverID {
+			servers[i].UsernamePrefix = prefix
+			found = true
+		}
+	}
+	require.True(t, found, "server %s must be registered before setting its username prefix", serverID)
+
+	data, err := kvstore.MarshalServersConfig(servers)
+	require.NoError(t, err)
+	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+}
+
+// testBridges builds the on-demand Mattermost->Matrix and Matrix->Mattermost bridges
+// for serverID, failing the test immediately if either can't be built (e.g. serverID
+// wasn't registered via registerTestServer/setupTestPlugin first).
+func (p *Plugin) testBridges(t *testing.T, serverID string) (*MattermostToMatrixBridge, *MatrixToMattermostBridge) {
+	t.Helper()
+
+	m2mx, err := p.newMattermostToMatrixBridge(serverID)
+	require.NoError(t, err)
+
+	mx2m, err := p.newMatrixToMattermostBridge(serverID)
+	require.NoError(t, err)
+
+	return m2mx, mx2m
 }
 
 // setupBasicMocks sets up common API mocks for integration tests
@@ -186,9 +309,12 @@ func setupBasicMocks(api *plugintest.API, testUserID string) {
 }
 
 // setupTestKVData sets up initial test data in the KV store
-func setupTestKVData(kvstore kvstore.KVStore, testChannelID, testRoomID string) {
+func setupTestKVData(kv kvstore.KVStore, serverID, testChannelID, testRoomID string) {
 	// Set up channel mapping
-	_ = kvstore.Set("channel_mapping_"+testChannelID, []byte(testRoomID))
+	data, err := kvstore.BuildSingleChannelMapping(serverID, testRoomID)
+	if err == nil {
+		_ = kv.Set(kvstore.BuildChannelMappingKey(testChannelID), data)
+	}
 
 	// Ghost users and ghost rooms are intentionally not set up here
 	// to trigger creation during tests, which validates the creation logic
@@ -255,7 +381,9 @@ func (m *MemoryKVStore) GetTemplateData(userID string) (string, error) {
 	return "", errors.New("key not found")
 }
 
-// Get retrieves a value from the KV store by key.
+// Get retrieves a value from the KV store by key. Matching production semantics
+// (pluginapi.KVService.Get), a missing key returns (nil, nil), not an error - callers
+// throughout the plugin (e.g. Plugin.getServers) depend on that distinction.
 func (m *MemoryKVStore) Get(key string) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -266,7 +394,7 @@ func (m *MemoryKVStore) Get(key string) ([]byte, error) {
 		copy(result, data)
 		return result, nil
 	}
-	return nil, errors.New("key not found")
+	return nil, nil
 }
 
 // Set stores a key-value pair in the KV store.
@@ -342,6 +470,22 @@ func (m *MemoryKVStore) ListKeysWithPrefix(page, perPage int, prefix string) ([]
 	return keys[start:end], nil
 }
 
+// SetAtomicWithRetries sets key atomically. The in-memory store has no concurrent
+// writers to race against in tests, so this simply reads, computes, and writes once.
+func (m *MemoryKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error {
+	oldValue, err := m.Get(key)
+	if err != nil {
+		return err
+	}
+
+	newValue, err := valueFunc(oldValue)
+	if err != nil {
+		return err
+	}
+
+	return m.Set(key, newValue)
+}
+
 // Clear removes all data from the store (useful for test cleanup).
 func (m *MemoryKVStore) Clear() {
 	m.mu.Lock()
@@ -376,10 +520,13 @@ func TestMemoryKVStore(t *testing.T) {
 		t.Errorf("Expected 'test-value', got '%s'", string(value))
 	}
 
-	// Test Get non-existent key
-	_, err = store.Get("non-existent")
-	if err == nil {
-		t.Error("Expected error for non-existent key")
+	// Test Get non-existent key - matches production semantics: no error, nil data.
+	missing, err := store.Get("non-existent")
+	if err != nil {
+		t.Errorf("Expected no error for non-existent key, got %v", err)
+	}
+	if missing != nil {
+		t.Errorf("Expected nil data for non-existent key, got %v", missing)
 	}
 
 	// Test Delete
@@ -388,9 +535,12 @@ func TestMemoryKVStore(t *testing.T) {
 		t.Errorf("Expected no error, got %v", err)
 	}
 
-	_, err = store.Get("test-key")
-	if err == nil {
-		t.Error("Expected error for deleted key")
+	deleted, err := store.Get("test-key")
+	if err != nil {
+		t.Errorf("Expected no error for deleted key, got %v", err)
+	}
+	if deleted != nil {
+		t.Errorf("Expected nil data for deleted key, got %v", deleted)
 	}
 }
 

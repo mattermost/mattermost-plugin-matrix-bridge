@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
@@ -20,6 +22,9 @@ type PluginIntegrationTestSuite struct {
 	matrixContainer *matrixtest.Container
 	plugin          *Plugin
 	api             *plugintest.API
+	serverID        string
+	remoteID        string
+	m2mx            *MattermostToMatrixBridge
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -43,9 +48,7 @@ func (suite *PluginIntegrationTestSuite) SetupTest() {
 	suite.api = &plugintest.API{}
 
 	// Set up plugin
-	suite.plugin = &Plugin{
-		remoteID: "test-remote-id",
-	}
+	suite.plugin = &Plugin{}
 	suite.plugin.SetAPI(suite.api)
 
 	// Initialize KV store with in-memory implementation
@@ -55,22 +58,20 @@ func (suite *PluginIntegrationTestSuite) SetupTest() {
 	suite.plugin.pendingFiles = NewPendingFileTracker()
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	suite.plugin.logger = &testLogger{t: suite.T()}
+	suite.plugin.configuration = &configuration{}
 
-	// Reuse the container's Matrix client to share rate limiting state
-	// This prevents rate limit conflicts between container setup and plugin operations
-	suite.plugin.matrixClient = suite.matrixContainer.Client
+	// Register a single server backed by the container, reusing the container's Matrix
+	// client to share rate limiting state (prevents rate limit conflicts between
+	// container setup and plugin operations).
+	suite.serverID, suite.remoteID = registerTestServer(suite.T(), suite.plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, suite.matrixContainer.Client)
 
-	// Set configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-		EnableSync:      true,
-	}
-	suite.plugin.configuration = config
+	// Build the Mattermost->Matrix bridge for this server
+	suite.m2mx, _ = suite.plugin.testBridges(suite.T(), suite.serverID)
+}
 
-	// Initialize bridge components
-	suite.plugin.initBridges()
+// matrixClient returns this test's registered Matrix client.
+func (suite *PluginIntegrationTestSuite) matrixClient() *matrix.Client {
+	return suite.plugin.getMatrixClient(suite.serverID)
 }
 
 // TestPluginMatrixOperations tests plugin-level Matrix operations
@@ -88,12 +89,12 @@ func (suite *PluginIntegrationTestSuite) TestPluginMatrixOperations() {
 func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 	// Create a test room
 	roomIdentifier := suite.matrixContainer.CreateRoom(suite.T(), "Remote User Test Room")
-	roomID, err := suite.plugin.matrixClient.ResolveRoomAlias(roomIdentifier)
+	roomID, err := suite.matrixClient().ResolveRoomAlias(roomIdentifier)
 	require.NoError(suite.T(), err, "Should resolve room identifier")
 
 	// Create test channel and set up mapping
 	testChannelID := model.NewId()
-	err = suite.plugin.mattermostToMatrixBridge.setChannelRoomMapping(testChannelID, roomID)
+	err = suite.m2mx.setChannelRoomMapping(testChannelID, roomID)
 	require.NoError(suite.T(), err, "Should set up channel room mapping")
 
 	suite.Run("InviteExistingRemoteUser", func() {
@@ -109,23 +110,23 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 		}
 
 		// Set up the remote user with proper remote ID
-		remoteUser.RemoteId = &suite.plugin.remoteID
+		remoteUser.RemoteId = &suite.remoteID
 
 		// Set up API mocks
 		suite.api.On("GetUser", mattermostUserID).Return(remoteUser, nil)
 
 		// Set up KV store mapping from Mattermost user to Matrix user
-		userMapKey := "matrix_user_" + testUser.UserID
+		userMapKey := kvstore.BuildMatrixUserKey(suite.serverID, testUser.UserID)
 		err = suite.plugin.kvstore.Set(userMapKey, []byte(mattermostUserID))
 		require.NoError(suite.T(), err, "Should set up user mapping")
 
 		// Set up reverse mapping
-		reverseMapKey := "mattermost_user_" + mattermostUserID
+		reverseMapKey := kvstore.BuildMattermostUserKey(suite.serverID, mattermostUserID)
 		err = suite.plugin.kvstore.Set(reverseMapKey, []byte(testUser.UserID))
 		require.NoError(suite.T(), err, "Should set up reverse user mapping")
 
 		// Test inviting remote user to Matrix room
-		err = suite.plugin.inviteRemoteUserToMatrixRoom(remoteUser, testChannelID)
+		err = suite.plugin.inviteRemoteUserToMatrixRoom(suite.serverID, remoteUser, testChannelID)
 		require.NoError(suite.T(), err, "Should invite remote user to Matrix room")
 
 		// Verify user has been invited to the room
@@ -151,12 +152,12 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 			Username: "nonexistent",
 			Email:    "nonexistent@example.com",
 		}
-		nonExistentUser.RemoteId = &suite.plugin.remoteID
+		nonExistentUser.RemoteId = &suite.remoteID
 
 		suite.api.On("GetUser", nonExistentUserID).Return(nonExistentUser, nil)
 
 		// This should fail because there's no Matrix user mapping
-		err := suite.plugin.inviteRemoteUserToMatrixRoom(nonExistentUser, testChannelID)
+		err := suite.plugin.inviteRemoteUserToMatrixRoom(suite.serverID, nonExistentUser, testChannelID)
 		assert.Error(suite.T(), err, "Should fail to invite user with no Matrix mapping")
 	})
 
@@ -170,21 +171,21 @@ func (suite *PluginIntegrationTestSuite) testInviteRemoteUserToMatrixRoom() {
 			Username: "remote_" + testUser.Username,
 			Email:    testUser.Username + "@matrix.org",
 		}
-		remoteUser.RemoteId = &suite.plugin.remoteID
+		remoteUser.RemoteId = &suite.remoteID
 
 		suite.api.On("GetUser", mattermostUserID).Return(remoteUser, nil)
 
 		// Set up user mapping but don't create channel mapping
-		userMapKey := "matrix_user_" + testUser.UserID
+		userMapKey := kvstore.BuildMatrixUserKey(suite.serverID, testUser.UserID)
 		err = suite.plugin.kvstore.Set(userMapKey, []byte(mattermostUserID))
 		require.NoError(suite.T(), err, "Should set up user mapping")
 
-		reverseMapKey := "mattermost_user_" + mattermostUserID
+		reverseMapKey := kvstore.BuildMattermostUserKey(suite.serverID, mattermostUserID)
 		err = suite.plugin.kvstore.Set(reverseMapKey, []byte(testUser.UserID))
 		require.NoError(suite.T(), err, "Should set up reverse user mapping")
 
 		nonExistentChannelID := model.NewId()
-		err = suite.plugin.inviteRemoteUserToMatrixRoom(remoteUser, nonExistentChannelID)
+		err = suite.plugin.inviteRemoteUserToMatrixRoom(suite.serverID, remoteUser, nonExistentChannelID)
 		assert.NoError(suite.T(), err, "Should gracefully skip invite to non-bridged channel")
 	})
 }
@@ -197,7 +198,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 
 	// Create test room
 	roomIdentifier := suite.matrixContainer.CreateRoom(suite.T(), "Member Sync Test Room")
-	roomID, err := suite.plugin.matrixClient.ResolveRoomAlias(roomIdentifier)
+	roomID, err := suite.matrixClient().ResolveRoomAlias(roomIdentifier)
 	require.NoError(suite.T(), err, "Should resolve room identifier")
 
 	// Create test channel
@@ -239,7 +240,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 			Username: "remote_" + matrixUser1.Username,
 			Email:    matrixUser1.Username + "@matrix.org",
 		}
-		remoteUser1.RemoteId = &suite.plugin.remoteID
+		remoteUser1.RemoteId = &suite.remoteID
 
 		remoteUser2ID := model.NewId()
 		remoteUser2 := &model.User{
@@ -247,7 +248,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 			Username: "remote_" + matrixUser2.Username,
 			Email:    matrixUser2.Username + "@matrix.org",
 		}
-		remoteUser2.RemoteId = &suite.plugin.remoteID
+		remoteUser2.RemoteId = &suite.remoteID
 
 		// Set up API mocks for all users
 		suite.api.On("GetChannel", testChannelID).Return(testChannel, nil)
@@ -270,24 +271,24 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 		suite.api.On("GetProfileImage", localUser2ID).Return([]byte("fake-image-data-2"), nil)
 
 		// Set up user mappings for remote users
-		userMapKey1 := "matrix_user_" + matrixUser1.UserID
+		userMapKey1 := kvstore.BuildMatrixUserKey(suite.serverID, matrixUser1.UserID)
 		err = suite.plugin.kvstore.Set(userMapKey1, []byte(remoteUser1ID))
 		require.NoError(suite.T(), err, "Should set up remote user 1 mapping")
 
-		reverseMapKey1 := "mattermost_user_" + remoteUser1ID
+		reverseMapKey1 := kvstore.BuildMattermostUserKey(suite.serverID, remoteUser1ID)
 		err = suite.plugin.kvstore.Set(reverseMapKey1, []byte(matrixUser1.UserID))
 		require.NoError(suite.T(), err, "Should set up reverse mapping for remote user 1")
 
-		userMapKey2 := "matrix_user_" + matrixUser2.UserID
+		userMapKey2 := kvstore.BuildMatrixUserKey(suite.serverID, matrixUser2.UserID)
 		err = suite.plugin.kvstore.Set(userMapKey2, []byte(remoteUser2ID))
 		require.NoError(suite.T(), err, "Should set up remote user 2 mapping")
 
-		reverseMapKey2 := "mattermost_user_" + remoteUser2ID
+		reverseMapKey2 := kvstore.BuildMattermostUserKey(suite.serverID, remoteUser2ID)
 		err = suite.plugin.kvstore.Set(reverseMapKey2, []byte(matrixUser2.UserID))
 		require.NoError(suite.T(), err, "Should set up reverse mapping for remote user 2")
 
 		// Set up channel room mapping
-		err = suite.plugin.mattermostToMatrixBridge.setChannelRoomMapping(testChannelID, roomID)
+		err = suite.m2mx.setChannelRoomMapping(testChannelID, roomID)
 		require.NoError(suite.T(), err, "Should set up channel room mapping")
 
 		// Test the core sync logic by manually processing each member type
@@ -302,9 +303,9 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 
 			if user.IsRemote() {
 				// Handle remote user - invite to Matrix room
-				originalMatrixUserID, err := suite.plugin.mattermostToMatrixBridge.GetMatrixUserIDFromMattermostUser(user.Id)
+				originalMatrixUserID, err := suite.m2mx.GetMatrixUserIDFromMattermostUser(user.Id)
 				if err == nil {
-					err = suite.plugin.matrixClient.InviteUserToRoom(roomID, originalMatrixUserID)
+					err = suite.matrixClient().InviteUserToRoom(roomID, originalMatrixUserID)
 					if err == nil {
 						remoteUserCount++
 						suite.T().Logf("Successfully invited remote user %s (%s) to room", user.Username, originalMatrixUserID)
@@ -312,9 +313,9 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 				}
 			} else {
 				// Handle local user - create ghost user and join to room
-				ghostUserID, err := suite.plugin.mattermostToMatrixBridge.CreateOrGetGhostUser(user.Id)
+				ghostUserID, err := suite.m2mx.CreateOrGetGhostUser(user.Id)
 				if err == nil {
-					err = suite.plugin.matrixClient.InviteAndJoinGhostUser(roomID, ghostUserID)
+					err = suite.matrixClient().InviteAndJoinGhostUser(roomID, ghostUserID)
 					if err == nil {
 						localUserCount++
 						suite.T().Logf("Successfully joined ghost user %s for local user %s to room", ghostUserID, user.Username)
@@ -337,7 +338,7 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 
 		for _, member := range members {
 			switch {
-			case suite.plugin.mattermostToMatrixBridge.isGhostUser(member.UserID):
+			case suite.m2mx.isGhostUser(member.UserID):
 				ghostUserCount++
 			case member.UserID == suite.matrixContainer.GetApplicationServiceBotUserID():
 				asBotCount++
@@ -371,10 +372,10 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 
 		// Create room for empty channel
 		emptyRoomIdentifier := suite.matrixContainer.CreateRoom(suite.T(), "Empty Channel Test Room")
-		emptyRoomID, err := suite.plugin.matrixClient.ResolveRoomAlias(emptyRoomIdentifier)
+		emptyRoomID, err := suite.matrixClient().ResolveRoomAlias(emptyRoomIdentifier)
 		require.NoError(suite.T(), err, "Should resolve empty room identifier")
 
-		err = suite.plugin.mattermostToMatrixBridge.setChannelRoomMapping(emptyChannelID, emptyRoomID)
+		err = suite.m2mx.setChannelRoomMapping(emptyChannelID, emptyRoomID)
 		require.NoError(suite.T(), err, "Should set up empty channel room mapping")
 
 		// Simulate sync with empty channel - should complete without error

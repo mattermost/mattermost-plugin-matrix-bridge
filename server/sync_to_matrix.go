@@ -12,18 +12,21 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// FileTracker interface for dependency injection
+// FileTracker interface for dependency injection. Every method takes a leading
+// serverID: a post shared to two Matrix servers must track independent mxc:// URIs
+// for each (see §3.6).
 type FileTracker interface {
-	GetFiles(postID string) []*PendingFile
-	AddFile(postID string, file *PendingFile)
-	RemoveFile(postID, fileID string) bool
+	GetFiles(serverID, postID string) []*PendingFile
+	AddFile(serverID, postID string, file *PendingFile)
+	RemoveFile(serverID, postID, fileID string) bool
 }
 
-// PostTrackerInterface provides dependency injection for post tracking operations
+// PostTrackerInterface provides dependency injection for post tracking operations.
+// Every method takes a leading serverID, for the same reason as FileTracker.
 type PostTrackerInterface interface {
-	Get(postID string) (int64, bool)
-	Put(postID string, updateAt int64) error
-	Delete(postID string)
+	Get(serverID, postID string) (int64, bool)
+	Put(serverID, postID string, updateAt int64) error
+	Delete(serverID, postID string)
 }
 
 // MattermostToMatrixBridge handles syncing FROM Mattermost TO Matrix
@@ -45,7 +48,7 @@ func NewMattermostToMatrixBridge(utils *BridgeUtils, fileTracker FileTracker, po
 // MattermostToMatrix-specific utility methods
 
 func (b *MattermostToMatrixBridge) getGhostUser(userID string) (string, bool) {
-	ghostUserKey := kvstore.BuildGhostUserKey(userID)
+	ghostUserKey := kvstore.BuildGhostUserKey(b.serverID, userID)
 	ghostUserIDBytes, err := b.kvstore.Get(ghostUserKey)
 	if err == nil && len(ghostUserIDBytes) > 0 {
 		return string(ghostUserIDBytes), true
@@ -91,7 +94,7 @@ func (b *MattermostToMatrixBridge) CreateOrGetGhostUser(userID string) (string, 
 	}
 
 	// Cache the ghost user ID
-	ghostUserKey := kvstore.BuildGhostUserKey(userID)
+	ghostUserKey := kvstore.BuildGhostUserKey(b.serverID, userID)
 	err = b.kvstore.Set(ghostUserKey, []byte(ghostUser.UserID))
 	if err != nil {
 		b.logger.LogWarn("Failed to cache ghost user ID", "error", err, "ghost_user_id", ghostUser.UserID)
@@ -108,7 +111,7 @@ func (b *MattermostToMatrixBridge) CreateOrGetGhostUser(userID string) (string, 
 
 func (b *MattermostToMatrixBridge) ensureGhostUserInRoom(ghostUserID, roomID, userID string) error {
 	// Check if we've already confirmed this ghost user is in this room
-	roomMembershipKey := kvstore.BuildGhostRoomKey(userID, roomID)
+	roomMembershipKey := kvstore.BuildGhostRoomKey(b.serverID, userID, roomID)
 	membershipBytes, err := b.kvstore.Get(roomMembershipKey)
 	if err == nil && len(membershipBytes) > 0 && string(membershipBytes) == "joined" {
 		// Already confirmed this user is in the room
@@ -303,9 +306,7 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 	}
 
 	// Check if this post already has a Matrix event ID (indicating it's an edit)
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
+	propertyKey := b.matrixEventIDPropertyKey()
 
 	var existingEventID string
 	if post.Props != nil {
@@ -316,17 +317,17 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 
 	if existingEventID != "" {
 		// Check if this is a redundant edit from adding the Matrix event ID property
-		if storedUpdateAt, exists := b.postTracker.Get(post.Id); exists {
+		if storedUpdateAt, exists := b.postTracker.Get(b.serverID, post.Id); exists {
 			if post.UpdateAt == storedUpdateAt {
 				// This post's UpdateAt matches the timestamp we stored when adding Matrix event ID
 				// This is the redundant edit from adding the Matrix event ID property
-				b.postTracker.Delete(post.Id)
+				b.postTracker.Delete(b.serverID, post.Id)
 				b.logger.LogDebug("Skipping redundant edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 				return nil
 			}
 			// This is a genuine edit that happened after we added the Matrix event ID
 			// Remove the tracking entry since we're processing a real edit now
-			b.postTracker.Delete(post.Id)
+			b.postTracker.Delete(b.serverID, post.Id)
 			b.logger.LogDebug("Processing genuine edit after post creation", "post_id", post.Id, "matrix_event_id", existingEventID, "stored_update_at", storedUpdateAt, "current_update_at", post.UpdateAt)
 		}
 
@@ -412,7 +413,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 	}
 
 	// Check for pending file attachments for this post
-	pendingFiles := b.fileTracker.GetFiles(post.Id)
+	pendingFiles := b.fileTracker.GetFiles(b.serverID, post.Id)
 
 	// Prepare file attachments if any
 	var fileAttachments []matrix.FileAttachment
@@ -464,7 +465,7 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 			// Continue anyway, the message was sent successfully
 		} else {
 			// Store the UpdateAt timestamp in memory to detect redundant edits
-			err = b.postTracker.Put(post.Id, updatedPost.UpdateAt)
+			err = b.postTracker.Put(b.serverID, post.Id, updatedPost.UpdateAt)
 			if err != nil {
 				b.logger.LogWarn("Failed to store post tracking for redundant edit detection", "error", err, "post_id", post.Id, "update_at", updatedPost.UpdateAt)
 				// Continue anyway - this is just an optimization to avoid redundant edits
@@ -523,7 +524,7 @@ func (b *MattermostToMatrixBridge) updatePostInMatrix(post *model.Post, matrixRo
 	var currentFiles []matrix.FileAttachment
 
 	// First check pending files (for new posts that haven't been sent yet)
-	pendingFiles := b.fileTracker.GetFiles(post.Id)
+	pendingFiles := b.fileTracker.GetFiles(b.serverID, post.Id)
 	for _, file := range pendingFiles {
 		currentFiles = append(currentFiles, matrix.FileAttachment{
 			Filename: file.Filename,
@@ -606,9 +607,7 @@ func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channe
 	}
 
 	// Get Matrix event ID from post properties
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
+	propertyKey := b.matrixEventIDPropertyKey()
 
 	var matrixEventID string
 	if post.Props != nil {
@@ -689,9 +688,7 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 	}
 
 	// Get Matrix event ID from post properties
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
+	propertyKey := b.matrixEventIDPropertyKey()
 
 	var matrixEventID string
 	if post.Props != nil {
@@ -768,9 +765,7 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 	}
 
 	// Get Matrix event ID from post properties
-	config := b.getConfiguration()
-	serverDomain := extractServerDomain(b.logger, config.MatrixServerURL)
-	propertyKey := "matrix_event_id_" + serverDomain
+	propertyKey := b.matrixEventIDPropertyKey()
 
 	var matrixEventID string
 	if post.Props != nil {
@@ -1281,7 +1276,7 @@ func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs [
 // If KV lookup fails, attempts to reconstruct the Matrix user ID from the username
 func (b *MattermostToMatrixBridge) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
 	// Use Mattermost user ID as key: mattermost_user_<mattermostUserID> -> matrixUserID
-	mattermostUserKey := kvstore.BuildMattermostUserKey(mattermostUserID)
+	mattermostUserKey := kvstore.BuildMattermostUserKey(b.serverID, mattermostUserID)
 	matrixUserIDBytes, err := b.kvstore.Get(mattermostUserKey)
 	if err == nil && len(matrixUserIDBytes) > 0 {
 		return string(matrixUserIDBytes), nil

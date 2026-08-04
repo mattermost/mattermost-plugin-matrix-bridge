@@ -10,4 +10,9 @@ type KVStore interface {
 	Delete(key string) error
 	ListKeys(page, perPage int) ([]string, error)
 	ListKeysWithPrefix(page, perPage int, prefix string) ([]string, error)
+	// SetAtomicWithRetries sets key atomically using compare-and-set semantics: it reads
+	// the current value, calls valueFunc to compute the new value, and retries the whole
+	// cycle if a concurrent writer won the race. valueFunc must be a pure function of
+	// oldValue - it may be invoked more than once per call.
+	SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error
 }

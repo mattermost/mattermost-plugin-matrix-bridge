@@ -19,11 +19,15 @@ type MatrixSyncTestSuite struct {
 	suite.Suite
 	matrixContainer *matrixtest.Container
 	plugin          *Plugin
+	serverID        string
+	remoteID        string
 	testChannelID   string
 	testUserID      string
 	testRoomID      string
 	testGhostUserID string
 	validator       *matrixtest.EventValidation
+	m2mx            *MattermostToMatrixBridge
+	mx2m            *MatrixToMattermostBridge
 }
 
 // SetupSuite starts the Matrix container before running tests
@@ -53,9 +57,7 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	suite.testGhostUserID = "@_mattermost_" + suite.testUserID + ":" + suite.matrixContainer.ServerDomain
 
 	// Create plugin instance
-	suite.plugin = &Plugin{
-		remoteID: "test-remote-id",
-	}
+	suite.plugin = &Plugin{}
 	suite.plugin.SetAPI(api)
 
 	// Initialize kvstore with in-memory implementation for testing
@@ -64,39 +66,34 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	// Initialize required plugin components
 	suite.plugin.pendingFiles = NewPendingFileTracker()
 	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	suite.plugin.configuration = &configuration{}
 
-	// Create Matrix client pointing to test container
-	suite.plugin.matrixClient = createMatrixClientWithTestLogger(
+	// Initialize the logger (required before registering the test server)
+	suite.plugin.logger = &testLogger{t: suite.T()}
+
+	// Create Matrix client pointing to test container and register it as this test's
+	// single server
+	matrixClient := createMatrixClientWithTestLogger(
 		suite.T(),
 		suite.matrixContainer.ServerURL,
 		suite.matrixContainer.ASToken,
-		suite.plugin.remoteID,
+		"",
 	)
 	// Set explicit server domain for testing
-	suite.plugin.matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
+	suite.serverID, suite.remoteID = registerTestServer(suite.T(), suite.plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
 
-	// Set up configuration
-	config := &configuration{
-		MatrixServerURL: suite.matrixContainer.ServerURL,
-		MatrixASToken:   suite.matrixContainer.ASToken,
-		MatrixHSToken:   suite.matrixContainer.HSToken,
-	}
-	suite.plugin.configuration = config
-
-	// Initialize the logger (required before initBridges)
-	suite.plugin.logger = &testLogger{t: suite.T()}
-
-	// Initialize bridges for testing
-	suite.plugin.initBridges()
+	// Build bridges for testing
+	suite.m2mx, suite.mx2m = suite.plugin.testBridges(suite.T(), suite.serverID)
 
 	// Set up test data in KV store
-	setupTestKVData(suite.plugin.kvstore, suite.testChannelID, suite.testRoomID)
+	setupTestKVData(suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
 	suite.validator = matrixtest.NewEventValidation(
 		suite.T(),
 		suite.matrixContainer.ServerDomain,
-		suite.plugin.remoteID,
+		suite.remoteID,
 	)
 
 	// Set up mock API expectations
@@ -120,7 +117,7 @@ func (suite *MatrixSyncTestSuite) TestBasicMessageSync() {
 	}
 
 	// Sync post to Matrix
-	err := suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, suite.testChannelID)
+	err := suite.m2mx.SyncPostToMatrix(post, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Wait for Matrix to process the message with polling
@@ -147,7 +144,7 @@ func (suite *MatrixSyncTestSuite) TestMarkdownMessageSync() {
 	}
 
 	// Sync post to Matrix
-	err := suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, suite.testChannelID)
+	err := suite.m2mx.SyncPostToMatrix(post, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Wait for processing with polling
@@ -192,7 +189,7 @@ func (suite *MatrixSyncTestSuite) TestMessageWithMentions() {
 	}
 
 	// Sync post to Matrix
-	err := suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, suite.testChannelID)
+	err := suite.m2mx.SyncPostToMatrix(post, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Wait for processing with polling
@@ -227,7 +224,7 @@ func (suite *MatrixSyncTestSuite) TestThreadedMessage() {
 	}
 
 	// Sync parent post
-	err := suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(parentPost, suite.testChannelID)
+	err := suite.m2mx.SyncPostToMatrix(parentPost, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Get parent event ID from Matrix with polling
@@ -259,11 +256,11 @@ func (suite *MatrixSyncTestSuite) TestThreadedMessage() {
 
 	// Mock the parent post having Matrix event ID property
 	parentPost.Props = map[string]any{
-		"matrix_event_id_localhost": parentEventID,
+		suite.m2mx.matrixEventIDPropertyKey(): parentEventID,
 	}
 
 	// Sync reply post
-	err = suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(replyPost, suite.testChannelID)
+	err = suite.m2mx.SyncPostToMatrix(replyPost, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Verify threaded message in Matrix with polling
@@ -291,7 +288,7 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 		UpdateAt:  now, // Important: set UpdateAt for proper edit detection
 	}
 
-	err := suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(originalPost, suite.testChannelID)
+	err := suite.m2mx.SyncPostToMatrix(originalPost, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Get original event from Matrix with polling
@@ -307,7 +304,7 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 	// We need to simulate this by updating our original post to match what would happen
 	// Note: extractServerDomain() extracts "localhost" from the server URL, not the server domain
 	originalPost.Props = map[string]any{
-		"matrix_event_id_localhost": originalEventID,
+		suite.m2mx.matrixEventIDPropertyKey(): originalEventID,
 	}
 
 	// Wait a bit to ensure different timestamp
@@ -327,7 +324,7 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 	// Post tracking will be handled by the in-memory KV store
 
 	// Sync edited post
-	err = suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(editedPost, suite.testChannelID)
+	err = suite.m2mx.SyncPostToMatrix(editedPost, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Verify edit event in Matrix with polling
@@ -365,7 +362,7 @@ func (suite *MatrixSyncTestSuite) TestReactionSync() {
 		UpdateAt:  now,
 	}
 
-	err := suite.plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, suite.testChannelID)
+	err := suite.m2mx.SyncPostToMatrix(post, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Get Matrix event ID with polling
@@ -379,7 +376,7 @@ func (suite *MatrixSyncTestSuite) TestReactionSync() {
 
 	// Set Matrix event ID in post properties
 	post.Props = map[string]any{
-		"matrix_event_id_localhost": eventID,
+		suite.m2mx.matrixEventIDPropertyKey(): eventID,
 	}
 
 	// Mock API for reaction
@@ -395,7 +392,7 @@ func (suite *MatrixSyncTestSuite) TestReactionSync() {
 	}
 
 	// Sync reaction to Matrix
-	err = suite.plugin.mattermostToMatrixBridge.SyncReactionToMatrix(reaction, suite.testChannelID)
+	err = suite.m2mx.SyncReactionToMatrix(reaction, suite.testChannelID)
 	require.NoError(suite.T(), err)
 
 	// Verify reaction in Matrix with polling

@@ -65,8 +65,10 @@ func TestHandleMatrixMemberDM_EarlyExits(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			plugin := &Plugin{}
 			plugin.logger = &testLogger{t: t}
+			plugin.kvstore = NewMemoryKVStore()
+			serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", nil)
 
-			channelID, err := plugin.handleMatrixMemberDM(tt.event)
+			channelID, err := plugin.handleMatrixMemberDM(serverID, tt.event)
 
 			require.NoError(t, err)
 			assert.Equal(t, "", channelID)
@@ -81,17 +83,17 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 	ghostUserID := "@_mattermost_userid123:" + serverDomain
 	regularUserID := "@alice:" + serverDomain
 
-	newPlugin := func(t *testing.T) *Plugin {
+	newPlugin := func(t *testing.T) (*Plugin, string) {
 		t.Helper()
 		plugin := &Plugin{}
 		plugin.logger = &testLogger{t: t}
-		plugin.configuration = &configuration{MatrixServerURL: matrixServerURL}
 		plugin.kvstore = NewMemoryKVStore()
-		return plugin
+		serverID, _ := registerTestServer(t, plugin, matrixServerURL, serverDomain, nil)
+		return plugin, serverID
 	}
 
 	t.Run("neither user is ghost returns empty channel ID", func(t *testing.T) {
-		plugin := newPlugin(t)
+		plugin, serverID := newPlugin(t)
 
 		sk := regularUserID
 		event := MatrixEvent{
@@ -101,14 +103,14 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 			Content:  map[string]any{"membership": "join"},
 		}
 
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(serverID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)
 	})
 
 	t.Run("ghost user as target reaches createDMChannelForGhostUser", func(t *testing.T) {
-		plugin := newPlugin(t)
+		plugin, serverID := newPlugin(t)
 
 		sk := ghostUserID // ghost is target (state_key)
 		event := MatrixEvent{
@@ -119,14 +121,14 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		}
 
 		// Ghost not registered in kvstore → createDMChannelForGhostUser returns "", nil silently
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(serverID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)
 	})
 
 	t.Run("ghost user as actor reaches createDMChannelForGhostUser", func(t *testing.T) {
-		plugin := newPlugin(t)
+		plugin, serverID := newPlugin(t)
 
 		sk := regularUserID
 		event := MatrixEvent{
@@ -137,14 +139,14 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		}
 
 		// Ghost not registered in kvstore → createDMChannelForGhostUser returns "", nil silently
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(serverID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)
 	})
 
 	t.Run("invite membership is also handled", func(t *testing.T) {
-		plugin := newPlugin(t)
+		plugin, serverID := newPlugin(t)
 
 		sk := regularUserID
 		event := MatrixEvent{
@@ -155,7 +157,7 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		}
 
 		// Neither user is ghost → default case → returns "", nil
-		channelID, err := plugin.handleMatrixMemberDM(event)
+		channelID, err := plugin.handleMatrixMemberDM(serverID, event)
 
 		require.NoError(t, err)
 		assert.Equal(t, "", channelID)

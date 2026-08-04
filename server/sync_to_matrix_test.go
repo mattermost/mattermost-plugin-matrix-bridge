@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
-	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 func TestCompareTextContent(t *testing.T) {
@@ -18,10 +17,11 @@ func TestCompareTextContent(t *testing.T) {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.client = pluginapi.NewClient(plugin.API, nil)
-	plugin.kvstore = kvstore.NewKVStore(plugin.client)
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-	// Initialize bridges for testing
-	plugin.initBridges()
+	plugin.kvstore = NewMemoryKVStore()
+	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
+	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
+	// Build bridges for testing
+	m2mx, _ := plugin.testBridges(t, serverID)
 
 	tests := []struct {
 		name           string
@@ -155,7 +155,7 @@ func TestCompareTextContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.mattermostToMatrixBridge.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, []matrix.FileAttachment{})
+			result := m2mx.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, []matrix.FileAttachment{})
 			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}
@@ -168,8 +168,11 @@ func TestCompareTextContentFileOnly(t *testing.T) {
 	plugin.maxFileSize = DefaultMaxFileSize
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
-	// Initialize bridges for testing
-	plugin.initBridges()
+	plugin.kvstore = NewMemoryKVStore()
+	matrixClient := createMatrixClientWithTestLogger(t, "https://matrix.example.com", "as-token", "")
+	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
+	// Build bridges for testing
+	m2mx, _ := plugin.testBridges(t, serverID)
 
 	tests := []struct {
 		name           string
@@ -274,7 +277,7 @@ func TestCompareTextContentFileOnly(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := plugin.mattermostToMatrixBridge.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, tt.newFiles)
+			result := m2mx.compareTextContent(tt.currentEvent, tt.newPlainText, tt.newHTMLContent, tt.newFiles)
 			assert.Equal(t, tt.expected, result, tt.description)
 		})
 	}

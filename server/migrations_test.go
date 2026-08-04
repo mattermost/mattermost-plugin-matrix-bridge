@@ -35,11 +35,11 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// No version key exists (version 0)
-		_, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.Error(t, err) // Should not exist
+		versionData, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
+		assert.NoError(t, err)
+		assert.Empty(t, versionData) // Should not exist
 
 		// Add some test data that would need migration
 		err = plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123"))
@@ -192,7 +192,7 @@ func TestMigrateUserMappings(t *testing.T) {
 			mattermostUserID := "user" + strconv.Itoa(i)
 			expectedMatrixUserID := "@user" + strconv.Itoa(i) + ":matrix.org"
 
-			reverseKey := kvstore.BuildMattermostUserKey(mattermostUserID)
+			reverseKey := "mattermost_user_" + mattermostUserID // legacy (pre-v3) un-namespaced key
 			valueBytes, err := plugin.kvstore.Get(reverseKey)
 			assert.NoError(t, err)
 			assert.Equal(t, expectedMatrixUserID, string(valueBytes))
@@ -205,7 +205,6 @@ func TestMigrateChannelMappings(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// Add test channel mappings with room IDs
 		testChannels := map[string]string{
@@ -239,8 +238,8 @@ func TestMigrateChannelMappings(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		// Use nil Matrix client to simulate alias resolution failure
-		plugin.matrixClient = nil
+		// No legacy configuration mocked, so legacyMatrixClientForMigration returns nil,
+		// simulating alias resolution being unavailable.
 
 		// Add test channel mapping with alias
 		err := plugin.kvstore.Set("channel_mapping_channel123", []byte("#test:matrix.org"))
@@ -255,17 +254,16 @@ func TestMigrateChannelMappings(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "channel123", string(aliasReverseBytes))
 
-		// Room ID mapping should not exist due to nil client
-		_, err = plugin.kvstore.Get("room_mapping_!any:matrix.org")
-		assert.Error(t, err)
+		// Room ID mapping should not exist due to no legacy client being available
+		roomIDMapping, err := plugin.kvstore.Get("room_mapping_!any:matrix.org")
+		assert.NoError(t, err)
+		assert.Empty(t, roomIDMapping)
 	})
 
 	t.Run("MigrateChannelsWithAliasesAndWorkingClient", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		// Use real Matrix client (though it won't actually resolve without server)
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "https://test.matrix.org", "test_token", "test_remote")
 
 		// Add test channel mapping with alias
 		err := plugin.kvstore.Set("channel_mapping_channel123", []byte("#test:matrix.org"))
@@ -311,7 +309,6 @@ func TestMigrateChannelMappings(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// Add more than one batch worth of channel mappings to test pagination
 		for i := range MigrationBatchSize + 50 {
@@ -330,7 +327,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 			channelID := "channel" + strconv.Itoa(i)
 			roomID := "!room" + strconv.Itoa(i) + ":matrix.org"
 
-			reverseKey := kvstore.BuildRoomMappingKey(roomID)
+			reverseKey := "room_mapping_" + roomID // legacy (pre-v3) un-namespaced key
 			valueBytes, err := plugin.kvstore.Get(reverseKey)
 			assert.NoError(t, err)
 			assert.Equal(t, channelID, string(valueBytes))
@@ -343,7 +340,6 @@ func TestMigrationIntegration(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// Setup a complete scenario with users, channels, and other keys
 		testData := map[string]string{
@@ -376,8 +372,9 @@ func TestMigrationIntegration(t *testing.T) {
 		}
 
 		// Verify no version key exists initially
-		_, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.Error(t, err)
+		versionData, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
+		assert.NoError(t, err)
+		assert.Empty(t, versionData)
 
 		// Run full migration
 		err = plugin.runKVStoreMigrations()
@@ -421,8 +418,9 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.Equal(t, "!dmroom456:matrix.org", string(dmUnifiedBytes))
 
 		// Verify old DM mapping was deleted
-		_, err = plugin.kvstore.Get("dm_mapping_dm123")
-		assert.Error(t, err) // Should be deleted
+		oldDMMapping, err := plugin.kvstore.Get("dm_mapping_dm123")
+		assert.NoError(t, err)
+		assert.Empty(t, oldDMMapping) // Should be deleted
 
 		// Verify reverse DM mapping was created
 		dmReverseBytes, err := plugin.kvstore.Get("room_mapping_!dmroom456:matrix.org")
@@ -438,7 +436,6 @@ func TestMigrationIntegration(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// Add test data
 		err := plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123"))
@@ -484,7 +481,6 @@ func TestMigrationIntegration(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 
 		// Run migration on empty KV store
 		err := plugin.runKVStoreMigrations()

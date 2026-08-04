@@ -22,6 +22,14 @@ const (
 	DefaultMaxProfileImageSize = 6 * 1024 * 1024
 	// DefaultMaxFileSize is the default maximum size for file attachments (50MB)
 	DefaultMaxFileSize = 50 * 1024 * 1024
+
+	// pluginID is this plugin's ID, used when registering shared-channels remotes.
+	pluginID = "com.mattermost.plugin-matrix-bridge"
+
+	// clusterEventServersChanged is broadcast to every cluster node whenever the server
+	// registry is mutated at runtime, so each node's per-node client/remote caches stay
+	// in sync with the cluster-shared registry.
+	clusterEventServersChanged = "servers_config_changed"
 )
 
 // Plugin implements the interface expected by the Mattermost server to communicate between the server and plugin processes.
@@ -37,17 +45,25 @@ type Plugin struct {
 	// commandClient is the client used to register and execute slash commands.
 	commandClient command.Command
 
-	// matrixClient is the client used to communicate with Matrix servers.
-	matrixClient *matrix.Client
+	// matrixClients, remoteToServerID and ownRemoteIDs are per-node caches rebuilt from
+	// the cluster-shared server registry by initMatrixClients. The registry itself (KV
+	// store) is the source of truth; any runtime mutation must call
+	// refreshServersAndBroadcast so every node's copy of these maps stays current.
+	matrixClients    map[string]*matrix.Client // serverID -> client
+	remoteToServerID map[string]string         // shared-channels remoteID -> serverID
+	ownRemoteIDs     map[string]struct{}       // loop prevention across all our remotes
+
+	// matrixClientsLock guards swapping the three maps above.
+	matrixClientsLock sync.RWMutex
+	// initMatrixClientsMu serializes the read-compute-swap cycle in initMatrixClients so
+	// concurrent rebuilds cannot race and leave a stale snapshot installed last.
+	initMatrixClientsMu sync.Mutex
 
 	// postTracker tracks post creation timestamps to detect redundant edits
 	postTracker *PostTracker
 
 	// pendingFiles tracks uploaded files awaiting their posts
 	pendingFiles *PendingFileTracker
-
-	// remoteID is the identifier returned by RegisterPluginForSharedChannels
-	remoteID string
 
 	backgroundJob *cluster.Job
 
@@ -69,10 +85,6 @@ type Plugin struct {
 
 	// maxFileSize is the maximum size for file attachments in bytes
 	maxFileSize int64
-
-	// Bridge components for dependency injection architecture
-	mattermostToMatrixBridge *MattermostToMatrixBridge
-	matrixToMattermostBridge *MatrixToMattermostBridge
 }
 
 // OnActivate is invoked when the plugin is activated. If an error is returned, the plugin will be deactivated.
@@ -97,20 +109,21 @@ func (p *Plugin) OnActivate() error {
 	p.maxProfileImageSize = DefaultMaxProfileImageSize
 	p.maxFileSize = DefaultMaxFileSize
 
-	p.initMatrixClient()
-
-	// Run KV store migrations before initializing bridges
+	// Run KV store migrations first, so the server registry exists before anything else
+	// touches it.
 	if err := p.runKVStoreMigrations(); err != nil {
 		return errors.Wrap(err, "failed to run KV store migrations")
 	}
 
-	// Register for shared channels first to get remote ID
+	// Register every server's shared-channels remote, then build clients - clients must
+	// be built after registration so each carries its own RemoteID.
 	if err := p.registerForSharedChannels(); err != nil {
-		p.logger.LogWarn("Failed to register for shared channels", "error", err)
+		p.logger.LogWarn("Failed to register one or more servers for shared channels", "error", err)
 	}
 
-	// Initialize bridge components after getting remote ID
-	p.initBridges()
+	if err := p.initMatrixClients(); err != nil {
+		return errors.Wrap(err, "failed to initialize Matrix clients")
+	}
 
 	p.commandClient = command.NewCommandHandler(p)
 
@@ -148,40 +161,139 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	return response, nil
 }
 
-func (p *Plugin) initMatrixClient() {
+// initMatrixClients rebuilds the per-node matrixClients/remoteToServerID/ownRemoteIDs
+// caches from the cluster-shared server registry. It builds a client for every
+// registered server, including disabled ones, so /matrix status can still probe and
+// report their health - only routing (not client construction) consults Enabled.
+//
+// No-ops when p.kvstore is nil: OnConfigurationChange can fire before OnActivate has
+// initialized the store. Returns an error on registry read failure rather than leaving
+// the existing maps in place, since a stale-but-silent cache is worse than a visible
+// activation failure.
+func (p *Plugin) initMatrixClients() error {
+	if p.kvstore == nil {
+		return nil
+	}
+
+	p.initMatrixClientsMu.Lock()
+	defer p.initMatrixClientsMu.Unlock()
+
+	servers, err := p.getServers()
+	if err != nil {
+		return errors.Wrap(err, "failed to read servers config")
+	}
+
 	config := p.getConfiguration()
 	rateLimitMode := matrix.ParseRateLimitingMode(config.RateLimitingMode)
 	rateLimitConfig := matrix.GetRateLimitConfigByMode(rateLimitMode)
-	p.matrixClient = matrix.NewClientWithRateLimit(
-		config.MatrixServerURL,
-		config.MatrixASToken,
-		p.remoteID,
-		config.MatrixServerName,
-		p.API,
-		rateLimitConfig,
-	)
+
+	clients := make(map[string]*matrix.Client, len(servers))
+	remoteToServerID := make(map[string]string, len(servers))
+	ownRemoteIDs := make(map[string]struct{}, len(servers))
+
+	for _, s := range servers {
+		clients[s.ServerID] = matrix.NewClientWithRateLimit(s.ServerURL, s.ASToken, s.RemoteID, s.ServerName, p.API, rateLimitConfig)
+		if s.RemoteID != "" {
+			remoteToServerID[s.RemoteID] = s.ServerID
+			ownRemoteIDs[s.RemoteID] = struct{}{}
+		}
+	}
+
+	p.matrixClientsLock.Lock()
+	p.matrixClients = clients
+	p.remoteToServerID = remoteToServerID
+	p.ownRemoteIDs = ownRemoteIDs
+	p.matrixClientsLock.Unlock()
+
+	return nil
 }
 
-func (p *Plugin) initBridges() {
-	// Create shared utilities
-	sharedUtils := NewBridgeUtils(BridgeUtilsConfig{
-		Logger:              p.logger,
-		API:                 p.API,
-		KVStore:             p.kvstore,
-		MatrixClient:        p.matrixClient,
-		RemoteID:            p.remoteID,
-		MaxProfileImageSize: p.maxProfileImageSize,
-		MaxFileSize:         p.maxFileSize,
-		ConfigGetter:        p,
-	})
+// refreshServersAndBroadcast rebuilds this node's Matrix client caches and broadcasts a
+// cluster event so every other node does the same. Every runtime registry mutation
+// (AddServer, RemoveServer, server enable/disable, server map/unmap) must call this
+// rather than a bare initMatrixClients, since the registry is cluster-shared KV but the
+// client caches are per-node. A failed broadcast is non-fatal (single-node installs
+// have no cluster) - this node's own caches are already correct at that point.
+func (p *Plugin) refreshServersAndBroadcast(reason string) error {
+	if err := p.initMatrixClients(); err != nil {
+		return err
+	}
 
-	// Create bridge instances
-	p.mattermostToMatrixBridge = NewMattermostToMatrixBridge(sharedUtils, p.pendingFiles, p.postTracker)
-	p.matrixToMattermostBridge = NewMatrixToMattermostBridge(sharedUtils)
+	if appErr := p.API.PublishPluginClusterEvent(
+		model.PluginClusterEvent{Id: clusterEventServersChanged, Data: []byte(reason)},
+		model.PluginClusterEventSendOptions{SendType: model.PluginClusterEventSendTypeReliable},
+	); appErr != nil {
+		p.logger.LogWarn("Failed to broadcast servers config change to cluster", "reason", reason, "error", appErr)
+	}
+
+	return nil
 }
 
-func (p *Plugin) registerForSharedChannels() error {
-	// Get the bot user ID or use a system admin
+// OnPluginClusterEvent is invoked when another cluster node broadcasts a registry
+// mutation. It rebuilds this node's Matrix client caches from the now-current registry.
+func (p *Plugin) OnPluginClusterEvent(_ *plugin.Context, ev model.PluginClusterEvent) {
+	if ev.Id != clusterEventServersChanged {
+		return
+	}
+	if err := p.initMatrixClients(); err != nil {
+		p.logger.LogError("Failed to refresh Matrix clients after cluster event", "error", err)
+	}
+}
+
+// getMatrixClient returns the client for serverID, or nil if this node has none - either
+// because the server isn't registered, or because this node's cache lags a very recent
+// registry mutation on another node (the cluster event will catch it up).
+func (p *Plugin) getMatrixClient(serverID string) *matrix.Client {
+	p.matrixClientsLock.RLock()
+	defer p.matrixClientsLock.RUnlock()
+	if p.matrixClients == nil {
+		return nil
+	}
+	return p.matrixClients[serverID]
+}
+
+// serverIDForRemoteID reverse-resolves one of our own shared-channels remote IDs to the
+// server it belongs to. This is the basis of rc-based outbound routing (§3.6).
+func (p *Plugin) serverIDForRemoteID(remoteID string) (string, bool) {
+	p.matrixClientsLock.RLock()
+	defer p.matrixClientsLock.RUnlock()
+	if p.remoteToServerID == nil {
+		return "", false
+	}
+	serverID, ok := p.remoteToServerID[remoteID]
+	return serverID, ok
+}
+
+// isOwnRemoteID reports whether remoteID belongs to one of our own shared-channels
+// remotes (any server), for loop prevention. Must reject every one of our remotes, not
+// just a single legacy one.
+func (p *Plugin) isOwnRemoteID(remoteID string) bool {
+	if remoteID == "" {
+		return false
+	}
+	p.matrixClientsLock.RLock()
+	defer p.matrixClientsLock.RUnlock()
+	if p.ownRemoteIDs == nil {
+		return false
+	}
+	_, ok := p.ownRemoteIDs[remoteID]
+	return ok
+}
+
+// remoteIDForServer returns the shared-channels remote ID for serverID, or "" if it is
+// not registered or has no remote yet.
+func (p *Plugin) remoteIDForServer(serverID string) string {
+	server, err := p.serverByID(serverID)
+	if err != nil {
+		return ""
+	}
+	return server.RemoteID
+}
+
+// doRegisterPluginForSharedChannels performs the actual RegisterPluginForSharedChannels
+// API call for one siteURL. Extracted so both registerForSharedChannels (all entries)
+// and registerServerForSharedChannels (one entry, from AddServer) share it.
+func (p *Plugin) doRegisterPluginForSharedChannels(siteURL string) (string, error) {
 	botUser, err := p.API.GetUserByUsername("mattermost-bridge")
 	var creatorID string
 	if err != nil {
@@ -191,7 +303,7 @@ func (p *Plugin) registerForSharedChannels() error {
 			PerPage: 1,
 		})
 		if err2 != nil || len(users) == 0 {
-			return errors.New("failed to find a valid creator user")
+			return "", errors.New("failed to find a valid creator user")
 		}
 		creatorID = users[0].Id
 	} else {
@@ -200,49 +312,135 @@ func (p *Plugin) registerForSharedChannels() error {
 
 	opts := model.RegisterPluginOpts{
 		Displayname:  "Matrix_Bridge",
-		PluginID:     "com.mattermost.plugin-matrix-bridge",
+		PluginID:     pluginID,
 		CreatorID:    creatorID,
 		AutoShareDMs: false,
 		AutoInvited:  false,
+		SiteURL:      siteURL,
 	}
 
 	remoteID, appErr := p.API.RegisterPluginForSharedChannels(opts)
 	if appErr != nil {
-		return errors.Wrap(appErr, "failed to register plugin for shared channels")
+		return "", errors.Wrap(appErr, "failed to register plugin for shared channels")
 	}
 
-	// Store the remote ID for use in sync operations
-	p.remoteID = remoteID
+	return remoteID, nil
+}
 
-	p.logger.LogInfo("Successfully registered plugin for shared channels", "remote_id", remoteID)
-	return nil
+// registerForSharedChannels registers one shared-channels remote per registered server,
+// keyed by each server's own SiteURL, and persists the returned remote IDs in a single
+// registry write. The API calls happen outside the mutateServers CAS callback - a CAS
+// retry would otherwise re-issue real network calls - and the merge is against whatever
+// the registry looks like at write time, so a concurrent AddServer/RemoveServer is never
+// clobbered. A failure registering one server is logged and does not block the others.
+func (p *Plugin) registerForSharedChannels() error {
+	servers, err := p.getServers()
+	if err != nil {
+		return errors.Wrap(err, "failed to read servers config for shared-channels registration")
+	}
+
+	remoteIDs := make(map[string]string, len(servers))
+	for _, s := range servers {
+		remoteID, err := p.doRegisterPluginForSharedChannels(s.SiteURL)
+		if err != nil {
+			p.logger.LogWarn("Failed to register server for shared channels", "server_id", s.ServerID, "error", err)
+			continue
+		}
+		remoteIDs[s.ServerID] = remoteID
+	}
+
+	if len(remoteIDs) == 0 {
+		return nil
+	}
+
+	return p.mutateServers(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		updated := make([]kvstore.ServerConfig, len(current))
+		copy(updated, current)
+		for i := range updated {
+			if remoteID, ok := remoteIDs[updated[i].ServerID]; ok {
+				updated[i].RemoteID = remoteID
+			}
+		}
+		return updated, nil
+	})
+}
+
+// registerServerForSharedChannels registers a shared-channels remote for a single,
+// already-persisted server entry. Used by AddServer so a newly added server gets a
+// working remote immediately, without waiting for the next activation.
+func (p *Plugin) registerServerForSharedChannels(serverID string) error {
+	server, err := p.serverByID(serverID)
+	if err != nil {
+		return err
+	}
+
+	remoteID, err := p.doRegisterPluginForSharedChannels(server.SiteURL)
+	if err != nil {
+		return err
+	}
+
+	return p.mutateServers(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		updated := make([]kvstore.ServerConfig, len(current))
+		copy(updated, current)
+		for i := range updated {
+			if updated[i].ServerID == serverID {
+				updated[i].RemoteID = remoteID
+				return updated, nil
+			}
+		}
+		// Server was concurrently removed; nothing to persist.
+		return current, nil
+	})
+}
+
+// bridgeUtilsForServer builds the shared BridgeUtils for one server, on demand. Returns
+// an error (never a BridgeUtils with a nil MatrixClient) when this node has no client
+// for serverID.
+func (p *Plugin) bridgeUtilsForServer(serverID string) (*BridgeUtils, error) {
+	client := p.getMatrixClient(serverID)
+	if client == nil {
+		return nil, errors.Errorf("no Matrix client configured for server %s", serverID)
+	}
+
+	return NewBridgeUtils(BridgeUtilsConfig{
+		Logger:              p.logger,
+		API:                 p.API,
+		KVStore:             p.kvstore,
+		MatrixClient:        client,
+		RemoteID:            p.remoteIDForServer(serverID),
+		ServerID:            serverID,
+		MaxProfileImageSize: p.maxProfileImageSize,
+		MaxFileSize:         p.maxFileSize,
+		ChannelMapper:       p,
+	}), nil
+}
+
+// newMatrixToMattermostBridge builds a Matrix->Mattermost bridge for serverID, on
+// demand. Bridges are not held as Plugin fields since there is one per server.
+func (p *Plugin) newMatrixToMattermostBridge(serverID string) (*MatrixToMattermostBridge, error) {
+	utils, err := p.bridgeUtilsForServer(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return NewMatrixToMattermostBridge(utils), nil
+}
+
+// newMattermostToMatrixBridge builds a Mattermost->Matrix bridge for serverID, on
+// demand. The post/file trackers are shared singletons keyed internally by
+// (serverID, id), so every server's bridge shares the same tracker instances.
+func (p *Plugin) newMattermostToMatrixBridge(serverID string) (*MattermostToMatrixBridge, error) {
+	utils, err := p.bridgeUtilsForServer(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return NewMattermostToMatrixBridge(utils, p.pendingFiles, p.postTracker), nil
 }
 
 // PluginAccessor interface implementation for command handlers
 
-// GetMatrixClient returns the Matrix client instance
-func (p *Plugin) GetMatrixClient() *matrix.Client {
-	return p.matrixClient
-}
-
 // GetKVStore returns the KV store instance
 func (p *Plugin) GetKVStore() kvstore.KVStore {
 	return p.kvstore
-}
-
-// GetConfiguration returns the plugin configuration
-func (p *Plugin) GetConfiguration() command.Configuration {
-	return p.getConfiguration()
-}
-
-// CreateOrGetGhostUser gets an existing ghost user or creates a new one for a Mattermost user
-func (p *Plugin) CreateOrGetGhostUser(mattermostUserID string) (string, error) {
-	return p.mattermostToMatrixBridge.CreateOrGetGhostUser(mattermostUserID)
-}
-
-// GetMatrixUserIDFromMattermostUser looks up the original Matrix user ID for a remote Mattermost user
-func (p *Plugin) GetMatrixUserIDFromMattermostUser(mattermostUserID string) (string, error) {
-	return p.mattermostToMatrixBridge.GetMatrixUserIDFromMattermostUser(mattermostUserID)
 }
 
 // GetPluginAPI returns the Mattermost plugin API
@@ -255,9 +453,67 @@ func (p *Plugin) GetPluginAPIClient() *pluginapi.Client {
 	return p.client
 }
 
-// GetRemoteID returns the plugin's remote ID for shared channel operations
-func (p *Plugin) GetRemoteID() string {
-	return p.remoteID
+// GetManagedServers returns every registered Matrix homeserver.
+func (p *Plugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
+	return p.getServers()
+}
+
+// GetMatrixClientForServer returns the Matrix client for serverID, or nil if this node
+// has none configured for it.
+func (p *Plugin) GetMatrixClientForServer(serverID string) *matrix.Client {
+	return p.getMatrixClient(serverID)
+}
+
+// GetRemoteIDForServer returns the shared-channels remote ID for serverID.
+func (p *Plugin) GetRemoteIDForServer(serverID string) string {
+	return p.remoteIDForServer(serverID)
+}
+
+// CreateOrGetGhostUserForServer gets an existing ghost user or creates a new one for a
+// Mattermost user on a specific Matrix server.
+func (p *Plugin) CreateOrGetGhostUserForServer(serverID, mattermostUserID string) (string, error) {
+	bridge, err := p.newMattermostToMatrixBridge(serverID)
+	if err != nil {
+		return "", err
+	}
+	return bridge.CreateOrGetGhostUser(mattermostUserID)
+}
+
+// GetMatrixUserIDFromMattermostUserForServer looks up the original Matrix user ID for a
+// remote Mattermost user on a specific Matrix server.
+func (p *Plugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermostUserID string) (string, error) {
+	bridge, err := p.newMattermostToMatrixBridge(serverID)
+	if err != nil {
+		return "", err
+	}
+	return bridge.GetMatrixUserIDFromMattermostUser(mattermostUserID)
+}
+
+// SetServerEnabled flips a server's Enabled flag and refreshes every node's caches.
+// This is a pure flag flip - no re-registration, no re-invites, no cursor reset. The
+// shared-channels remote stays registered and the channel invitations stay in place;
+// routing alone consults Enabled (§3.11).
+func (p *Plugin) SetServerEnabled(serverID string, enabled bool) error {
+	found := false
+	err := p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		updated := make([]kvstore.ServerConfig, len(servers))
+		copy(updated, servers)
+		for i := range updated {
+			if updated[i].ServerID == serverID {
+				updated[i].Enabled = enabled
+				found = true
+			}
+		}
+		return updated, nil
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.Errorf("server %s is not registered", serverID)
+	}
+
+	return p.refreshServersAndBroadcast("server_enabled_changed")
 }
 
 // RunKVStoreMigrations exposes migration functionality to command handlers
@@ -282,28 +538,113 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 	}, nil
 }
 
-// UserHasJoinedChannel is called when a user joins or is added to a channel
+// serverIDForSyncMsg resolves the single Matrix server an outbound SyncMsg should
+// target. One shared-channels remote is registered per homeserver and the platform
+// invokes the outbound hooks once per invited remote, so this never fans out - it
+// resolves exactly one server from rc and the caller acts on that server alone.
+//
+// Resolution:
+//  1. rc == nil || rc.RemoteId == "" -> (defensive; should not happen in production).
+//  2. rc.RemoteId doesn't match one of our remotes -> unknown remote.
+//  3. The resolved server is disabled -> skip. This is the only thing stopping outbound
+//     traffic for a disabled server (§3.11) - its remote stays registered and invited,
+//     so the hooks keep firing, and this check is what makes that a no-op.
+//  4. Membership (not equality) against channelID's mappings: mapped to this server ->
+//     use it; mapped but not to this server -> skip (the remote is still invited but
+//     its server is no longer mapped, do not relay its traffic elsewhere); unmapped and
+//     the channel is a DM -> use this server anyway, so the DM room can be
+//     auto-created on it; unmapped and not a DM -> skip.
+func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (string, bool) {
+	if rc == nil || rc.RemoteId == "" {
+		p.logger.LogWarn("SyncMsg received without a usable RemoteCluster; skipping")
+		return "", false
+	}
+
+	serverID, ok := p.serverIDForRemoteID(rc.RemoteId)
+	if !ok {
+		p.logger.LogWarn("SyncMsg received for an unrecognized remote; skipping", "remote_id", rc.RemoteId)
+		return "", false
+	}
+
+	server, err := p.serverByID(serverID)
+	if err != nil {
+		p.logger.LogWarn("SyncMsg resolved to a server no longer in the registry; skipping", "server_id", serverID, "error", err)
+		return "", false
+	}
+	if !server.Enabled {
+		p.logger.LogDebug("SyncMsg resolved to a disabled server; skipping", "server_id", serverID)
+		return "", false
+	}
+
+	mappings, err := p.getChannelServerMappings(channelID)
+	if err != nil {
+		p.logger.LogWarn("Failed to read channel server mappings for SyncMsg; skipping", "channel_id", channelID, "error", err)
+		return "", false
+	}
+
+	if kvstore.RoomIDForServer(mappings, serverID) != "" {
+		return serverID, true
+	}
+
+	if len(mappings) > 0 {
+		// Mapped, but to a different server - the remote is still invited, but its
+		// server no longer owns this channel's traffic.
+		return "", false
+	}
+
+	isDM, err := p.isChannelDirect(channelID)
+	if err != nil {
+		p.logger.LogWarn("Failed to determine channel type for SyncMsg; skipping", "channel_id", channelID, "error", err)
+		return "", false
+	}
+	if isDM {
+		return serverID, true
+	}
+
+	return "", false
+}
+
+// isChannelDirect reports whether channelID is a direct or group-direct channel.
+func (p *Plugin) isChannelDirect(channelID string) (bool, error) {
+	channel, appErr := p.API.GetChannel(channelID)
+	if appErr != nil {
+		return false, appErr
+	}
+	return channel.Type == model.ChannelTypeDirect || channel.Type == model.ChannelTypeGroup, nil
+}
+
+// userOriginatesFromServer reports whether a Matrix-originated (remote) user's home
+// server is serverID, so ghosts and invites are not relayed across servers (§3.4).
+func (p *Plugin) userOriginatesFromServer(user *model.User, serverID string) bool {
+	origin, ok := p.serverIDForRemoteID(user.GetRemoteID())
+	return ok && origin == serverID
+}
+
+// getChannelServerMappings reads and parses a channel's server mappings. A missing key
+// returns (nil, nil) - "unmapped" - which is not an error; a corrupt value is.
+func (p *Plugin) getChannelServerMappings(channelID string) ([]kvstore.ChannelServerMapping, error) {
+	data, err := p.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read channel server mapping")
+	}
+	return kvstore.ParseChannelServerMappings(data)
+}
+
+// UserHasJoinedChannel is called when a user joins or is added to a channel. There is no
+// RemoteCluster available here, so - unlike the sync hooks, which resolve a single
+// server from rc - this loops over every server the channel is mapped to (one today,
+// N once maxServersPerChannel is lifted), skipping unmapped and disabled servers.
 func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.ChannelMember, actor *model.User) {
-	config := p.getConfiguration()
-	if !config.EnableSync {
+	mappings, err := p.getChannelServerMappings(channelMember.ChannelId)
+	if err != nil {
+		p.logger.LogError("Failed to read channel server mappings", "error", err, "channel_id", channelMember.ChannelId)
+		return
+	}
+	if len(mappings) == 0 {
+		// Channel is not bridged to any Matrix server, nothing to do.
 		return
 	}
 
-	if p.matrixClient == nil {
-		p.logger.LogError("Matrix client not initialized")
-		return
-	}
-
-	// First check if this channel is bridged to Matrix
-	matrixRoomID, err := p.mattermostToMatrixBridge.GetMatrixRoomID(channelMember.ChannelId)
-	if err != nil || matrixRoomID == "" {
-		// Channel is not bridged to Matrix, nothing to do
-		p.logger.LogDebug("Channel not bridged to Matrix, skipping user join sync", "channel_id", channelMember.ChannelId)
-		return
-	}
-
-	// Get the user who joined the channel
-	// If the actor is the same as the user who joined, use the provided actor to avoid API call
 	var user *model.User
 	if actor != nil && actor.Id == channelMember.UserId {
 		user = actor
@@ -311,57 +652,79 @@ func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.Ch
 		var appErr *model.AppError
 		user, appErr = p.API.GetUser(channelMember.UserId)
 		if appErr != nil {
-			// Log the failure with context about both fallback methods
 			if actor == nil {
 				p.logger.LogError("Failed to get user who joined channel - no actor provided and GetUser API call failed",
-					"error", appErr,
-					"user_id", channelMember.UserId,
-					"channel_id", channelMember.ChannelId,
-					"troubleshooting", "both actor parameter and GetUser API call failed")
+					"error", appErr, "user_id", channelMember.UserId, "channel_id", channelMember.ChannelId)
 			} else {
 				p.logger.LogError("Failed to get user who joined channel - actor provided but user ID mismatch, GetUser API call also failed",
-					"error", appErr,
-					"user_id", channelMember.UserId,
-					"actor_id", actor.Id,
-					"channel_id", channelMember.ChannelId,
-					"troubleshooting", "actor user ID did not match channel member user ID, and GetUser API call failed")
+					"error", appErr, "user_id", channelMember.UserId, "actor_id", actor.Id, "channel_id", channelMember.ChannelId)
 			}
 			return
 		}
 	}
 
-	p.logger.LogDebug("User joined bridged channel",
-		"user_id", user.Id,
-		"username", user.Username,
-		"channel_id", channelMember.ChannelId,
-		"matrix_room_id", matrixRoomID,
-		"is_remote", user.IsRemote())
-
-	// If this is a Matrix-originated user (remote), invite them to the corresponding Matrix room
-	if user.IsRemote() {
-		if err := p.inviteRemoteUserToMatrixRoom(user, channelMember.ChannelId); err != nil {
-			p.logger.LogError("Failed to invite remote user to Matrix room", "error", err, "user_id", user.Id, "username", user.Username, "channel_id", channelMember.ChannelId)
-		}
-	} else {
-		// This is a local Mattermost user - create ghost user and join them to the Matrix room
-		ghostUserID, err := p.CreateOrGetGhostUser(user.Id)
+	for _, serverID := range kvstore.MappedServerIDs(mappings) {
+		server, err := p.serverByID(serverID)
 		if err != nil {
-			p.logger.LogError("Failed to create or get ghost user", "error", err, "user_id", user.Id, "username", user.Username)
-			return
+			p.logger.LogDebug("Skipping stale channel mapping for unregistered server", "server_id", serverID, "channel_id", channelMember.ChannelId)
+			continue
+		}
+		if !server.Enabled {
+			p.logger.LogDebug("Skipping disabled server for user join sync", "server_id", serverID, "channel_id", channelMember.ChannelId)
+			continue
 		}
 
-		// Resolve room alias to room ID if needed
-		resolvedRoomID, err := p.matrixClient.ResolveRoomAlias(matrixRoomID)
+		matrixRoomID := kvstore.RoomIDForServer(mappings, serverID)
+		if matrixRoomID == "" {
+			continue
+		}
+
+		client := p.getMatrixClient(serverID)
+		if client == nil {
+			p.logger.LogWarn("No Matrix client for mapped server; skipping user join sync", "server_id", serverID, "channel_id", channelMember.ChannelId)
+			continue
+		}
+
+		p.logger.LogDebug("User joined bridged channel",
+			"user_id", user.Id, "username", user.Username, "channel_id", channelMember.ChannelId,
+			"server_id", serverID, "matrix_room_id", matrixRoomID, "is_remote", user.IsRemote())
+
+		if user.IsRemote() {
+			// Only re-invite a Matrix-originated user to the homeserver they actually
+			// came from - inviting them to a different mapped server's room would target
+			// a homeserver they have no Matrix identity on.
+			originServerID, ok := p.serverIDForRemoteID(user.GetRemoteID())
+			if !ok || originServerID != serverID {
+				continue
+			}
+			if err := p.inviteRemoteUserToMatrixRoom(serverID, user, channelMember.ChannelId); err != nil {
+				p.logger.LogError("Failed to invite remote user to Matrix room", "error", err, "user_id", user.Id, "username", user.Username, "server_id", serverID, "channel_id", channelMember.ChannelId)
+			}
+			continue
+		}
+
+		bridge, err := p.newMattermostToMatrixBridge(serverID)
 		if err != nil {
-			p.logger.LogError("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomID)
-			return
+			p.logger.LogError("Failed to build bridge for server", "error", err, "server_id", serverID)
+			continue
 		}
 
-		// Try to join the ghost user to the Matrix room (handles both public and private rooms)
-		if err := p.matrixClient.InviteAndJoinGhostUser(resolvedRoomID, ghostUserID); err != nil {
-			p.logger.LogError("Failed to join ghost user to Matrix room", "error", err, "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id)
+		ghostUserID, err := bridge.CreateOrGetGhostUser(user.Id)
+		if err != nil {
+			p.logger.LogError("Failed to create or get ghost user", "error", err, "user_id", user.Id, "username", user.Username, "server_id", serverID)
+			continue
+		}
+
+		resolvedRoomID, err := client.ResolveRoomAlias(matrixRoomID)
+		if err != nil {
+			p.logger.LogError("Failed to resolve Matrix room identifier", "error", err, "room_identifier", matrixRoomID, "server_id", serverID)
+			continue
+		}
+
+		if err := client.InviteAndJoinGhostUser(resolvedRoomID, ghostUserID); err != nil {
+			p.logger.LogError("Failed to join ghost user to Matrix room", "error", err, "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id, "server_id", serverID)
 		} else {
-			p.logger.LogInfo("Successfully joined ghost user to Matrix room", "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id, "username", user.Username)
+			p.logger.LogInfo("Successfully joined ghost user to Matrix room", "ghost_user_id", ghostUserID, "room_id", resolvedRoomID, "mattermost_user_id", user.Id, "username", user.Username, "server_id", serverID)
 		}
 	}
 }

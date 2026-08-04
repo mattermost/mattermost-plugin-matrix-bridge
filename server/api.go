@@ -2,12 +2,27 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"net/http"
 
 	"github.com/gorilla/mux"
 	"github.com/mattermost/mattermost/server/public/plugin"
 )
+
+// contextKey is a private type for context keys defined by this package, to avoid
+// collisions with keys defined in other packages.
+type contextKey string
+
+// contextKeyServerID is the context key under which MatrixAuthorizationRequired stores
+// the resolved serverID for downstream handlers.
+const contextKeyServerID contextKey = "matrix_server_id"
+
+// serverIDFromContext retrieves the serverID resolved by MatrixAuthorizationRequired.
+func serverIDFromContext(ctx context.Context) (string, bool) {
+	serverID, ok := ctx.Value(contextKeyServerID).(string)
+	return serverID, ok
+}
 
 // ServeHTTP demonstrates a plugin that handles HTTP requests by greeting the world.
 // The root URL is currently <siteUrl>/plugins/com.mattermost.plugin-starter-template/api/v1/. Replace com.mattermost.plugin-starter-template with the plugin ID.
@@ -40,36 +55,62 @@ func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler
 	})
 }
 
-// MatrixAuthorizationRequired is a middleware that requires valid Matrix hs_token authentication.
+// MatrixAuthorizationRequired is a middleware that requires a bearer token matching one
+// registered server's hs_token. It compares against EVERY server without an early
+// return (so the comparison cost doesn't leak which, if any, server matched via
+// timing), using subtle.ConstantTimeCompare. Entries with an empty HSToken are skipped
+// so an empty presented token can never match one. The matched server must also be
+// enabled. On success, the resolved serverID is injected into the request context for
+// downstream handlers.
 func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		config := p.getConfiguration()
-
-		// Check if sync is enabled
-		if !config.EnableSync {
-			p.logger.LogDebug("Matrix webhook received but sync is disabled")
-			http.Error(w, "Sync disabled", http.StatusServiceUnavailable)
-			return
-		}
-
-		// Verify hs_token in Authorization header
 		authHeader := r.Header.Get("Authorization")
-		expectedToken := "Bearer " + config.MatrixHSToken
+		presented := []byte(authHeader)
 
-		if config.MatrixHSToken == "" {
-			p.logger.LogWarn("Matrix webhook received but hs_token not configured")
-			http.Error(w, "Matrix not configured", http.StatusServiceUnavailable)
+		servers, err := p.getServers()
+		if err != nil {
+			p.logger.LogError("Failed to read servers config for Matrix webhook authorization", "error", err)
+			http.Error(w, "Internal error", http.StatusInternalServerError)
 			return
 		}
 
-		if subtle.ConstantTimeCompare([]byte(authHeader), []byte(expectedToken)) != 1 {
-			p.logger.LogWarn("Matrix webhook authentication failed - bearer token mismatch")
+		var matched *serverAuthMatch
+		for _, s := range servers {
+			if s.HSToken == "" {
+				continue
+			}
+
+			expected := []byte("Bearer " + s.HSToken)
+			if subtle.ConstantTimeCompare(presented, expected) == 1 {
+				m := serverAuthMatch{serverID: s.ServerID, enabled: s.Enabled}
+				matched = &m
+				// Deliberately no early return: every entry is compared, so the
+				// response timing does not reveal which token (if any) matched.
+			}
+		}
+
+		if matched == nil {
+			p.logger.LogWarn("Matrix webhook authentication failed - no server's hs_token matched")
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		if !matched.enabled {
+			p.logger.LogDebug("Matrix webhook received for a disabled server", "server_id", matched.serverID)
+			http.Error(w, "Server disabled", http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), contextKeyServerID, matched.serverID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// serverAuthMatch holds the outcome of matching a presented hs_token against the
+// registry, deferred until after the full constant-time scan completes.
+type serverAuthMatch struct {
+	serverID string
+	enabled  bool
 }
 
 // HelloWorld handles GET requests to /hello endpoint.

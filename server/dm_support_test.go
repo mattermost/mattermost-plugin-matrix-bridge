@@ -6,6 +6,8 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 func TestDMChannelDetection(t *testing.T) {
@@ -16,10 +18,12 @@ func TestDMChannelDetection(t *testing.T) {
 	plugin.maxFileSize = DefaultMaxFileSize
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
+	plugin.kvstore = NewMemoryKVStore()
+	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
+	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 
-	// Initialize bridges for testing
-	plugin.initBridges()
+	// Build bridges for testing
+	m2mx, _ := plugin.testBridges(t, serverID)
 
 	api := plugin.API.(*plugintest.API)
 
@@ -44,7 +48,7 @@ func TestDMChannelDetection(t *testing.T) {
 		api.On("GetChannelMembers", channelID, 0, 10).Return(members, nil)
 
 		// Test detection
-		isDM, userIDs, err := plugin.mattermostToMatrixBridge.isDirectChannel(channelID)
+		isDM, userIDs, err := m2mx.isDirectChannel(channelID)
 		assert.NoError(t, err)
 		assert.True(t, isDM)
 		assert.Len(t, userIDs, 2)
@@ -76,7 +80,7 @@ func TestDMChannelDetection(t *testing.T) {
 		api.On("GetChannelMembers", channelID, 100, 100).Return(model.ChannelMembers{}, nil)
 
 		// Test detection
-		isDM, userIDs, err := plugin.mattermostToMatrixBridge.isDirectChannel(channelID)
+		isDM, userIDs, err := m2mx.isDirectChannel(channelID)
 		assert.NoError(t, err)
 		assert.True(t, isDM)
 		assert.Len(t, userIDs, 3)
@@ -96,7 +100,7 @@ func TestDMChannelDetection(t *testing.T) {
 		api.On("GetChannel", channelID).Return(publicChannel, nil)
 
 		// Test detection
-		isDM, userIDs, err := plugin.mattermostToMatrixBridge.isDirectChannel(channelID)
+		isDM, userIDs, err := m2mx.isDirectChannel(channelID)
 		assert.NoError(t, err)
 		assert.False(t, isDM)
 		assert.Nil(t, userIDs)
@@ -111,27 +115,28 @@ func TestDMRoomMapping(t *testing.T) {
 	plugin.maxFileSize = DefaultMaxFileSize
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
 	plugin.kvstore = NewMemoryKVStore() // Initialize KV store for tests
+	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
+	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 
-	// Initialize bridges for testing
-	plugin.initBridges()
+	// Build bridges for testing
+	m2mx, _ := plugin.testBridges(t, serverID)
 
 	t.Run("SetAndGetDMRoomMapping", func(t *testing.T) {
 		channelID := model.NewId()
 		matrixRoomID := "!dmroom:matrix.example.com"
 
 		// Test setting room mapping (unified for all channels)
-		err := plugin.mattermostToMatrixBridge.setChannelRoomMapping(channelID, matrixRoomID)
+		err := m2mx.setChannelRoomMapping(channelID, matrixRoomID)
 		assert.NoError(t, err)
 
 		// Test getting room mapping
-		retrievedRoomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(channelID)
+		retrievedRoomID, err := m2mx.GetMatrixRoomID(channelID)
 		assert.NoError(t, err)
 		assert.Equal(t, matrixRoomID, retrievedRoomID)
 
 		// Test reverse mapping (Matrix -> Mattermost)
-		roomMappingKey := "room_mapping_" + matrixRoomID
+		roomMappingKey := kvstore.BuildRoomMappingKey(serverID, matrixRoomID)
 		channelIDBytes, err := plugin.kvstore.Get(roomMappingKey)
 		assert.NoError(t, err)
 		assert.Equal(t, channelID, string(channelIDBytes))
@@ -141,7 +146,7 @@ func TestDMRoomMapping(t *testing.T) {
 		nonexistentChannelID := model.NewId()
 
 		// Test getting nonexistent room mapping
-		roomID, err := plugin.mattermostToMatrixBridge.GetMatrixRoomID(nonexistentChannelID)
+		roomID, err := m2mx.GetMatrixRoomID(nonexistentChannelID)
 		assert.NoError(t, err) // GetMatrixRoomID returns empty string, not error for missing keys
 		assert.Empty(t, roomID)
 	})

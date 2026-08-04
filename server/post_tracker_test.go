@@ -13,12 +13,12 @@ func TestPostTracker_PutAndGet(t *testing.T) {
 	postID := "test_post_123"
 	updateAt := time.Now().UnixMilli()
 
-	err := tracker.Put(postID, updateAt)
+	err := tracker.Put("srv1", postID, updateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
 
-	retrievedUpdateAt, exists := tracker.Get(postID)
+	retrievedUpdateAt, exists := tracker.Get("srv1", postID)
 	if !exists {
 		t.Fatalf("Expected post ID to exist in tracker")
 	}
@@ -34,14 +34,14 @@ func TestPostTracker_Delete(t *testing.T) {
 	postID := "test_post_456"
 	updateAt := time.Now().UnixMilli()
 
-	err := tracker.Put(postID, updateAt)
+	err := tracker.Put("srv1", postID, updateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
 
-	tracker.Delete(postID)
+	tracker.Delete("srv1", postID)
 
-	_, exists := tracker.Get(postID)
+	_, exists := tracker.Get("srv1", postID)
 	if exists {
 		t.Fatalf("Expected post ID to be deleted from tracker")
 	}
@@ -54,7 +54,7 @@ func TestPostTracker_MaxEntries(t *testing.T) {
 	for i := range 10000 {
 		postID := fmt.Sprintf("test_post_%d", i)
 		updateAt := time.Now().UnixMilli()
-		err := tracker.Put(postID, updateAt)
+		err := tracker.Put("srv1", postID, updateAt)
 		if err != nil {
 			t.Fatalf("Unexpected error adding entry %d: %v", i, err)
 		}
@@ -67,7 +67,7 @@ func TestPostTracker_MaxEntries(t *testing.T) {
 	}
 
 	// Try to add one more entry - should fail since all entries are recent
-	err := tracker.Put("should_fail", time.Now().UnixMilli())
+	err := tracker.Put("srv1", "should_fail", time.Now().UnixMilli())
 	if err == nil {
 		t.Fatalf("Expected Put to fail when at capacity with recent entries")
 	}
@@ -85,7 +85,7 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	// Add an old entry (older than 1 hour)
 	oldPostID := "old_post"
 	oldUpdateAt := time.Now().Add(-2 * time.Hour).UnixMilli()
-	err := tracker.Put(oldPostID, oldUpdateAt)
+	err := tracker.Put("srv1", oldPostID, oldUpdateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	// Add a recent entry
 	recentPostID := "recent_post"
 	recentUpdateAt := time.Now().UnixMilli()
-	err = tracker.Put(recentPostID, recentUpdateAt)
+	err = tracker.Put("srv1", recentPostID, recentUpdateAt)
 	if err != nil {
 		t.Fatalf("Unexpected error from Put: %v", err)
 	}
@@ -102,20 +102,20 @@ func TestPostTracker_CleanupOldEntries(t *testing.T) {
 	for i := range 100 {
 		postID := fmt.Sprintf("trigger_cleanup_%d", i)
 		updateAt := time.Now().UnixMilli()
-		err := tracker.Put(postID, updateAt)
+		err := tracker.Put("srv1", postID, updateAt)
 		if err != nil {
 			t.Fatalf("Unexpected error from Put during cleanup trigger: %v", err)
 		}
 	}
 
 	// Old entry should be cleaned up
-	_, oldExists := tracker.Get(oldPostID)
+	_, oldExists := tracker.Get("srv1", oldPostID)
 	if oldExists {
 		t.Fatalf("Expected old entry to be cleaned up")
 	}
 
 	// Recent entry should still exist
-	_, recentExists := tracker.Get(recentPostID)
+	_, recentExists := tracker.Get("srv1", recentPostID)
 	if !recentExists {
 		t.Fatalf("Expected recent entry to still exist")
 	}
@@ -130,7 +130,7 @@ func TestPostTracker_CustomMaxEntries(t *testing.T) {
 	for i := range customLimit {
 		postID := fmt.Sprintf("test_post_%d", i)
 		updateAt := time.Now().UnixMilli()
-		err := tracker.Put(postID, updateAt)
+		err := tracker.Put("srv1", postID, updateAt)
 		if err != nil {
 			t.Fatalf("Unexpected error adding entry %d: %v", i, err)
 		}
@@ -143,7 +143,7 @@ func TestPostTracker_CustomMaxEntries(t *testing.T) {
 	}
 
 	// Try to add one more entry - should fail
-	err := tracker.Put("should_fail", time.Now().UnixMilli())
+	err := tracker.Put("srv1", "should_fail", time.Now().UnixMilli())
 	if err == nil {
 		t.Fatalf("Expected Put to fail when at custom capacity limit")
 	}
@@ -152,5 +152,66 @@ func TestPostTracker_CustomMaxEntries(t *testing.T) {
 	sizeAfterFailure := tracker.Size()
 	if sizeAfterFailure != customLimit {
 		t.Fatalf("Expected tracker size to remain %d after failed Put, got %d", customLimit, sizeAfterFailure)
+	}
+}
+
+// TestPostTracker_IsolatesIdenticalPostIDsAcrossServers verifies that a post shared to
+// two Matrix servers keeps independent tracking state for each - the same Mattermost
+// post ID under two serverIDs must not collide.
+func TestPostTracker_IsolatesIdenticalPostIDsAcrossServers(t *testing.T) {
+	tracker := NewPostTracker(DefaultPostTrackerMaxEntries)
+
+	postID := "shared-post"
+	updateAtA := time.Now().UnixMilli()
+	updateAtB := updateAtA + 1000
+
+	if err := tracker.Put("server-a", postID, updateAtA); err != nil {
+		t.Fatalf("Unexpected error from Put for server-a: %v", err)
+	}
+	if err := tracker.Put("server-b", postID, updateAtB); err != nil {
+		t.Fatalf("Unexpected error from Put for server-b: %v", err)
+	}
+
+	gotA, existsA := tracker.Get("server-a", postID)
+	if !existsA || gotA != updateAtA {
+		t.Fatalf("Expected server-a's entry to be %d, got %d (exists=%v)", updateAtA, gotA, existsA)
+	}
+
+	gotB, existsB := tracker.Get("server-b", postID)
+	if !existsB || gotB != updateAtB {
+		t.Fatalf("Expected server-b's entry to be %d, got %d (exists=%v)", updateAtB, gotB, existsB)
+	}
+
+	tracker.Delete("server-a", postID)
+
+	if _, exists := tracker.Get("server-a", postID); exists {
+		t.Fatalf("Expected server-a's entry to be deleted")
+	}
+	if _, exists := tracker.Get("server-b", postID); !exists {
+		t.Fatalf("Deleting server-a's entry must not affect server-b's entry")
+	}
+}
+
+// TestPendingFileTracker_IsolatesIdenticalPostIDsAcrossServers verifies the same
+// isolation for pending file attachments.
+func TestPendingFileTracker_IsolatesIdenticalPostIDsAcrossServers(t *testing.T) {
+	tracker := NewPendingFileTracker()
+
+	postID := "shared-post"
+	fileA := &PendingFile{FileID: "file-a", Filename: "a.png", MxcURI: "mxc://server-a/a"}
+	fileB := &PendingFile{FileID: "file-b", Filename: "b.png", MxcURI: "mxc://server-b/b"}
+
+	tracker.AddFile("server-a", postID, fileA)
+	tracker.AddFile("server-b", postID, fileB)
+
+	filesA := tracker.GetFiles("server-a", postID)
+	if len(filesA) != 1 || filesA[0].MxcURI != "mxc://server-a/a" {
+		t.Fatalf("Expected server-a's files to contain only its own file, got %+v", filesA)
+	}
+
+	// GetFiles removes what it returns; server-b's files must be unaffected.
+	filesB := tracker.GetFiles("server-b", postID)
+	if len(filesB) != 1 || filesB[0].MxcURI != "mxc://server-b/b" {
+		t.Fatalf("Expected server-b's files to contain only its own file, got %+v", filesB)
 	}
 }
