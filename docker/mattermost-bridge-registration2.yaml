@@ -1,0 +1,25 @@
+id: "mattermost-bridge"
+url: "http://host.docker.internal:8065/plugins/com.mattermost.plugin-matrix-bridge"
+# Each homeserver must present a UNIQUE hs_token: the plugin routes inbound
+# Application Service traffic to the right server by matching this token.
+as_token: "syn2_5Kd9WmXpQ2rLtVnB7cYhFgJ4sZaEuNi"
+hs_token: "syn2_Tb3Rk8VpMxWq6NcYdL2fHgJ7sUaZ0eYi"
+sender_localpart: "_mattermost_bridge"
+namespaces:
+  users:
+    - exclusive: true
+      regex: "@_mattermost_.*:synapse2.localhost"
+  aliases:
+    - exclusive: true
+      regex: "#_mattermost_.*:synapse2.localhost"
+    - exclusive: false
+      regex: "#mattermost-bridge-.*:synapse2.localhost"
+  rooms:
+    - exclusive: false
+      regex: "!.*:synapse2.localhost"
+rate_limited: false
+protocols: ["mattermost"]
+de.sorunome.msc2409.push_ephemeral: true
+permissions:
+  - "m.room.directory"
+  - "m.room.membership"

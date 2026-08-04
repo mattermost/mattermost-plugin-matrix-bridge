@@ -26,9 +26,25 @@ services:
         ports:
             - "8888:8008"
             - "8448:8448"
+        # Lets the container reach the Mattermost server running on the host (the
+        # registration file's `url` points at host.docker.internal). Docker Desktop
+        # (Mac/Windows) provides this automatically; host-gateway makes it work on
+        # Linux too.
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
         depends_on:
             - synapse-init
             - postgres
+
+    element:
+        image: vectorim/element-web:latest
+        restart: unless-stopped
+        ports:
+            - "8880:80"
+        volumes:
+            - ./docker/element-config.json:/app/config.json:ro
+        depends_on:
+            - synapse
 
     postgres:
         image: postgres:14
@@ -41,6 +57,66 @@ services:
         volumes:
             - postgres-data:/var/lib/postgresql/data
 
+    # --- Second Matrix homeserver, for local multi-server testing ---
+    # server_name "synapse2.localhost" resolves to 127.0.0.1 (the *.localhost TLD is
+    # reserved for loopback use) and, critically, is a genuinely distinct, port-less
+    # server name from the first server's "localhost" - see docs/local-development.md
+    # for why that distinction matters (NormalizeServerName strips ports, so two
+    # servers differing only by port would collide).
+    synapse2-init:
+        image: alpine:latest
+        command: |
+            sh -c "
+              chown -R 991:991 /data
+              chmod -R 755 /data
+            "
+        volumes:
+            - synapse2-data:/data
+
+    synapse2:
+        image: matrixdotorg/synapse:latest
+        restart: unless-stopped
+        environment:
+            - SYNAPSE_SERVER_NAME=synapse2.localhost
+            - SYNAPSE_REPORT_STATS=no
+            - UID=991
+            - GID=991
+        volumes:
+            - synapse2-data:/data
+            - ./docker/synapse2_config.yaml:/data/homeserver.yaml:ro
+            - ./docker/mattermost-bridge-registration2.yaml:/data/mattermost-bridge-registration.yaml:ro
+        ports:
+            - "8889:8008"
+            - "8449:8448"
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
+        depends_on:
+            - synapse2-init
+            - postgres2
+
+    element2:
+        image: vectorim/element-web:latest
+        restart: unless-stopped
+        ports:
+            - "8081:80"
+        volumes:
+            - ./docker/element2-config.json:/app/config.json:ro
+        depends_on:
+            - synapse2
+
+    postgres2:
+        image: postgres:14
+        restart: unless-stopped
+        environment:
+            - POSTGRES_DB=synapse
+            - POSTGRES_USER=synapse
+            - POSTGRES_PASSWORD=synapse
+            - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+        volumes:
+            - postgres2-data:/var/lib/postgresql/data
+
 volumes:
     synapse-data:
     postgres-data:
+    synapse2-data:
+    postgres2-data:
