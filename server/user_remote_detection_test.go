@@ -8,6 +8,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
@@ -276,7 +277,8 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestConfigurableUsernamePr
 
 	// Test username generation uses the configured prefix
 	baseUsername := "alice"
-	generatedUsername := suite.mx2m.generateMattermostUsername(baseUsername)
+	generatedUsername, err := suite.mx2m.generateMattermostUsername(baseUsername)
+	require.NoError(t, err)
 
 	// Should use "testmatrix:" prefix from test configuration
 	expectedUsername := "testmatrix:alice"
@@ -285,7 +287,8 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) TestConfigurableUsernamePr
 	t.Logf("✓ Username generation uses configured prefix: %s", generatedUsername)
 
 	// Test that the registry returns the correct per-server prefix
-	actualPrefix := suite.m2mx.matrixUsernamePrefix()
+	actualPrefix, err := suite.m2mx.matrixUsernamePrefix()
+	require.NoError(t, err)
 	assert.Equal(t, "testmatrix", actualPrefix, "Registry should return the set per-server prefix")
 
 	t.Logf("✓ Configuration returns correct prefix: %s", actualPrefix)
@@ -364,12 +367,14 @@ func TestDefaultUsernamePrefix(t *testing.T) {
 
 	m2mx, _ := plugin.testBridges(t, serverID)
 
-	prefix := m2mx.matrixUsernamePrefix()
+	prefix, err := m2mx.matrixUsernamePrefix()
+	require.NoError(t, err)
 	assert.Equal(t, DefaultMatrixUsernamePrefix, prefix, "Empty prefix should return default")
 
 	// Test with an explicit per-server prefix
 	setTestServerUsernamePrefix(t, plugin, serverID, "customprefix")
-	prefix = m2mx.matrixUsernamePrefix()
+	prefix, err = m2mx.matrixUsernamePrefix()
+	require.NoError(t, err)
 	assert.Equal(t, "customprefix", prefix, "Should return the configured per-server prefix")
 
 	t.Logf("✓ Default prefix: %s", DefaultMatrixUsernamePrefix)

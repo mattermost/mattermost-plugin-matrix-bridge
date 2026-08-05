@@ -116,9 +116,12 @@ func UpsertChannelServerMapping(m []ChannelServerMapping, serverID, roomID strin
 // stored under key, persisting the change. If the removal empties the list, the key
 // is deleted rather than storing an empty array.
 func RemoveServerFromChannelMapping(kv KVStore, key, serverID string) ([]ChannelServerMapping, error) {
+	// A missing key surfaces as (nil, nil) - see KVStore.Get - which ParseChannelServerMappings
+	// already turns into an empty mapping below. Any non-nil error here is a genuine read
+	// failure and must be propagated rather than treated as "already unmapped".
 	data, err := kv.Get(key)
 	if err != nil {
-		return nil, nil //nolint:nilerr // key not found is "already unmapped", not an error
+		return nil, errors.Wrap(err, "failed to read channel mapping")
 	}
 
 	mappings, err := ParseChannelServerMappings(data)

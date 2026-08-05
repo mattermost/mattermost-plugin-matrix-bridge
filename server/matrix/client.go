@@ -555,7 +555,11 @@ func (c *Client) GetServerNameFromKeyEndpoint() (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	// This endpoint is unauthenticated and hit before the server is registered, so the
+	// response comes from a homeserver we don't fully trust yet - cap the read instead
+	// of buffering an arbitrarily large body.
+	const maxKeyServerResponseBytes = 1 << 20 // 1 MiB; the real payload is a few KiB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyServerResponseBytes))
 	if err != nil {
 		return "", errors.Wrap(err, "failed to read key server response")
 	}

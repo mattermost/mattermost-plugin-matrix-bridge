@@ -340,12 +340,22 @@ func (p *Plugin) registerForSharedChannels() error {
 	}
 
 	remoteIDs := make(map[string]string, len(servers))
+	seenRemoteIDs := make(map[string]string, len(servers)) // remoteID -> the server_id that claimed it first
 	for _, s := range servers {
 		remoteID, err := p.doRegisterPluginForSharedChannels(s.SiteURL)
 		if err != nil {
 			p.logger.LogWarn("Failed to register server for shared channels", "server_id", s.ServerID, "error", err)
 			continue
 		}
+		// Each server's SiteURL is already unique in the registry (normalizeServerEndpoint
+		// enforces it), so this should never happen in practice - but a colliding remote ID
+		// would silently merge two servers' shared-channels state, so guard against it
+		// regardless of what actually causes it.
+		if owner, ok := seenRemoteIDs[remoteID]; ok {
+			p.logger.LogWarn("Shared-channels registration returned a remote ID already claimed by another server; skipping", "server_id", s.ServerID, "remote_id", remoteID, "claimed_by", owner)
+			continue
+		}
+		seenRemoteIDs[remoteID] = s.ServerID
 		remoteIDs[s.ServerID] = remoteID
 	}
 

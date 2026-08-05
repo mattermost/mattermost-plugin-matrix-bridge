@@ -942,14 +942,17 @@ func (c *Handler) executeServerAddCommand(fields []string) *model.CommandRespons
 		return ephemeral("❌ " + err.Error())
 	}
 
-	if len(positional) < 3 {
+	if len(positional) < 3 || len(positional) > 4 {
 		return ephemeral("Usage: /matrix server add <server_url> <as_token> <hs_token> [username_prefix] [--server-id <id>] [--server-name <name>]")
 	}
 
 	serverURL := positional[0]
 	asToken := positional[1]
 	hsToken := positional[2]
-	usernamePrefix := strings.Join(positional[3:], " ")
+	usernamePrefix := ""
+	if len(positional) == 4 {
+		usernamePrefix = positional[3]
+	}
 
 	serverID, err := c.plugin.AddServer(serverURL, asToken, hsToken, usernamePrefix, flags["server-id"], flags["server-name"])
 	if err != nil {

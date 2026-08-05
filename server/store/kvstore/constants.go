@@ -49,7 +49,7 @@ const (
 	KeyPrefixLegacyMatrixDMMapping = "matrix_dm_mapping_"
 )
 
-// namespacedKeysBySeverIDPrefixes lists every KV prefix that gained a serverID dimension in v3.
+// NamespacedKeyPrefixes lists every KV prefix that gained a serverID dimension in v3.
 // Used by the v2->v3 migration to rekey the legacy un-namespaced layout.
 var NamespacedKeyPrefixes = []string{ //nolint:revive // exported for use by migrations.go
 	KeyPrefixMatrixUser,

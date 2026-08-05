@@ -547,7 +547,10 @@ func (b *MatrixToMattermostBridge) getOrCreateMattermostUser(matrixUserID string
 	}
 
 	// Create a unique Mattermost username
-	mattermostUsername := b.generateMattermostUsername(username)
+	mattermostUsername, err := b.generateMattermostUsername(username)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to generate Mattermost username")
+	}
 
 	// Get real display name and avatar from Matrix profile
 	var displayName string
@@ -703,14 +706,20 @@ func (b *MatrixToMattermostBridge) extractUsernameFromMatrixUserID(userID string
 	return parts[0]
 }
 
-// generateMattermostUsername creates a unique Mattermost username
-func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername string) string {
+// generateMattermostUsername creates a unique Mattermost username. Returns an error if
+// this server's configured prefix can't be read - callers should treat that as a
+// failure rather than falling back, since silently using the default prefix could
+// collide with another server's distinct, correctly-configured prefix.
+func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername string) (string, error) {
 	// Sanitize username for Mattermost (following Shared Channels convention)
 	sanitized := strings.ToLower(baseUsername)
 	sanitized = regexp.MustCompile(`[^a-z0-9\-_]`).ReplaceAllString(sanitized, "_")
 
 	// Get the configured username prefix for this server
-	prefix := b.matrixUsernamePrefix()
+	prefix, err := b.matrixUsernamePrefix()
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read username prefix")
+	}
 
 	// Follow Shared Channels convention: prefix:username_sanitized
 	username := prefix + ":" + sanitized
@@ -737,7 +746,7 @@ func (b *MatrixToMattermostBridge) generateMattermostUsername(baseUsername strin
 		}
 	}
 
-	return username
+	return username, nil
 }
 
 // getPostIDFromMatrixEvent finds the Mattermost post ID for a Matrix event ID.

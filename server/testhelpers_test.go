@@ -596,6 +596,18 @@ func (e *erroringKVStore) Get(key string) ([]byte, error) {
 	return e.KVStore.Get(key)
 }
 
+// SetAtomicWithRetries overrides the promoted embedded implementation so errOnGetKey
+// also fires for mutateServers-style CAS operations: those read the current value via
+// the store's own internal Get, never through this wrapper's Get override, so without
+// this override a configured failure on the registry key would be silently bypassed by
+// any code path that mutates it instead of just reading it.
+func (e *erroringKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) ([]byte, error)) error {
+	if _, err := e.Get(key); err != nil {
+		return err
+	}
+	return e.KVStore.SetAtomicWithRetries(key, valueFunc)
+}
+
 // TestMemoryKVStore tests the in-memory KV store implementation
 func TestMemoryKVStore(t *testing.T) {
 	store := NewMemoryKVStore()

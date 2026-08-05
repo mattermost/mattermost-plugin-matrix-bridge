@@ -29,6 +29,10 @@ func ListAllKeysWithPrefix(store KVStore, prefix string, batchSize int) ([]strin
 // every key by whichever of prefixes it matches, instead of doing one prefix-filtered
 // scan per prefix (which would re-read the whole keyspace once per prefix).
 func ListAllKeysByPrefix(store KVStore, batchSize int, prefixes ...string) (map[string][]string, error) {
+	if batchSize <= 0 {
+		return nil, errors.Errorf("batchSize must be positive, got %d", batchSize)
+	}
+
 	result := make(map[string][]string, len(prefixes))
 	for _, prefix := range prefixes {
 		result[prefix] = nil

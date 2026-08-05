@@ -157,14 +157,20 @@ func (s *BridgeUtils) serverConfig() (kvstore.ServerConfig, error) {
 }
 
 // matrixUsernamePrefix returns this bridge's server's configured username prefix,
-// falling back to DefaultMatrixUsernamePrefix if the server can't be looked up or has
-// none set.
-func (s *BridgeUtils) matrixUsernamePrefix() string {
+// falling back to DefaultMatrixUsernamePrefix if the server has none set. A non-nil
+// error means the server config could not be read at all - callers should treat this
+// as a failure rather than silently falling back, since a transient read error must
+// never be conflated with "no prefix configured" (that fallback could collide with
+// another server's distinct, correctly-configured prefix).
+func (s *BridgeUtils) matrixUsernamePrefix() (string, error) {
 	server, err := s.serverConfig()
-	if err != nil || server.UsernamePrefix == "" {
-		return DefaultMatrixUsernamePrefix
+	if err != nil {
+		return "", err
 	}
-	return server.UsernamePrefix
+	if server.UsernamePrefix == "" {
+		return DefaultMatrixUsernamePrefix, nil
+	}
+	return server.UsernamePrefix, nil
 }
 
 // serverDomain returns this bridge's server's ServerName (the domain used in this
@@ -507,7 +513,11 @@ func (s *BridgeUtils) isDirectChannel(channelID string) (bool, []string, error) 
 func (s *BridgeUtils) reconstructMatrixUserIDFromUsername(mattermostUsername string) string {
 	// Mattermost usernames for Matrix users follow the pattern: "prefix:username"
 	// We need to reverse this to get "@username:server.com"
-	prefix := s.matrixUsernamePrefix()
+	prefix, err := s.matrixUsernamePrefix()
+	if err != nil {
+		s.logger.LogWarn("Failed to read server config for username prefix lookup", "server_id", s.serverID, "error", err)
+		return ""
+	}
 
 	// Check if username has the expected prefix
 	expectedPrefix := prefix + ":"

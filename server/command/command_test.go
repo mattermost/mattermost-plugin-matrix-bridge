@@ -1,6 +1,7 @@
 package command
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -159,6 +160,9 @@ func (m *memoryKVStore) ListKeysWithPrefix(page, perPage int, prefix string) ([]
 			keys = append(keys, k)
 		}
 	}
+	// map iteration order is random; pagination below slices a fixed [start:end] window,
+	// which needs a stable order or the same page could return different keys across calls.
+	sort.Strings(keys)
 	start := page * perPage
 	if start >= len(keys) {
 		return []string{}, nil
