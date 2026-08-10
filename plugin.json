@@ -19,7 +19,7 @@
         "bundle_path": "webapp/dist/main.js"
     },
     "settings_schema": {
-        "header": "Matrix homeservers are managed with the `/matrix server` slash command (add, remove, map, unmap, enable, disable) rather than here. See `/matrix server` for details.",
+        "header": "Matrix homeservers are managed with the /matrix server slash command (add, remove, map, unmap, enable, disable) rather than here. Run /matrix server for details.",
         "footer": "For more information, see the [Matrix specification](https://spec.matrix.org/v1.14/)",
         "settings": [
             {
