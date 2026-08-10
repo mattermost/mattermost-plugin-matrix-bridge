@@ -229,6 +229,9 @@ func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName stri
 	if plugin.ownRemoteIDs == nil {
 		plugin.ownRemoteIDs = map[string]struct{}{}
 	}
+	if plugin.serverConfigs == nil {
+		plugin.serverConfigs = map[string]kvstore.ServerConfig{}
+	}
 	// The caller typically constructs matrixClient before this remoteID is minted (it
 	// doesn't exist yet). Stamp it now so posts/users the client creates attribute to
 	// the right remote, matching what initMatrixClients does in production.
@@ -238,12 +241,15 @@ func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName stri
 	plugin.matrixClients[serverID] = matrixClient
 	plugin.remoteToServerID[remoteID] = serverID
 	plugin.ownRemoteIDs[remoteID] = struct{}{}
+	plugin.serverConfigs[serverID] = serverConfig
 
 	return serverID, remoteID
 }
 
 // setTestServerUsernamePrefix overwrites serverID's UsernamePrefix in the registry, for
-// tests that verify per-server username prefix configurability.
+// tests that verify per-server username prefix configurability. UsernamePrefix is read
+// live from KV (see BridgeUtils.serverConfig), never from the serverConfigs cache, so no
+// cache update is needed here.
 func setTestServerUsernamePrefix(t *testing.T, plugin *Plugin, serverID, prefix string) {
 	t.Helper()
 
@@ -264,6 +270,51 @@ func setTestServerUsernamePrefix(t *testing.T, plugin *Plugin, serverID, prefix 
 	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
 }
 
+// syncTestServerConfigsCache copies servers into plugin.serverConfigs, keyed by
+// ServerID - exactly what initMatrixClients would have produced from this same slice.
+// Test helpers that write a modified registry directly to KV, bypassing
+// SetServerEnabled/RemoveServer/AddServer (usually to avoid rebuilding matrixClients from
+// scratch and clobbering a fake matrix.Client registerTestServer already wired up), must
+// call this afterward so serverConfigForRouting/cachedServerConfigs - which now read this
+// cache instead of KV - see the change too.
+func syncTestServerConfigsCache(plugin *Plugin, servers []kvstore.ServerConfig) {
+	// Replace rather than merge: initMatrixClients builds a fresh map every rebuild, so
+	// merging would leave a removed server cached and no longer match what it produces.
+	configs := make(map[string]kvstore.ServerConfig, len(servers))
+	for _, s := range servers {
+		configs[s.ServerID] = s
+	}
+	plugin.serverConfigs = configs
+}
+
+// setTestServerEnabled overwrites serverID's Enabled flag in both the registry and the
+// serverConfigs cache that serverConfigForRouting reads on hot paths (Enabled is cached,
+// unlike UsernamePrefix). Deliberately does not go through SetServerEnabled/
+// refreshServersAndBroadcast/initMatrixClients - that would rebuild matrixClients from
+// each entry's ASToken/ServerURL fields and silently replace any fake matrix.Client a
+// test wired up via registerTestServer with a non-functional one.
+func setTestServerEnabled(t *testing.T, plugin *Plugin, serverID string, enabled bool) {
+	t.Helper()
+
+	servers, err := plugin.getServers()
+	require.NoError(t, err)
+
+	found := false
+	for i := range servers {
+		if servers[i].ServerID == serverID {
+			servers[i].Enabled = enabled
+			found = true
+		}
+	}
+	require.True(t, found, "server %s must be registered before setting its enabled flag", serverID)
+
+	data, err := kvstore.MarshalServersConfig(servers)
+	require.NoError(t, err)
+	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	syncTestServerConfigsCache(plugin, servers)
+}
+
 // testBridges builds the on-demand Mattermost->Matrix and Matrix->Mattermost bridges
 // for serverID, failing the test immediately if either can't be built (e.g. serverID
 // wasn't registered via registerTestServer/setupTestPlugin first).
@@ -277,6 +328,79 @@ func (p *Plugin) testBridges(t *testing.T, serverID string) (*MattermostToMatrix
 	require.NoError(t, err)
 
 	return m2mx, mx2m
+}
+
+// singleServerTestSetup holds what setupSingleServerTest/setupSingleServerIntegrationTest
+// build for a single-server, container-backed test: the Plugin, the one server's IDs,
+// and its two on-demand bridges. Validator is only populated by
+// setupSingleServerIntegrationTest - callers that don't need it (e.g.
+// dm_room_creation_test.go, which validates via the container's own room/message
+// inspection rather than matrixtest.EventValidation) get it nil from setupSingleServerTest.
+type singleServerTestSetup struct {
+	Plugin    *Plugin
+	ServerID  string
+	RemoteID  string
+	M2Mx      *MattermostToMatrixBridge
+	Mx2M      *MatrixToMattermostBridge
+	Validator *matrixtest.EventValidation
+}
+
+// setupSingleServerTest builds a fresh Plugin (kvstore/trackers/configuration/logger)
+// registered with matrixContainer as its one server, plus both of that server's on-demand
+// bridges. The logger is set before registerTestServer runs - registerTestServer builds a
+// real matrix.Client, which logs at construction time - so this ordering constraint is
+// enforced structurally here rather than left to every caller to remember.
+//
+// customize, if non-nil, runs after the server is registered and before the bridges are
+// built, for a suite's own per-server tweaks (e.g. setTestServerUsernamePrefix). It must
+// not rebuild the server's Matrix client (e.g. via SetServerEnabled), or it would silently
+// replace the fake client registerTestServer just wired up.
+func setupSingleServerTest(t *testing.T, api plugin.API, matrixContainer *matrixtest.Container, customize func(plugin *Plugin, serverID string)) *singleServerTestSetup {
+	t.Helper()
+
+	p := &Plugin{}
+	p.SetAPI(api)
+	p.kvstore = NewMemoryKVStore()
+	p.pendingFiles = NewPendingFileTracker()
+	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	p.configuration = &configuration{}
+	// Must exist before registerTestServer, below: it builds a real matrix.Client, which
+	// logs at construction time.
+	p.logger = &testLogger{t: t}
+
+	matrixClient := createMatrixClientWithTestLogger(t, matrixContainer.ServerURL, matrixContainer.ASToken, "")
+	matrixClient.SetServerDomain(matrixContainer.ServerDomain)
+	serverID, remoteID := registerTestServer(t, p, matrixContainer.ServerURL, matrixContainer.ServerDomain, matrixClient)
+
+	if customize != nil {
+		customize(p, serverID)
+	}
+
+	m2mx, mx2m := p.testBridges(t, serverID)
+
+	return &singleServerTestSetup{
+		Plugin:   p,
+		ServerID: serverID,
+		RemoteID: remoteID,
+		M2Mx:     m2mx,
+		Mx2M:     mx2m,
+	}
+}
+
+// setupSingleServerIntegrationTest wraps setupSingleServerTest with the
+// testChannelID->testRoomID KV seeding and event validator every container-backed
+// single-server suite in this package also needs, beyond the bare plugin+server+bridges
+// setupSingleServerTest provides. See setupSingleServerTest for the customize parameter.
+func setupSingleServerIntegrationTest(t *testing.T, api plugin.API, matrixContainer *matrixtest.Container, testChannelID, testRoomID string, customize func(plugin *Plugin, serverID string)) *singleServerTestSetup {
+	t.Helper()
+
+	setup := setupSingleServerTest(t, api, matrixContainer, customize)
+
+	setupTestKVData(t, setup.Plugin.kvstore, setup.ServerID, testChannelID, testRoomID)
+
+	setup.Validator = matrixtest.NewEventValidation(t, matrixContainer.ServerDomain, setup.RemoteID)
+
+	return setup
 }
 
 // setupBasicMocks sets up common API mocks for integration tests

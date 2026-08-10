@@ -582,6 +582,45 @@ func TestInitMatrixClientsBuildsClientForDisabledServer(t *testing.T) {
 
 	require.NoError(t, plugin.initMatrixClients())
 	assert.NotNil(t, plugin.getMatrixClient("disabled1"), "initMatrixClients must build a client even for a disabled server")
+
+	server, ok := plugin.cachedServerConfig("disabled1")
+	require.True(t, ok, "initMatrixClients must also populate the serverConfigs cache for a disabled server")
+	assert.False(t, server.Enabled)
+}
+
+// TestInitMatrixClientsBuildsServerConfigsCache covers the serverConfigs cache
+// initMatrixClients builds alongside matrixClients/remoteToServerID/ownRemoteIDs: it must
+// hold every registered server's full registry entry (Enabled, HSToken, RemoteID), and
+// cachedServerConfigs must return exactly that set for callers that scan the whole
+// registry (e.g. Matrix webhook auth).
+func TestInitMatrixClientsBuildsServerConfigsCache(t *testing.T) {
+	plugin := newTestPluginForServers(t)
+
+	data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+		{ServerID: "serverA", ServerURL: "https://a.example.com", ServerName: "a.example.com", HSToken: "hs-a", Enabled: true, RemoteID: "remote-a"},
+		{ServerID: "serverB", ServerURL: "https://b.example.com", ServerName: "b.example.com", HSToken: "hs-b", Enabled: false, RemoteID: "remote-b"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	require.NoError(t, plugin.initMatrixClients())
+
+	serverA, ok := plugin.cachedServerConfig("serverA")
+	require.True(t, ok)
+	assert.Equal(t, "hs-a", serverA.HSToken)
+	assert.True(t, serverA.Enabled)
+	assert.Equal(t, "remote-a", serverA.RemoteID)
+
+	serverB, ok := plugin.cachedServerConfig("serverB")
+	require.True(t, ok)
+	assert.False(t, serverB.Enabled)
+
+	_, ok = plugin.cachedServerConfig("nonexistent")
+	assert.False(t, ok, "a server absent from the registry must not be found in the cache")
+
+	all, ok := plugin.cachedServerConfigs()
+	require.True(t, ok)
+	assert.Len(t, all, 2)
 }
 
 // TestInitMatrixClientsNoopsWithNilKVStore covers OnConfigurationChange firing before
@@ -592,6 +631,12 @@ func TestInitMatrixClientsNoopsWithNilKVStore(t *testing.T) {
 
 	require.NoError(t, plugin.initMatrixClients())
 	assert.Nil(t, plugin.getMatrixClient("anything"))
+
+	_, ok := plugin.cachedServerConfig("anything")
+	assert.False(t, ok, "the serverConfigs cache must report not-found, not KV-fallback, when it hasn't been built")
+
+	_, ok = plugin.cachedServerConfigs()
+	assert.False(t, ok, "cachedServerConfigs must report the cache as not built")
 }
 
 // TestInitMatrixClientsReturnsErrorOnRegistryReadFailure covers §5.1: a registry read

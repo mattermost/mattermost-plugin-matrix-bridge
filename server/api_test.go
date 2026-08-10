@@ -154,3 +154,61 @@ func TestMatrixAuthorizationRequired(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, w.Result().StatusCode)
 	})
 }
+
+// TestMatrixAuthorizationRequiredCacheRefresh covers cache-refresh correctness for the
+// per-node server-config cache MatrixAuthorizationRequired now reads instead of the KV
+// store directly: disabling or removing a server must promptly stop its hs_token from
+// authorizing further requests, at the same point (initMatrixClients rebuild) that
+// already stops that server's outbound routing.
+func TestMatrixAuthorizationRequiredCacheRefresh(t *testing.T) {
+	newAuthRequest := func(bearer string) *http.Request {
+		req := httptest.NewRequest(http.MethodPut, "/transactions/txn1", nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		return req
+	}
+
+	t.Run("disabling a server stops its token from authorizing further requests", func(t *testing.T) {
+		plugin := newTestPluginForAddServer(t)
+		serverID, err := plugin.AddServer("https://a.example.com", "as1", "hs-a", "", "", "a.example.com")
+		require.NoError(t, err)
+
+		handler := plugin.MatrixAuthorizationRequired(finalHandler(new(bool), new(string)))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, newAuthRequest("hs-a"))
+		require.Equal(t, http.StatusOK, w.Result().StatusCode, "token must work while the server is enabled")
+
+		require.NoError(t, plugin.SetServerEnabled(serverID, false))
+
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, newAuthRequest("hs-a"))
+		assert.Equal(t, http.StatusServiceUnavailable, w.Result().StatusCode, "disabling must promptly stop the token from being accepted")
+	})
+
+	t.Run("removing a server stops its token from authorizing further requests", func(t *testing.T) {
+		plugin := newTestPluginForAddServer(t)
+		_, err := plugin.AddServer("https://a.example.com", "as1", "hs-a", "", "", "a.example.com")
+		require.NoError(t, err)
+		serverID2, err := plugin.AddServer("https://b.example.com", "as2", "hs-b", "", "", "b.example.com")
+		require.NoError(t, err)
+
+		handler := plugin.MatrixAuthorizationRequired(finalHandler(new(bool), new(string)))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, newAuthRequest("hs-b"))
+		require.Equal(t, http.StatusOK, w.Result().StatusCode)
+
+		removed, err := plugin.RemoveServer(serverID2)
+		require.NoError(t, err)
+		require.True(t, removed)
+
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, newAuthRequest("hs-b"))
+		assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode, "removal must promptly stop the token from being accepted")
+
+		// serverA's token must be unaffected by serverB's removal.
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, newAuthRequest("hs-a"))
+		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+	})
+}

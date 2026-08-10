@@ -84,7 +84,7 @@ func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
 		return true
 	}
 
-	server, err := p.serverByID(serverID)
+	server, err := p.serverConfigForRouting(serverID)
 	if err != nil || !server.Enabled {
 		p.logger.LogDebug("Ping received for disabled or unregistered server; healthy-but-idle", "server_id", serverID)
 		return true
@@ -314,7 +314,7 @@ func (p *Plugin) OnSharedChannelsProfileImageSyncMsg(user *model.User, rc *model
 		return nil
 	}
 
-	server, err := p.serverByID(serverID)
+	server, err := p.serverConfigForRouting(serverID)
 	if err != nil || !server.Enabled {
 		return nil
 	}

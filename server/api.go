@@ -62,16 +62,29 @@ func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler
 // so an empty presented token can never match one. The matched server must also be
 // enabled. On success, the resolved serverID is injected into the request context for
 // downstream handlers.
+//
+// Reads the per-node server-config cache maintained by initMatrixClients rather than the
+// KV store directly, so this genuinely hot path (every inbound Matrix webhook) does not
+// pay for a KV read plus a full-registry unmarshal on every request. Disabling or
+// removing a server takes effect as soon as that cache is rebuilt - the same point at
+// which it already takes effect for outbound routing - so this does not change
+// cache-invalidation timing. Falls back to a direct KV read only when the cache has
+// never been built yet (e.g. OnConfigurationChange firing before OnActivate has run),
+// matching getServers' existing error handling for that case.
 func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		presented := []byte(authHeader)
 
-		servers, err := p.getServers()
-		if err != nil {
-			p.logger.LogError("Failed to read servers config for Matrix webhook authorization", "error", err)
-			http.Error(w, "Internal error", http.StatusInternalServerError)
-			return
+		servers, ok := p.cachedServerConfigs()
+		if !ok {
+			var err error
+			servers, err = p.getServers()
+			if err != nil {
+				p.logger.LogError("Failed to read servers config for Matrix webhook authorization", "error", err)
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		var matched *serverAuthMatch

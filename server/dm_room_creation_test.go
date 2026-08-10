@@ -94,29 +94,10 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithCorrectName() {
 	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 
-	// Create plugin instance
-	plugin := &Plugin{}
-	plugin.SetAPI(api)
-	plugin.kvstore = NewMemoryKVStore()
-	plugin.logger = &testLogger{t: suite.T()}
-
-	// Initialize required plugin components
-	plugin.pendingFiles = NewPendingFileTracker()
-	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
-	plugin.configuration = &configuration{}
-
-	// Initialize Matrix client and register it as this test's single server
-	matrixClient := createMatrixClientWithTestLogger(
-		suite.T(),
-		suite.matrixContainer.ServerURL,
-		suite.matrixContainer.ASToken,
-		"",
-	)
-	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
-	serverID, _ := registerTestServer(suite.T(), plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
-
-	// Build bridges for this server
-	m2mx, _ := plugin.testBridges(suite.T(), serverID)
+	setup := setupSingleServerTest(suite.T(), api, suite.matrixContainer, nil)
+	plugin := setup.Plugin
+	serverID := setup.ServerID
+	m2mx := setup.M2Mx
 
 	// Store reverse mapping for the Matrix user (simulating existing mapping)
 	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(serverID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
@@ -229,29 +210,10 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationWithMultipleUsers() {
 	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 
-	// Create plugin instance
-	plugin := &Plugin{}
-	plugin.SetAPI(api)
-	plugin.kvstore = NewMemoryKVStore()
-	plugin.logger = &testLogger{t: suite.T()}
-
-	// Initialize required plugin components
-	plugin.pendingFiles = NewPendingFileTracker()
-	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
-	plugin.configuration = &configuration{}
-
-	// Initialize Matrix client and register it as this test's single server
-	matrixClient := createMatrixClientWithTestLogger(
-		suite.T(),
-		suite.matrixContainer.ServerURL,
-		suite.matrixContainer.ASToken,
-		"",
-	)
-	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
-	serverID, _ := registerTestServer(suite.T(), plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
-
-	// Build bridges for this server
-	m2mx, _ := plugin.testBridges(suite.T(), serverID)
+	setup := setupSingleServerTest(suite.T(), api, suite.matrixContainer, nil)
+	plugin := setup.Plugin
+	serverID := setup.ServerID
+	m2mx := setup.M2Mx
 
 	// Store reverse mapping for the Matrix user
 	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(serverID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))
@@ -348,29 +310,10 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 
-	// Create plugin instance
-	plugin := &Plugin{}
-	plugin.SetAPI(api)
-	plugin.kvstore = NewMemoryKVStore()
-	plugin.logger = &testLogger{t: suite.T()}
-
-	// Initialize required plugin components
-	plugin.pendingFiles = NewPendingFileTracker()
-	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
-	plugin.configuration = &configuration{}
-
-	// Initialize Matrix client and register it as this test's single server
-	matrixClient := createMatrixClientWithTestLogger(
-		suite.T(),
-		suite.matrixContainer.ServerURL,
-		suite.matrixContainer.ASToken,
-		"",
-	)
-	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
-	serverID, _ := registerTestServer(suite.T(), plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
-
-	// Build bridges for this server
-	m2mx, _ := plugin.testBridges(suite.T(), serverID)
+	setup := setupSingleServerTest(suite.T(), api, suite.matrixContainer, nil)
+	plugin := setup.Plugin
+	serverID := setup.ServerID
+	m2mx := setup.M2Mx
 
 	// Store reverse mapping for the Matrix user
 	err := plugin.kvstore.Set(kvstore.BuildMattermostUserKey(serverID, matrixUserID), []byte("@alice:"+suite.matrixContainer.ServerDomain))

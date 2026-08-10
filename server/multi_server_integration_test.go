@@ -125,11 +125,13 @@ func (suite *MultiServerIntegrationTestSuite) newTwoServerSetup() *twoServerSetu
 	}
 }
 
-// setServerHSToken overwrites serverID's HSToken in the registry. registerTestServer
-// does not set one (it has no need to, for tests that never drive the real webhook
-// path), but the real webhook auth path (MatrixAuthorizationRequired) matches
-// "Bearer "+HSToken against every registered server, so a test that wants to exercise it
-// for real must seed this itself.
+// setServerHSToken overwrites serverID's HSToken in both the registry and the
+// serverConfigs cache MatrixAuthorizationRequired reads on the hot path (see
+// cachedServerConfigs) - registerTestServer already populates that cache, so a plain KV
+// write here would leave it stale and the real webhook auth path would keep matching
+// against the old (empty) HSToken. registerTestServer does not set one itself (it has no
+// need to, for tests that never drive the real webhook path), but a test that wants to
+// exercise MatrixAuthorizationRequired for real must seed this itself.
 func setServerHSToken(t *testing.T, plugin *Plugin, serverID, hsToken string) {
 	t.Helper()
 
@@ -148,6 +150,8 @@ func setServerHSToken(t *testing.T, plugin *Plugin, serverID, hsToken string) {
 	data, err := kvstore.MarshalServersConfig(servers)
 	require.NoError(t, err)
 	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	syncTestServerConfigsCache(plugin, servers)
 }
 
 // TestInboundRoutingIsolatedPerServer covers scenario 1: an inbound Matrix message,

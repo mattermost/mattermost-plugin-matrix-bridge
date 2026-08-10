@@ -56,45 +56,13 @@ func (suite *MatrixSyncTestSuite) SetupTest() {
 	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), uniqueRoomName)
 	suite.testGhostUserID = "@_mattermost_" + suite.testUserID + ":" + suite.matrixContainer.ServerDomain
 
-	// Create plugin instance
-	suite.plugin = &Plugin{}
-	suite.plugin.SetAPI(api)
-
-	// Initialize kvstore with in-memory implementation for testing
-	suite.plugin.kvstore = NewMemoryKVStore()
-
-	// Initialize required plugin components
-	suite.plugin.pendingFiles = NewPendingFileTracker()
-	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
-	suite.plugin.configuration = &configuration{}
-
-	// Initialize the logger (required before registering the test server)
-	suite.plugin.logger = &testLogger{t: suite.T()}
-
-	// Create Matrix client pointing to test container and register it as this test's
-	// single server
-	matrixClient := createMatrixClientWithTestLogger(
-		suite.T(),
-		suite.matrixContainer.ServerURL,
-		suite.matrixContainer.ASToken,
-		"",
-	)
-	// Set explicit server domain for testing
-	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
-	suite.serverID, suite.remoteID = registerTestServer(suite.T(), suite.plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
-
-	// Build bridges for testing
-	suite.m2mx, suite.mx2m = suite.plugin.testBridges(suite.T(), suite.serverID)
-
-	// Set up test data in KV store
-	setupTestKVData(suite.T(), suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
-
-	// Initialize validation helper
-	suite.validator = matrixtest.NewEventValidation(
-		suite.T(),
-		suite.matrixContainer.ServerDomain,
-		suite.remoteID,
-	)
+	setup := setupSingleServerIntegrationTest(suite.T(), api, suite.matrixContainer, suite.testChannelID, suite.testRoomID, nil)
+	suite.plugin = setup.Plugin
+	suite.serverID = setup.ServerID
+	suite.remoteID = setup.RemoteID
+	suite.m2mx = setup.M2Mx
+	suite.mx2m = setup.Mx2M
+	suite.validator = setup.Validator
 
 	// Set up mock API expectations
 	suite.setupMockAPI(api)

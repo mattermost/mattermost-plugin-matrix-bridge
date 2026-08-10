@@ -23,9 +23,6 @@ const (
 	// DefaultMaxFileSize is the default maximum size for file attachments (50MB)
 	DefaultMaxFileSize = 50 * 1024 * 1024
 
-	// pluginID is this plugin's ID, used when registering shared-channels remotes.
-	pluginID = "com.mattermost.plugin-matrix-bridge"
-
 	// clusterEventServersChanged is broadcast to every cluster node whenever the server
 	// registry is mutated at runtime, so each node's per-node client/remote caches stay
 	// in sync with the cluster-shared registry.
@@ -45,15 +42,16 @@ type Plugin struct {
 	// commandClient is the client used to register and execute slash commands.
 	commandClient command.Command
 
-	// matrixClients, remoteToServerID and ownRemoteIDs are per-node caches rebuilt from
-	// the cluster-shared server registry by initMatrixClients. The registry itself (KV
-	// store) is the source of truth; any runtime mutation must call
+	// matrixClients, remoteToServerID, ownRemoteIDs and serverConfigs are per-node caches
+	// rebuilt from the cluster-shared server registry by initMatrixClients. The registry
+	// itself (KV store) is the source of truth; any runtime mutation must call
 	// refreshServersAndBroadcast so every node's copy of these maps stays current.
-	matrixClients    map[string]*matrix.Client // serverID -> client
-	remoteToServerID map[string]string         // shared-channels remoteID -> serverID
-	ownRemoteIDs     map[string]struct{}       // loop prevention across all our remotes
+	matrixClients    map[string]*matrix.Client       // serverID -> client
+	remoteToServerID map[string]string               // shared-channels remoteID -> serverID
+	ownRemoteIDs     map[string]struct{}             // loop prevention across all our remotes
+	serverConfigs    map[string]kvstore.ServerConfig // serverID -> registry entry, for Enabled/HSToken/RemoteID reads on hot paths without a KV round trip
 
-	// matrixClientsLock guards swapping the three maps above.
+	// matrixClientsLock guards swapping the four maps above.
 	matrixClientsLock sync.RWMutex
 	// initMatrixClientsMu serializes the read-compute-swap cycle in initMatrixClients so
 	// concurrent rebuilds cannot race and leave a stale snapshot installed last.
@@ -161,10 +159,10 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 	return response, nil
 }
 
-// initMatrixClients rebuilds the per-node matrixClients/remoteToServerID/ownRemoteIDs
-// caches from the cluster-shared server registry. It builds a client for every
-// registered server, including disabled ones, so /matrix status can still probe and
-// report their health - only routing (not client construction) consults Enabled.
+// initMatrixClients rebuilds the per-node matrixClients/remoteToServerID/ownRemoteIDs/
+// serverConfigs caches from the cluster-shared server registry. It builds a client for
+// every registered server, including disabled ones, so /matrix status can still probe
+// and report their health - only routing (not client construction) consults Enabled.
 //
 // No-ops when p.kvstore is nil: OnConfigurationChange can fire before OnActivate has
 // initialized the store. Returns an error on registry read failure rather than leaving
@@ -190,6 +188,7 @@ func (p *Plugin) initMatrixClients() error {
 	clients := make(map[string]*matrix.Client, len(servers))
 	remoteToServerID := make(map[string]string, len(servers))
 	ownRemoteIDs := make(map[string]struct{}, len(servers))
+	serverConfigs := make(map[string]kvstore.ServerConfig, len(servers))
 
 	for _, s := range servers {
 		clients[s.ServerID] = matrix.NewClientWithRateLimit(s.ServerURL, s.ASToken, s.RemoteID, s.ServerName, p.API, rateLimitConfig)
@@ -197,12 +196,14 @@ func (p *Plugin) initMatrixClients() error {
 			remoteToServerID[s.RemoteID] = s.ServerID
 			ownRemoteIDs[s.RemoteID] = struct{}{}
 		}
+		serverConfigs[s.ServerID] = s
 	}
 
 	p.matrixClientsLock.Lock()
 	p.matrixClients = clients
 	p.remoteToServerID = remoteToServerID
 	p.ownRemoteIDs = ownRemoteIDs
+	p.serverConfigs = serverConfigs
 	p.matrixClientsLock.Unlock()
 
 	return nil
@@ -280,10 +281,52 @@ func (p *Plugin) isOwnRemoteID(remoteID string) bool {
 	return ok
 }
 
+// cachedServerConfig returns the cached registry entry for serverID as of the last
+// initMatrixClients rebuild, without touching KV. ok is false if the cache has not been
+// built yet, or serverID is not (or no longer) registered as of that rebuild.
+func (p *Plugin) cachedServerConfig(serverID string) (kvstore.ServerConfig, bool) {
+	p.matrixClientsLock.RLock()
+	defer p.matrixClientsLock.RUnlock()
+	if p.serverConfigs == nil {
+		return kvstore.ServerConfig{}, false
+	}
+	server, ok := p.serverConfigs[serverID]
+	return server, ok
+}
+
+// cachedServerConfigs returns a snapshot slice of every registered server as of the last
+// initMatrixClients rebuild, without touching KV, for callers that must scan the whole
+// registry (e.g. constant-time webhook token matching in MatrixAuthorizationRequired).
+// ok is false if the cache has not been built yet.
+func (p *Plugin) cachedServerConfigs() ([]kvstore.ServerConfig, bool) {
+	p.matrixClientsLock.RLock()
+	defer p.matrixClientsLock.RUnlock()
+	if p.serverConfigs == nil {
+		return nil, false
+	}
+	servers := make([]kvstore.ServerConfig, 0, len(p.serverConfigs))
+	for _, server := range p.serverConfigs {
+		servers = append(servers, server)
+	}
+	return servers, true
+}
+
+// serverConfigForRouting returns the effective registry entry for serverID for a hot
+// routing path (Enabled/RemoteID checks): the cached snapshot when available, falling
+// back to a fresh KV read via serverByID only when the cache has not been built yet or
+// does not (yet) contain serverID. This keeps steady-state routing off KV entirely while
+// never being less correct than a direct serverByID call would have been.
+func (p *Plugin) serverConfigForRouting(serverID string) (kvstore.ServerConfig, error) {
+	if server, ok := p.cachedServerConfig(serverID); ok {
+		return server, nil
+	}
+	return p.serverByID(serverID)
+}
+
 // remoteIDForServer returns the shared-channels remote ID for serverID, or "" if it is
 // not registered or has no remote yet.
 func (p *Plugin) remoteIDForServer(serverID string) string {
-	server, err := p.serverByID(serverID)
+	server, err := p.serverConfigForRouting(serverID)
 	if err != nil {
 		return ""
 	}
@@ -312,7 +355,7 @@ func (p *Plugin) doRegisterPluginForSharedChannels(siteURL string) (string, erro
 
 	opts := model.RegisterPluginOpts{
 		Displayname:  "Matrix_Bridge",
-		PluginID:     pluginID,
+		PluginID:     manifest.Id,
 		CreatorID:    creatorID,
 		AutoShareDMs: false,
 		AutoInvited:  false,
@@ -576,7 +619,7 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 		return "", false
 	}
 
-	server, err := p.serverByID(serverID)
+	server, err := p.serverConfigForRouting(serverID)
 	if err != nil {
 		p.logger.LogWarn("SyncMsg resolved to a server no longer in the registry; skipping", "server_id", serverID, "error", err)
 		return "", false
@@ -674,7 +717,7 @@ func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.Ch
 	}
 
 	for _, serverID := range kvstore.MappedServerIDs(mappings) {
-		server, err := p.serverByID(serverID)
+		server, err := p.serverConfigForRouting(serverID)
 		if err != nil {
 			p.logger.LogDebug("Skipping stale channel mapping for unregistered server", "server_id", serverID, "channel_id", channelMember.ChannelId)
 			continue
@@ -703,8 +746,7 @@ func (p *Plugin) UserHasJoinedChannel(_ *plugin.Context, channelMember *model.Ch
 			// Only re-invite a Matrix-originated user to the homeserver they actually
 			// came from - inviting them to a different mapped server's room would target
 			// a homeserver they have no Matrix identity on.
-			originServerID, ok := p.serverIDForRemoteID(user.GetRemoteID())
-			if !ok || originServerID != serverID {
+			if !p.userOriginatesFromServer(user, serverID) {
 				continue
 			}
 			if err := p.inviteRemoteUserToMatrixRoom(serverID, user, channelMember.ChannelId); err != nil {

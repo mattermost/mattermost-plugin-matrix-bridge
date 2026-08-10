@@ -51,44 +51,17 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 	suite.testChannelID = model.NewId()
 	suite.testRoomID = suite.matrixContainer.CreateRoom(suite.T(), generateUniqueRoomName("Loop Prevention Test Room"))
 
-	// Create plugin instance
-	suite.plugin = &Plugin{}
-	suite.plugin.SetAPI(api)
-
-	// Initialize plugin components
-	suite.plugin.kvstore = NewMemoryKVStore()
-	suite.plugin.pendingFiles = NewPendingFileTracker()
-	suite.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
-	suite.plugin.configuration = &configuration{}
-
-	// Initialize the logger (required before registering the test server)
-	suite.plugin.logger = &testLogger{t: suite.T()}
-
-	// Create Matrix client and register it as this test's single server
-	matrixClient := createMatrixClientWithTestLogger(
-		suite.T(),
-		suite.matrixContainer.ServerURL,
-		suite.matrixContainer.ASToken,
-		"",
-	)
-	matrixClient.SetServerDomain(suite.matrixContainer.ServerDomain)
-	suite.serverID, suite.remoteID = registerTestServer(suite.T(), suite.plugin, suite.matrixContainer.ServerURL, suite.matrixContainer.ServerDomain, matrixClient)
-
-	// Use a different prefix than the default to prove configurability
-	setTestServerUsernamePrefix(suite.T(), suite.plugin, suite.serverID, "testmatrix")
-
-	// Build bridges
-	suite.m2mx, suite.mx2m = suite.plugin.testBridges(suite.T(), suite.serverID)
-
-	// Set up test data in KV store
-	setupTestKVData(suite.T(), suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
-
-	// Initialize validation helper
-	suite.validator = matrixtest.NewEventValidation(
-		suite.T(),
-		suite.matrixContainer.ServerDomain,
-		suite.remoteID,
-	)
+	setup := setupSingleServerIntegrationTest(suite.T(), api, suite.matrixContainer, suite.testChannelID, suite.testRoomID,
+		func(plugin *Plugin, serverID string) {
+			// Use a different prefix than the default to prove configurability.
+			setTestServerUsernamePrefix(suite.T(), plugin, serverID, "testmatrix")
+		})
+	suite.plugin = setup.Plugin
+	suite.serverID = setup.ServerID
+	suite.remoteID = setup.RemoteID
+	suite.m2mx = setup.M2Mx
+	suite.mx2m = setup.Mx2M
+	suite.validator = setup.Validator
 
 	// Set up mock API expectations
 	suite.setupMockAPI(api)

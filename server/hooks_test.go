@@ -229,20 +229,13 @@ func TestUserHasJoinedChannelPerServerEnablement(t *testing.T) {
 	serverIDA, _ := registerTestServer(t, plugin, serverAStub.URL, "a.example.com", clientA)
 	serverIDB, _ := registerTestServer(t, plugin, serverBStub.URL, "b.example.com", clientB)
 
-	// Disable B by mutating the registry directly, NOT via SetServerEnabled - that would
-	// call refreshServersAndBroadcast -> initMatrixClients, which rebuilds matrixClients
-	// from the registry's own ASToken/ServerURL fields (empty here) and would silently
-	// replace clientA/clientB above with non-functional clients pointed at nothing.
-	servers, err := plugin.getServers()
-	require.NoError(t, err)
-	for i := range servers {
-		if servers[i].ServerID == serverIDB {
-			servers[i].Enabled = false
-		}
-	}
-	disabledData, err := kvstore.MarshalServersConfig(servers)
-	require.NoError(t, err)
-	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, disabledData))
+	// Disable B via setTestServerEnabled, NOT via SetServerEnabled - that would call
+	// refreshServersAndBroadcast -> initMatrixClients, which rebuilds matrixClients from
+	// the registry's own ASToken/ServerURL fields (empty here) and would silently replace
+	// clientA/clientB above with non-functional clients pointed at nothing.
+	// setTestServerEnabled updates both KV and the serverConfigs cache without touching
+	// matrixClients, matching what UserHasJoinedChannel's routing check now reads.
+	setTestServerEnabled(t, plugin, serverIDB, false)
 
 	userID := model.NewId()
 	joiner := &model.User{Id: userID, Username: "joiner"}
