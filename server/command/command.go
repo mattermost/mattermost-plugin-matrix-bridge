@@ -126,20 +126,20 @@ const (
 	matrixCommandUsage = "Usage: /matrix [test|create|map|unmap|list|status|migrate|server] ..."
 
 	// Subcommand descriptions for autocomplete
-	testCommandDesc    = "Test Matrix server connection and configuration"
-	createCommandDesc  = "Create a new Matrix room and map to current channel (uses channel name if room name not provided)"
+	testCommandDesc    = "Test Matrix server connection and configuration (System Admin only)"
+	createCommandDesc  = "Create a new Matrix room and map to current channel (uses channel name if room name not provided) (System Admin only)"
 	createCommandHint  = "[room_name] [publish=true|false]"
-	mapCommandDesc     = "Map current channel to Matrix room (prefer #alias:server.com)"
+	mapCommandDesc     = "Map current channel to Matrix room (prefer #alias:server.com) (System Admin only)"
 	mapCommandHint     = "[room_alias|room_id]"
-	unmapCommandDesc   = "Remove mapping between current channel and Matrix room, and uninvite plugin from shared channel"
+	unmapCommandDesc   = "Remove mapping between current channel and Matrix room, and uninvite plugin from shared channel (System Admin only)"
 	unmapCommandHint   = ""
-	listCommandDesc    = "List all channel-to-room mappings"
+	listCommandDesc    = "List all channel-to-room mappings (System Admin only)"
 	statusCommandDesc  = "Show bridge status for every configured Matrix server"
-	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings"
+	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings (System Admin only)"
 	serverCommandDesc  = "Manage Matrix homeserver registrations (System Admin only)"
 	serverCommandHint  = "[subcommand]"
 	serverCommandUsage = "Usage: /matrix server [list|add|remove|map|unmap|registration|status|enable|disable] ..."
-	adminRequiredError = "❌ You must be a System Admin to manage Matrix servers."
+	adminRequiredError = "❌ You must be a System Admin to use Matrix bridge commands."
 
 	// Map command usage and validation
 	mapCommandUsage     = "Usage: /matrix map [room_alias|room_id]\nExample: /matrix map #test-sync:synapse-mydomain.com"
@@ -193,23 +193,38 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	pluginAPI := plugin.GetPluginAPI()
 
 	matrixData := model.NewAutocompleteData(matrixCommandTrigger, "[subcommand]", "Matrix bridge commands")
-	matrixData.AddCommand(model.NewAutocompleteData("test", "", testCommandDesc))
+
+	testCmd := model.NewAutocompleteData("test", "", testCommandDesc)
+	testCmd.RoleID = model.SystemAdminRoleId
+	matrixData.AddCommand(testCmd)
 
 	createCmd := model.NewAutocompleteData("create", createCommandHint, createCommandDesc)
 	createCmd.AddTextArgument("Optional room name (defaults to channel name)", "[room_name]", "")
 	createCmd.AddTextArgument("Optional publish flag", "[publish=true|false]", "")
+	createCmd.RoleID = model.SystemAdminRoleId
 	matrixData.AddCommand(createCmd)
 
 	mapCmd := model.NewAutocompleteData("map", mapCommandHint, mapCommandDesc)
 	mapCmd.AddTextArgument("Matrix room alias or room ID", "[room_alias|room_id]", "")
+	mapCmd.RoleID = model.SystemAdminRoleId
 	matrixData.AddCommand(mapCmd)
 
-	matrixData.AddCommand(model.NewAutocompleteData("unmap", unmapCommandHint, unmapCommandDesc))
-	matrixData.AddCommand(model.NewAutocompleteData("list", "", listCommandDesc))
+	unmapCmd := model.NewAutocompleteData("unmap", unmapCommandHint, unmapCommandDesc)
+	unmapCmd.RoleID = model.SystemAdminRoleId
+	matrixData.AddCommand(unmapCmd)
+
+	listCmd := model.NewAutocompleteData("list", "", listCommandDesc)
+	listCmd.RoleID = model.SystemAdminRoleId
+	matrixData.AddCommand(listCmd)
+
 	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
-	matrixData.AddCommand(model.NewAutocompleteData("migrate", "", migrateCommandDesc))
+
+	migrateCmd := model.NewAutocompleteData("migrate", "", migrateCommandDesc)
+	migrateCmd.RoleID = model.SystemAdminRoleId
+	matrixData.AddCommand(migrateCmd)
 
 	serverCmd := model.NewAutocompleteData("server", serverCommandHint, serverCommandDesc)
+	serverCmd.RoleID = model.SystemAdminRoleId
 	serverCmd.AddCommand(model.NewAutocompleteData("list", "", "List every registered Matrix server"))
 	addCmd := model.NewAutocompleteData("add", "<server_url> <as_token> <hs_token> [username_prefix]", "Register a new Matrix homeserver")
 	addCmd.AddTextArgument("Homeserver base URL", "<server_url>", "")
@@ -1178,6 +1193,19 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 	}
 
 	subcommand := fields[1]
+
+	// Every subcommand except status is System Admin only (see README): test/create/map/
+	// unmap/list/migrate mutate state or leak server details, and an unrecognized
+	// subcommand shouldn't hand a non-admin the subcommand list either. Gating here in
+	// the dispatcher - rather than in each leaf handler - keeps this a single choke
+	// point and lets executeServerGroup's own internal check stay as harmless,
+	// non-duplicated defense in depth for the "server" branch.
+	if subcommand != "status" {
+		if resp := c.requireSystemAdmin(args.UserId); resp != nil {
+			return resp
+		}
+	}
+
 	switch subcommand {
 	case "test":
 		serverID, errResp := c.resolveSoleServerID()

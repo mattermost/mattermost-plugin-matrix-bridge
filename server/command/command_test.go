@@ -410,6 +410,66 @@ func TestExecuteMigrateCommandRefusesWithMultipleServers(t *testing.T) {
 	assert.Contains(t, resp.Text, "refuses to run")
 }
 
+// TestExecuteMatrixCommandAdminGate exercises the dispatcher-level admin gate added in
+// executeMatrixCommand: every subcommand except "status" (including an unrecognized
+// one) must be rejected for a non-admin caller before any handler logic runs.
+func TestExecuteMatrixCommandAdminGate(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"test", "/matrix test"},
+		{"create", "/matrix create"},
+		{"map", "/matrix map #room:server.com"},
+		{"unmap", "/matrix unmap"},
+		{"list", "/matrix list"},
+		{"migrate", "/matrix migrate"},
+		{"server", "/matrix server list"},
+		{"unknown subcommand", "/matrix bogus"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, api := newTestHandler(t)
+			userID := model.NewId()
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(false)
+
+			resp := h.executeMatrixCommand(&model.CommandArgs{UserId: userID, Command: tt.command})
+			assert.Contains(t, resp.Text, "System Admin")
+			// Exactly one permission check, and nothing beyond it: if the guard didn't
+			// short-circuit before the leaf handler, that handler would go on to call
+			// other plugintest.API methods, which panic here because they have no
+			// stubbed expectations.
+			api.AssertNumberOfCalls(t, "HasPermissionTo", 1)
+		})
+	}
+}
+
+// TestExecuteMatrixCommandStatusOpenToNonAdmin verifies /matrix status bypasses the
+// admin gate entirely. plugintest.API panics on any unstubbed call, so the absence of a
+// HasPermissionTo stub here proves the dispatcher never calls it for "status".
+func TestExecuteMatrixCommandStatusOpenToNonAdmin(t *testing.T) {
+	serverA := kvstore.ServerConfig{ServerID: "serverA", ServerName: "a.example.com", ServerURL: "https://a.example.com", Enabled: true}
+	h, _, _ := newTestHandler(t, serverA)
+
+	resp := h.executeMatrixCommand(&model.CommandArgs{UserId: model.NewId(), Command: "/matrix status"})
+	assert.NotContains(t, resp.Text, "System Admin")
+	assert.Contains(t, resp.Text, "Matrix Bridge Status")
+}
+
+// TestExecuteMatrixCommandAdminPassesGate confirms an admin caller clears the gate and
+// reaches the real subcommand handler (as opposed to getting the admin-required
+// response).
+func TestExecuteMatrixCommandAdminPassesGate(t *testing.T) {
+	h, _, api := newTestHandler(t)
+	userID := model.NewId()
+	api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+	resp := h.executeMatrixCommand(&model.CommandArgs{UserId: userID, Command: "/matrix list"})
+	assert.NotContains(t, resp.Text, "System Admin")
+	assert.Contains(t, resp.Text, "No channel mappings found")
+}
+
 func TestSanitizeShareName(t *testing.T) {
 	tests := []struct {
 		name     string
