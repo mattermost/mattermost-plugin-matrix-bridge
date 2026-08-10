@@ -202,10 +202,13 @@ func (p *Plugin) processMatrixEvent(serverID string, event MatrixEvent) error {
 		// Only attempt DM creation for room membership events or messages
 		if event.Type == "m.room.member" || event.Type == "m.room.message" {
 			// Check if this is a Matrix-initiated DM that we should bridge
+			// "Not a DM we should bridge" is signalled by ("", nil), so a non-nil error
+			// here is a genuine failure - propagate it instead of acknowledging the
+			// transaction. Swallowing it would return 200 to the homeserver, which then
+			// never retries, and the DM would be lost for good.
 			newChannelID, err := p.handleMatrixInitiatedDM(serverID, event)
 			if err != nil {
-				p.logger.LogWarn("Failed to handle Matrix-initiated DM", "room_id", event.RoomID, "server_id", serverID, "error", err)
-				return nil // Don't error - just skip processing
+				return errors.Wrap(err, "failed to handle Matrix-initiated DM")
 			}
 			if newChannelID != "" {
 				channelID = newChannelID
@@ -220,8 +223,14 @@ func (p *Plugin) processMatrixEvent(serverID string, event MatrixEvent) error {
 		}
 	}
 
-	// Skip events from our own ghost users to prevent loops
-	if p.isGhostUser(serverID, event.Sender) {
+	// Skip events from our own ghost users to prevent loops. A failure to determine
+	// ghost status must abort rather than default to "not a ghost" - that default risks
+	// re-importing our own ghost-user events back into Mattermost.
+	isGhost, err := p.isGhostUser(serverID, event.Sender)
+	if err != nil {
+		return errors.Wrap(err, "failed to determine if event sender is a ghost user")
+	}
+	if isGhost {
 		p.logger.LogDebug("Ignoring event from ghost user", "sender", event.Sender, "event_type", event.Type, "room_id", event.RoomID, "server_id", serverID)
 		return nil
 	}
@@ -254,7 +263,14 @@ func (p *Plugin) getChannelIDFromMatrixRoom(serverID, roomID string) (string, er
 	// First check KV store mapping (trusted source): room_mapping_<serverID>_<roomID> -> channelID
 	roomMappingKey := kvstore.BuildRoomMappingKey(serverID, roomID)
 	channelIDBytes, err := p.kvstore.Get(roomMappingKey)
-	if err == nil && len(channelIDBytes) > 0 {
+	if err != nil {
+		// A genuine read failure, not "no mapping" - propagate rather than falling
+		// through to the room-state fallback and ("", nil). Swallowing this would make
+		// processMatrixEvent treat the room as unmapped and return 200 to the
+		// homeserver, which then never retries and the event is lost for good.
+		return "", errors.Wrap(err, "failed to read room mapping")
+	}
+	if len(channelIDBytes) > 0 {
 		channelID := string(channelIDBytes)
 		p.logger.LogDebug("Found channel ID in KV store", "room_id", roomID, "server_id", serverID, "channel_id", channelID)
 		return channelID, nil
@@ -278,19 +294,25 @@ func (p *Plugin) getChannelIDFromMatrixRoom(serverID, roomID string) (string, er
 // The domain is resolved from the registry entry's ServerName, which is guaranteed
 // non-empty and unique (§3.1.2) - there is deliberately no URL-host fallback, since one
 // would only ever mask a bug: ghosts are created with the Matrix server name, which
-// differs from the connection host under .well-known delegation and in tests.
-func (p *Plugin) isGhostUser(serverID, userID string) bool {
+// differs from the connection host under .well-known delegation and in tests. A non-nil
+// error means the server domain could not be resolved at all - callers must treat this
+// as a failure rather than as "not a ghost user": silently returning false here can
+// cause the bridge to re-import its own ghost-user events (loops) or to skip valid DM
+// creation.
+func (p *Plugin) isGhostUser(serverID, userID string) (bool, error) {
 	serverDomain, err := p.serverDomainForID(serverID)
-	if err != nil || serverDomain == "" {
-		p.logger.LogDebug("isGhostUser: could not resolve server domain", "server_id", serverID, "user_id", userID, "error", err)
-		return false
+	if err != nil {
+		return false, err
+	}
+	if serverDomain == "" {
+		return false, errors.Errorf("empty server domain for server %s", serverID)
 	}
 
 	// Ghost users follow the pattern: @_mattermost_<mattermost_user_id>:<server_domain>
 	ghostUserPrefix := "@_mattermost_"
 	ghostUserSuffix := fmt.Sprintf(":%s", serverDomain)
 
-	return strings.HasPrefix(userID, ghostUserPrefix) && strings.HasSuffix(userID, ghostUserSuffix)
+	return strings.HasPrefix(userID, ghostUserPrefix) && strings.HasSuffix(userID, ghostUserSuffix), nil
 }
 
 // handleMatrixInitiatedDM checks if an unmapped Matrix room on serverID is a potential
@@ -333,13 +355,24 @@ func (p *Plugin) handleMatrixMemberDM(serverID string, event MatrixEvent) (strin
 
 	p.logger.LogDebug("Processing member event", "room_id", event.RoomID, "server_id", serverID, "membership", membership, "target_user", targetUserID, "acting_user", actingUserID)
 
-	// Check if either user is one of our ghost users
+	// Check if either user is one of our ghost users. A failure to determine ghost
+	// status must abort rather than default to "not a ghost" - that default falls
+	// through to "neither user is a ghost user" below and skips valid DM creation.
+	targetIsGhost, err := p.isGhostUser(serverID, targetUserID)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to determine if target user is a ghost user")
+	}
+	actingIsGhost, err := p.isGhostUser(serverID, actingUserID)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to determine if acting user is a ghost user")
+	}
+
 	var ghostUserID, matrixUserID string
 	switch {
-	case p.isGhostUser(serverID, targetUserID):
+	case targetIsGhost:
 		ghostUserID = targetUserID
 		matrixUserID = actingUserID
-	case p.isGhostUser(serverID, actingUserID):
+	case actingIsGhost:
 		ghostUserID = actingUserID
 		matrixUserID = targetUserID
 	default:

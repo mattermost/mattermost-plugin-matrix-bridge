@@ -212,7 +212,10 @@ func (p *Plugin) deleteFileFromMatrix(serverID string, fi *model.FileInfo, post 
 	}
 
 	// Get Matrix event ID from post properties - this is the message the file was attached to
-	propertyKey := bridge.matrixEventIDPropertyKey()
+	propertyKey, err := bridge.matrixEventIDPropertyKey()
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix event ID property key for file deletion")
+	}
 
 	var postEventID string
 	if post.Props != nil {
@@ -261,11 +264,12 @@ func (p *Plugin) inviteRemoteUserToMatrixRoom(serverID string, user *model.User,
 		return err
 	}
 
-	// Check if this channel is mapped to a Matrix room on this server
+	// Check if this channel is mapped to a Matrix room on this server. A read error here
+	// is a genuine failure, not "unbridged channel" - propagate it, consistent with the
+	// other GetMatrixRoomID call sites in this file.
 	matrixRoomID, err := bridge.GetMatrixRoomID(channelID)
 	if err != nil {
-		p.logger.LogDebug("Channel not mapped to Matrix room, skipping remote user invite", "channel_id", channelID, "user_id", user.Id, "server_id", serverID)
-		return nil // Not an error - channel might not be bridged
+		return errors.Wrap(err, "failed to get Matrix room identifier for remote user invite")
 	}
 
 	if matrixRoomID == "" {

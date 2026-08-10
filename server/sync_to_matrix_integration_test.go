@@ -255,8 +255,10 @@ func (suite *MatrixSyncTestSuite) TestThreadedMessage() {
 	api.On("GetPost", parentPost.Id).Return(parentPost, nil)
 
 	// Mock the parent post having Matrix event ID property
+	propertyKey, err := suite.m2mx.matrixEventIDPropertyKey()
+	require.NoError(suite.T(), err)
 	parentPost.Props = map[string]any{
-		suite.m2mx.matrixEventIDPropertyKey(): parentEventID,
+		propertyKey: parentEventID,
 	}
 
 	// Sync reply post
@@ -303,8 +305,10 @@ func (suite *MatrixSyncTestSuite) TestMessageEdit() {
 	// The first sync would have updated the post with Matrix event ID and stored UpdateAt in tracker
 	// We need to simulate this by updating our original post to match what would happen
 	// Note: extractServerDomain() extracts "localhost" from the server URL, not the server domain
+	propertyKey, err := suite.m2mx.matrixEventIDPropertyKey()
+	require.NoError(suite.T(), err)
 	originalPost.Props = map[string]any{
-		suite.m2mx.matrixEventIDPropertyKey(): originalEventID,
+		propertyKey: originalEventID,
 	}
 
 	// Wait a bit to ensure different timestamp
@@ -375,8 +379,10 @@ func (suite *MatrixSyncTestSuite) TestReactionSync() {
 	eventID := messageEvent.EventID
 
 	// Set Matrix event ID in post properties
+	propertyKey, err := suite.m2mx.matrixEventIDPropertyKey()
+	require.NoError(suite.T(), err)
 	post.Props = map[string]any{
-		suite.m2mx.matrixEventIDPropertyKey(): eventID,
+		propertyKey: eventID,
 	}
 
 	// Mock API for reaction

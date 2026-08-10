@@ -306,7 +306,10 @@ func (b *MattermostToMatrixBridge) SyncPostToMatrix(post *model.Post, channelID 
 	}
 
 	// Check if this post already has a Matrix event ID (indicating it's an edit)
-	propertyKey := b.matrixEventIDPropertyKey()
+	propertyKey, err := b.matrixEventIDPropertyKey()
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix event ID property key")
+	}
 
 	var existingEventID string
 	if post.Props != nil {
@@ -607,7 +610,10 @@ func (b *MattermostToMatrixBridge) deletePostFromMatrix(post *model.Post, channe
 	}
 
 	// Get Matrix event ID from post properties
-	propertyKey := b.matrixEventIDPropertyKey()
+	propertyKey, err := b.matrixEventIDPropertyKey()
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix event ID property key for post deletion")
+	}
 
 	var matrixEventID string
 	if post.Props != nil {
@@ -688,7 +694,10 @@ func (b *MattermostToMatrixBridge) addReactionToMatrix(reaction *model.Reaction,
 	}
 
 	// Get Matrix event ID from post properties
-	propertyKey := b.matrixEventIDPropertyKey()
+	propertyKey, err := b.matrixEventIDPropertyKey()
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix event ID property key for reaction")
+	}
 
 	var matrixEventID string
 	if post.Props != nil {
@@ -765,7 +774,10 @@ func (b *MattermostToMatrixBridge) removeReactionFromMatrix(reaction *model.Reac
 	}
 
 	// Get Matrix event ID from post properties
-	propertyKey := b.matrixEventIDPropertyKey()
+	propertyKey, err := b.matrixEventIDPropertyKey()
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix event ID property key for reaction removal")
+	}
 
 	var matrixEventID string
 	if post.Props != nil {
@@ -1207,7 +1219,10 @@ func (b *MattermostToMatrixBridge) getCurrentMatrixFileAttachments(matrixRoomID,
 func (b *MattermostToMatrixBridge) getOrCreateDMRoom(channelID string, userIDs []string, initiatingUserID string) (string, error) {
 	// First check if we already have a room mapping (unified for all channels)
 	existingRoomID, err := b.GetMatrixRoomID(channelID)
-	if err == nil && existingRoomID != "" {
+	if err != nil {
+		return "", errors.Wrap(err, "failed to get existing Matrix room mapping")
+	}
+	if existingRoomID != "" {
 		b.logger.LogDebug("Found existing DM room mapping", "channel_id", channelID, "matrix_room_id", existingRoomID)
 		return existingRoomID, nil
 	}

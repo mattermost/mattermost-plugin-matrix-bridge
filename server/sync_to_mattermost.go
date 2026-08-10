@@ -144,7 +144,10 @@ func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEve
 	}
 
 	// Store Matrix event ID in post properties for reaction mapping and edit tracking
-	propertyKey := b.matrixEventIDPropertyKey()
+	propertyKey, err := b.matrixEventIDPropertyKey()
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix event ID property key")
+	}
 	post.Props[propertyKey] = event.EventID
 	post.Props["from_matrix"] = true
 
@@ -226,6 +229,13 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 		return errors.Wrap(err, "failed to get or create Mattermost user for file")
 	}
 
+	// Resolve the event ID property key before uploading: failing after the upload would
+	// leave an orphaned file in Mattermost that no post ever references.
+	propertyKey, err := b.matrixEventIDPropertyKey()
+	if err != nil {
+		return errors.Wrap(err, "failed to get Matrix event ID property key for file")
+	}
+
 	// Download the file from Matrix
 	fileData, err := b.downloadMatrixFile(url)
 	if err != nil {
@@ -280,7 +290,7 @@ func (b *MatrixToMattermostBridge) syncMatrixFileToMattermost(event MatrixEvent,
 	}
 
 	// Store Matrix event ID in post properties for reaction mapping and edit tracking
-	propertyKey := b.matrixEventIDPropertyKey()
+	// (propertyKey was resolved before the upload above).
 	post.Props[propertyKey] = event.EventID
 	post.Props["from_matrix"] = true
 
@@ -383,11 +393,13 @@ func (b *MatrixToMattermostBridge) syncMatrixRedactionToMattermost(event MatrixE
 		return errors.New("redaction event missing redacts field")
 	}
 
-	// Get the Matrix room ID to fetch the redacted event details
+	// Get the Matrix room ID to fetch the redacted event details. A read error here is a
+	// genuine failure, not "unmapped channel" - propagate it rather than returning nil,
+	// since returning nil would tell the caller this redaction was handled when it
+	// silently wasn't.
 	matrixRoomIdentifier, err := b.GetMatrixRoomID(channelID)
 	if err != nil {
-		b.logger.LogWarn("Failed to get Matrix room identifier for redaction", "error", err, "channel_id", channelID)
-		return nil
+		return errors.Wrap(err, "failed to get Matrix room identifier for redaction")
 	}
 
 	if matrixRoomIdentifier == "" {

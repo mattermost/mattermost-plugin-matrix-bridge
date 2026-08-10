@@ -78,10 +78,12 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 // unmapped and when it is mapped only to another server - that is not an error. A
 // corrupt stored value is.
 func (s *BridgeUtils) GetMatrixRoomID(channelID string) (string, error) {
+	// The KV store returns (nil, nil) for a missing key - never an error - so any
+	// non-nil error here is a genuine read failure, not "unmapped channel", and must be
+	// propagated rather than papered over with an empty result.
 	data, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
 	if err != nil {
-		// KV store error (typically key not found) - unmapped channels are expected
-		return "", nil
+		return "", errors.Wrap(err, "failed to read channel mapping")
 	}
 
 	mappings, err := kvstore.ParseChannelServerMappings(data)
@@ -97,8 +99,15 @@ func (s *BridgeUtils) GetMatrixRoomID(channelID string) (string, error) {
 // enforced consistently with the /matrix map and /matrix server map command paths.
 func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier string) error {
 	// Capture the previous room mapped to this server (if any) so its now-stale reverse
-	// key can be cleaned up when this call re-maps the same server to a new room.
-	previousRoomID, _ := s.GetMatrixRoomID(channelID)
+	// key can be cleaned up when this call re-maps the same server to a new room. Abort
+	// on a read failure rather than remapping blind: the cleanup below would be skipped,
+	// leaving room_mapping_<serverID>_<oldRoomID> -> channelID in place, and
+	// getChannelIDFromMatrixRoom would then keep routing inbound events from the old
+	// room into a channel that is now bridged to a different one.
+	previousRoomID, err := s.GetMatrixRoomID(channelID)
+	if err != nil {
+		return errors.Wrap(err, "failed to read existing channel room mapping")
+	}
 
 	// Always resolve to room ID for consistent forward mapping storage
 	roomID, err := s.matrixClient.ResolveRoomAlias(matrixRoomIdentifier)
@@ -188,20 +197,28 @@ func (s *BridgeUtils) serverDomain() string {
 // value that keys the matrix_event_id_<EventDomain> post property. Always read from the
 // stored registry field, never recomputed: it may legitimately differ from a live
 // derivation of ServerName/endpoint (see §3.6), and recomputing would make every
-// previously-written property key unreachable.
-func (s *BridgeUtils) eventDomain() string {
+// previously-written property key unreachable. A non-nil error means the server config
+// could not be read at all - callers must treat this as a failure rather than falling
+// back to "", since the degenerate key that would produce is shared by every server and
+// would make the correct per-server event ID unreachable, and could pick up another
+// server's value.
+func (s *BridgeUtils) eventDomain() (string, error) {
 	server, err := s.serverConfig()
 	if err != nil {
-		s.logger.LogWarn("Failed to read server config for event domain lookup", "server_id", s.serverID, "error", err)
-		return ""
+		return "", err
 	}
-	return server.EventDomain
+	return server.EventDomain, nil
 }
 
 // matrixEventIDPropertyKey returns the post property key under which this bridge's
-// server stores the Matrix event ID for a synced post.
-func (s *BridgeUtils) matrixEventIDPropertyKey() string {
-	return "matrix_event_id_" + s.eventDomain()
+// server stores the Matrix event ID for a synced post. A non-nil error means the
+// server's EventDomain could not be read - see eventDomain.
+func (s *BridgeUtils) matrixEventIDPropertyKey() (string, error) {
+	domain, err := s.eventDomain()
+	if err != nil {
+		return "", err
+	}
+	return "matrix_event_id_" + domain, nil
 }
 
 func (s *BridgeUtils) extractMattermostMetadata(event MatrixEvent) (postID string, remoteID string) {

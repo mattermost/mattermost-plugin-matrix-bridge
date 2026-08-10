@@ -257,10 +257,21 @@ func (suite *MultiServerIntegrationTestSuite) TestInboundRoutingIsolatedPerServe
 	mattermostUserID := model.NewId()
 	ghostOnA := "@_mattermost_" + mattermostUserID + ":" + suite.containerA.ServerDomain
 	ghostOnB := "@_mattermost_" + mattermostUserID + ":" + suite.containerB.ServerDomain
-	assert.True(t, ts.plugin.isGhostUser(ts.serverIDA, ghostOnA), "server A must recognize its own ghost-shaped user ID")
-	assert.False(t, ts.plugin.isGhostUser(ts.serverIDA, ghostOnB), "server A must not recognize a ghost-shaped user ID for server B's domain")
-	assert.True(t, ts.plugin.isGhostUser(ts.serverIDB, ghostOnB), "server B must recognize its own ghost-shaped user ID")
-	assert.False(t, ts.plugin.isGhostUser(ts.serverIDB, ghostOnA), "server B must not recognize a ghost-shaped user ID for server A's domain")
+	isGhostAOnA, err := ts.plugin.isGhostUser(ts.serverIDA, ghostOnA)
+	require.NoError(t, err)
+	assert.True(t, isGhostAOnA, "server A must recognize its own ghost-shaped user ID")
+
+	isGhostBOnA, err := ts.plugin.isGhostUser(ts.serverIDA, ghostOnB)
+	require.NoError(t, err)
+	assert.False(t, isGhostBOnA, "server A must not recognize a ghost-shaped user ID for server B's domain")
+
+	isGhostBOnB, err := ts.plugin.isGhostUser(ts.serverIDB, ghostOnB)
+	require.NoError(t, err)
+	assert.True(t, isGhostBOnB, "server B must recognize its own ghost-shaped user ID")
+
+	isGhostAOnB, err := ts.plugin.isGhostUser(ts.serverIDB, ghostOnA)
+	require.NoError(t, err)
+	assert.False(t, isGhostAOnB, "server B must not recognize a ghost-shaped user ID for server A's domain")
 }
 
 // TestOutboundSyncIsolatedPerServer covers scenario 2: a Mattermost post synced to a
