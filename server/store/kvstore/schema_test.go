@@ -211,6 +211,65 @@ func TestRemoveServerFromChannelMapping(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, remaining)
 	})
+
+	t.Run("callback output is not accumulated across a CAS retry", func(t *testing.T) {
+		kv := &flakyKV{fakeKV: newFakeKV()}
+
+		// Stale snapshot the first (discarded) attempt sees: mapped only to serverA.
+		staleData, err := BuildSingleChannelMapping("serverA", "!room:example.com")
+		require.NoError(t, err)
+		kv.firstOld = staleData
+
+		// Value a concurrent writer actually landed after that stale read: serverA and
+		// serverC. The retry must compute against this, not merge with the discarded
+		// first attempt's result.
+		currentData, err := MarshalChannelServerMappings([]ChannelServerMapping{
+			{ServerID: "serverA", RoomID: "!room:example.com"},
+			{ServerID: "serverC", RoomID: "!roomC:example.com"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, kv.Set("channel_mapping_c1", currentData))
+
+		remaining, err := RemoveServerFromChannelMapping(kv, "channel_mapping_c1", "serverA")
+		require.NoError(t, err)
+		require.Len(t, remaining, 1, "must reflect only the retry's input, not both invocations combined")
+		assert.Equal(t, "serverC", remaining[0].ServerID)
+		assert.Equal(t, 2, kv.valueFuncCalls, "sanity check: the callback must actually have run twice")
+
+		persisted, err := kv.Get("channel_mapping_c1")
+		require.NoError(t, err)
+		reparsed, err := ParseChannelServerMappings(persisted)
+		require.NoError(t, err)
+		assert.Equal(t, remaining, reparsed)
+	})
+}
+
+// flakyKV wraps fakeKV to simulate one CAS retry: the first invocation of valueFunc
+// runs against a stale snapshot and its result is discarded, exactly as a real
+// SetAtomicWithRetries would do when a concurrent writer's Set lands first. This exists
+// to catch a regression where a callback's output variable is appended to across
+// invocations instead of reassigned fresh each time it runs.
+type flakyKV struct {
+	*fakeKV
+
+	valueFuncCalls int
+	firstOld       []byte
+}
+
+func (f *flakyKV) SetAtomicWithRetries(key string, valueFunc func([]byte) ([]byte, error)) error {
+	f.valueFuncCalls++
+	if _, err := valueFunc(f.firstOld); err != nil {
+		return err
+	}
+	// Discard the first attempt's result and retry against the real current value,
+	// like a genuine CAS conflict would force.
+
+	f.valueFuncCalls++
+	newValue, err := valueFunc(f.data[key])
+	if err != nil {
+		return err
+	}
+	return f.Set(key, newValue)
 }
 
 func TestIsPlausibleRoomIdentifier(t *testing.T) {

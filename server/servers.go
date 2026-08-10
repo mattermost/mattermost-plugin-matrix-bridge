@@ -65,15 +65,17 @@ func normalizeServerEndpoint(rawURL string) (string, error) {
 	}
 
 	port := parsed.Port()
-	if port == "" {
-		switch strings.ToLower(parsed.Scheme) {
-		case "https":
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		if port == "" {
 			port = "443"
-		case "http":
-			port = "80"
-		default:
-			return "", errors.Errorf("server URL must use http:// or https:// (got scheme %q)", parsed.Scheme)
 		}
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+	default:
+		return "", errors.Errorf("server URL must use http:// or https:// (got scheme %q)", parsed.Scheme)
 	}
 
 	return host + ":" + port, nil

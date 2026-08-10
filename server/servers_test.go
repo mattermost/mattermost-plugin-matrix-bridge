@@ -34,6 +34,7 @@ func TestNormalizeServerEndpoint(t *testing.T) {
 		{name: "empty URL errors", url: "", wantErr: true},
 		{name: "missing host errors", url: "https://", wantErr: true},
 		{name: "unsupported scheme errors", url: "ftp://example.com", wantErr: true},
+		{name: "unsupported scheme with explicit port still errors", url: "ftp://example.com:8448", wantErr: true},
 	}
 
 	for _, tt := range tests {

@@ -113,43 +113,39 @@ func UpsertChannelServerMapping(m []ChannelServerMapping, serverID, roomID strin
 }
 
 // RemoveServerFromChannelMapping removes serverID's entry (if any) from the mapping
-// stored under key, persisting the change. If the removal empties the list, the key
-// is deleted rather than storing an empty array.
+// stored under key, persisting the change via compare-and-set so it cannot lose a
+// concurrent writer's update (e.g. SetChannelMapping, which targets the same key). If
+// the removal empties the list, the stored value is set to nil - which Mattermost's KV
+// store treats as key deletion - rather than storing an empty array.
 func RemoveServerFromChannelMapping(kv KVStore, key, serverID string) ([]ChannelServerMapping, error) {
-	// A missing key surfaces as (nil, nil) - see KVStore.Get - which ParseChannelServerMappings
-	// already turns into an empty mapping below. Any non-nil error here is a genuine read
-	// failure and must be propagated rather than treated as "already unmapped".
-	data, err := kv.Get(key)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read channel mapping")
-	}
+	// remaining is captured from inside the CAS callback below. The callback may run
+	// more than once on retry, so it must be reassigned (not appended to) on every
+	// invocation - otherwise a retry would leave stale data from an earlier attempt.
+	var remaining []ChannelServerMapping
 
-	mappings, err := ParseChannelServerMappings(data)
-	if err != nil {
-		return nil, err
-	}
-
-	remaining := make([]ChannelServerMapping, 0, len(mappings))
-	for _, entry := range mappings {
-		if entry.ServerID == serverID {
-			continue
+	err := kv.SetAtomicWithRetries(key, func(oldValue []byte) ([]byte, error) {
+		mappings, err := ParseChannelServerMappings(oldValue)
+		if err != nil {
+			return nil, err
 		}
-		remaining = append(remaining, entry)
-	}
 
-	if len(remaining) == 0 {
-		if err := kv.Delete(key); err != nil {
-			return nil, errors.Wrap(err, "failed to delete empty channel mapping")
+		remaining = make([]ChannelServerMapping, 0, len(mappings))
+		for _, entry := range mappings {
+			if entry.ServerID == serverID {
+				continue
+			}
+			remaining = append(remaining, entry)
 		}
-		return nil, nil
-	}
 
-	newData, err := MarshalChannelServerMappings(remaining)
+		if len(remaining) == 0 {
+			remaining = nil
+			return nil, nil
+		}
+
+		return MarshalChannelServerMappings(remaining)
+	})
 	if err != nil {
-		return nil, err
-	}
-	if err := kv.Set(key, newData); err != nil {
-		return nil, errors.Wrap(err, "failed to persist channel mapping after removal")
+		return nil, errors.Wrap(err, "failed to remove server from channel mapping")
 	}
 
 	return remaining, nil
