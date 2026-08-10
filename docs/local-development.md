@@ -42,7 +42,7 @@ Docker Compose.
 1. Start the services:
 
     ```bash
-    docker-compose up -d
+    docker compose up -d
     ```
 
 2. Create an admin user:
@@ -58,10 +58,10 @@ Docker Compose.
 Synapse is only a homeserver and has no built-in chat UI. The Docker Compose stack
 includes an [Element Web](https://element.io/) client for testing:
 
-1. Start the Element service (included in `docker-compose up -d`, or start it alone):
+1. Start the Element service (included in `docker compose up -d`, or start it alone):
 
     ```bash
-    docker-compose up -d element
+    docker compose up -d element
     ```
 
 2. Open `http://localhost:8880` in your browser.
@@ -115,7 +115,7 @@ stack is deliberately given its own hostname rather than just a different port.
 Bring everything up and create an admin user on the second server:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 docker compose exec synapse2 register_new_matrix_user -c /data/homeserver.yaml -u admin -p admin123 -a http://localhost:8008
 ```
 
@@ -175,11 +175,11 @@ Notes:
 ## Stopping the Services
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
 To completely reset (remove all data):
 
 ```bash
-docker-compose down -v
+docker compose down -v
 ```

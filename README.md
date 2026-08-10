@@ -29,7 +29,7 @@ A bidirectional bridge that connects Mattermost and Matrix, enabling real-time m
 Homeservers are managed entirely through `/matrix server` slash commands (System Admin
 only) - there is no System Console configuration for them:
 
-```
+```text
 /matrix server add https://matrix.example.com <as_token> <hs_token>
 ```
 
@@ -50,7 +50,7 @@ wrong).
 
 Use slash commands to bridge channels:
 
-```
+```text
 /matrix test                            # Test Matrix connection and configuration
 /matrix create "Room Name"              # Create new Matrix room
 /matrix map #room:matrix.example.com    # Map to existing room
@@ -129,7 +129,7 @@ only the registry entry goes away. The command prints the server's `server_id` a
 recovery key. To restore the server later - same room mappings, same ghost users, no
 re-mapping needed - re-add it with that ID:
 
-```
+```text
 /matrix server add https://matrix.example.com <as_token> <hs_token> --server-id <server_id>
 ```
 

@@ -872,8 +872,9 @@ finish with a commit following the conventional commits notation.
 ### 5.2 Integration tests (testcontainers + live Synapse)
 
 Keep the existing single-server suites green — they are the regression net proving the
-refactor changed no behaviour for one server. Set `DOCKER_HOST` to the OrbStack socket, or
-the testcontainers suites fail to start.
+refactor changed no behaviour for one server. If your Docker runtime doesn't expose the
+default socket (e.g. OrbStack on macOS), set `DOCKER_HOST` to its socket, or the
+testcontainers suites fail to start.
 
 Add multi-server suites against **two** independent homeservers with dynamically assigned
 ports and — this is a hard requirement, not a convention — **genuinely distinct, port-less
