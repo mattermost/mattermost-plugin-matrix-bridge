@@ -321,19 +321,19 @@ func TestExecuteServerGroupAdminGate(t *testing.T) {
 }
 
 func TestExecuteServerGroupAddRemoveList(t *testing.T) {
-	h, mp, api := newTestHandler(t)
-
 	userID := model.NewId()
-	api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
-
 	args := &model.CommandArgs{UserId: userID}
 
 	t.Run("add requires at least 3 positional args", func(t *testing.T) {
+		h, _, api := newTestHandler(t)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		resp := h.executeServerGroup(args, []string{"add", "https://matrix.example.com"})
 		assert.Contains(t, resp.Text, "Usage")
 	})
 
 	t.Run("add happy path registers a server", func(t *testing.T) {
+		h, mp, api := newTestHandler(t)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		resp := h.executeServerGroup(args, []string{"add", "https://matrix.example.com", "as-token", "hs-token"})
 		assert.Contains(t, resp.Text, "added")
 		assert.Len(t, mp.servers, 1)
@@ -348,11 +348,16 @@ func TestExecuteServerGroupAddRemoveList(t *testing.T) {
 	})
 
 	t.Run("list shows the registered server", func(t *testing.T) {
+		seeded := kvstore.ServerConfig{ServerID: "server-list-test", ServerName: "list.example.com", ServerURL: "https://list.example.com", Enabled: true}
+		h, mp, api := newTestHandler(t, seeded)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		resp := h.executeServerGroup(args, []string{"list"})
 		assert.Contains(t, resp.Text, mp.servers[0].ServerID)
 	})
 
 	t.Run("remove requires a server_id", func(t *testing.T) {
+		h, _, api := newTestHandler(t)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		resp := h.executeServerGroup(args, []string{"remove"})
 		assert.Contains(t, resp.Text, "Usage")
 	})
@@ -366,8 +371,11 @@ func TestExecuteServerGroupAddRemoveList(t *testing.T) {
 	})
 
 	t.Run("remove happy path prints the recovery key", func(t *testing.T) {
-		serverID := mp.servers[0].ServerID
+		seeded := kvstore.ServerConfig{ServerID: "server-remove-test", ServerName: "remove.example.com", ServerURL: "https://remove.example.com", Enabled: true}
+		h, mp, api := newTestHandler(t, seeded)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		mp.removeServerOK = true
+		serverID := mp.servers[0].ServerID
 		resp := h.executeServerGroup(args, []string{"remove", serverID})
 		assert.Contains(t, resp.Text, serverID)
 		assert.Contains(t, resp.Text, "--server-id")

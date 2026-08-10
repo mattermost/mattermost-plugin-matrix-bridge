@@ -164,6 +164,7 @@ func (suite *MultiServerIntegrationTestSuite) TestInboundRoutingIsolatedPerServe
 
 	logger, err := CreateTransactionLogger()
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = logger.Logr().Shutdown() })
 	ts.plugin.transactionLogger = logger
 
 	channelA := model.NewId()
@@ -375,6 +376,7 @@ func (suite *MultiServerIntegrationTestSuite) TestChannelMappingRejectsSecondSer
 	// (only the application service bot, from room creation) must be untouched.
 	membersB := suite.containerB.GetRoomMembers(t, roomB)
 	asBotB := suite.containerB.GetApplicationServiceBotUserID()
+	require.Len(t, membersB, 1, "server B's room must still contain exactly the AS bot")
 	for _, member := range membersB {
 		assert.Equal(t, asBotB, member.UserID, "no additional Matrix user should have joined server B's room as a result of the rejected mapping attempt")
 	}
@@ -484,5 +486,6 @@ func (suite *MultiServerIntegrationTestSuite) TestReAdoptionRoundTrip() {
 
 // TestMultiServerIntegrationTestSuite runs the multi-server integration suite.
 func TestMultiServerIntegrationTestSuite(t *testing.T) {
+	skipIfShort(t)
 	suite.Run(t, new(MultiServerIntegrationTestSuite))
 }

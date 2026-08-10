@@ -407,5 +407,6 @@ func (suite *PluginIntegrationTestSuite) testSyncChannelMembersToMatrixRoom() {
 
 // Test runner function
 func TestPluginIntegrationTestSuite(t *testing.T) {
+	skipIfShort(t)
 	suite.Run(t, new(PluginIntegrationTestSuite))
 }

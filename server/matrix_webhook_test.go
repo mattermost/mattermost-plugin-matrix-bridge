@@ -180,6 +180,7 @@ func newTestPluginForTransaction(t *testing.T) *Plugin {
 
 	logger, err := CreateTransactionLogger()
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = logger.Logr().Shutdown() })
 	plugin.transactionLogger = logger
 
 	api := plugin.API.(*plugintest.API)

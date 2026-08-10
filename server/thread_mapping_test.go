@@ -170,7 +170,7 @@ func (suite *ThreadMappingIntegrationTestSuite) SetupTest() {
 	_, suite.mx2m = suite.plugin.testBridges(suite.T(), suite.serverID)
 
 	// Set up test data in KV store
-	setupTestKVData(suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
+	setupTestKVData(suite.T(), suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
 	suite.validator = matrixtest.NewEventValidation(
@@ -313,5 +313,6 @@ func (suite *ThreadMappingIntegrationTestSuite) TestFileAttachmentThreadMapping(
 
 // Run the test suite
 func TestThreadMappingIntegration(t *testing.T) {
+	skipIfShort(t)
 	suite.Run(t, new(ThreadMappingIntegrationTestSuite))
 }

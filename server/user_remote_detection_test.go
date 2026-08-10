@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
@@ -80,7 +81,7 @@ func (suite *UserRemoteDetectionIntegrationTestSuite) SetupTest() {
 	suite.m2mx, suite.mx2m = suite.plugin.testBridges(suite.T(), suite.serverID)
 
 	// Set up test data in KV store
-	setupTestKVData(suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
+	setupTestKVData(suite.T(), suite.plugin.kvstore, suite.serverID, suite.testChannelID, suite.testRoomID)
 
 	// Initialize validation helper
 	suite.validator = matrixtest.NewEventValidation(
@@ -354,6 +355,7 @@ func extractUsernameFromMatrixID(matrixUserID string) string {
 
 // Run the test suite
 func TestUserRemoteDetectionIntegration(t *testing.T) {
+	skipIfShort(t)
 	suite.Run(t, new(UserRemoteDetectionIntegrationTestSuite))
 }
 
@@ -379,6 +381,23 @@ func TestDefaultUsernamePrefix(t *testing.T) {
 
 	t.Logf("✓ Default prefix: %s", DefaultMatrixUsernamePrefix)
 	t.Logf("✓ Custom prefix: %s", prefix)
+
+	// A registry read failure must be surfaced as an error, never silently treated as
+	// "no prefix configured" - see matrixUsernamePrefix's doc comment. This is the
+	// entire reason matrixUsernamePrefix/generateMattermostUsername return (string,
+	// error) instead of just a string.
+	plugin.kvstore = &erroringKVStore{
+		KVStore:     plugin.kvstore,
+		errOnGetKey: kvstore.KeyServersConfig,
+	}
+	m2mxErr, mx2mErr := plugin.testBridges(t, serverID)
+
+	_, err = m2mxErr.matrixUsernamePrefix()
+	require.Error(t, err, "matrixUsernamePrefix must return an error when the server registry can't be read")
+
+	username, err := mx2mErr.generateMattermostUsername("alice")
+	require.Error(t, err, "generateMattermostUsername must fail when the username prefix can't be read")
+	assert.Empty(t, username, "generateMattermostUsername must return an empty username on failure")
 }
 
 // TestBasicRemoteDetectionLogic tests the basic logic without requiring Matrix server

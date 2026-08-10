@@ -167,7 +167,7 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	setupBasicMocks(api, testUserID)
 
 	// Set up test data in KV store
-	setupTestKVData(plugin.kvstore, serverID, testChannelID, testRoomID)
+	setupTestKVData(t, plugin.kvstore, serverID, testChannelID, testRoomID)
 
 	return &TestSetup{
 		Plugin:      plugin,
@@ -309,12 +309,13 @@ func setupBasicMocks(api *plugintest.API, testUserID string) {
 }
 
 // setupTestKVData sets up initial test data in the KV store
-func setupTestKVData(kv kvstore.KVStore, serverID, testChannelID, testRoomID string) {
+func setupTestKVData(t *testing.T, kv kvstore.KVStore, serverID, testChannelID, testRoomID string) {
+	t.Helper()
+
 	// Set up channel mapping
 	data, err := kvstore.BuildSingleChannelMapping(serverID, testRoomID)
-	if err == nil {
-		_ = kv.Set(kvstore.BuildChannelMappingKey(testChannelID), data)
-	}
+	require.NoError(t, err)
+	require.NoError(t, kv.Set(kvstore.BuildChannelMappingKey(testChannelID), data))
 
 	// Ghost users and ghost rooms are intentionally not set up here
 	// to trigger creation during tests, which validates the creation logic
@@ -653,6 +654,17 @@ func TestMemoryKVStore(t *testing.T) {
 // generateUniqueRoomName creates a unique room name to avoid alias conflicts
 func generateUniqueRoomName(baseName string) string {
 	return fmt.Sprintf("%s %s", baseName, model.NewId()[:8])
+}
+
+// skipIfShort skips container-backed integration tests when running with
+// `go test -short`. CI runs `make test` without `-short`, so these suites
+// still execute there; we deliberately do NOT auto-detect Docker availability,
+// since that would let CI silently go green if Docker itself broke.
+func skipIfShort(t *testing.T) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping container-backed integration test in -short mode")
+	}
 }
 
 // TestMain provides global test setup and cleanup

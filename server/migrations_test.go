@@ -1,10 +1,16 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
@@ -261,25 +267,56 @@ func TestMigrateChannelMappings(t *testing.T) {
 	})
 
 	t.Run("MigrateChannelsWithAliasesAndWorkingClient", func(t *testing.T) {
+		const resolvedRoomID = "!resolved:matrix.org"
+
+		// A minimal stand-in Matrix homeserver that resolves any room alias lookup,
+		// so legacyMatrixClientForMigration gets a client that can actually succeed.
+		matrixServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, "Bearer legacy-as-token", r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"room_id": resolvedRoomID})
+		}))
+		defer matrixServer.Close()
+
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.logger = &testLogger{t: t}
 
+		// Override the default "no legacy configuration" expectation from
+		// setupPluginForTest so legacyMatrixClientForMigration builds a real client
+		// pointed at our stub server instead of returning nil.
+		api := plugin.API.(*plugintest.API)
+		clearMockExpectations(api)
+		api.On("LogDebug", mock.Anything, mock.Anything).Maybe()
+		api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+		api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+		api.On("LogWarn", mock.Anything).Maybe()
+		api.On("LogWarn", mock.Anything, mock.Anything).Maybe()
+		api.On("LoadPluginConfiguration", mock.Anything).Run(func(args mock.Arguments) {
+			dest := args.Get(0).(*legacyServerConfig)
+			dest.MatrixServerURL = matrixServer.URL
+			dest.MatrixASToken = "legacy-as-token"
+			dest.MatrixServerName = "matrix.org"
+		}).Return(nil)
+
 		// Add test channel mapping with alias
 		err := plugin.kvstore.Set("channel_mapping_channel123", []byte("#test:matrix.org"))
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		// Run channel migration - should not fail even if alias resolution fails
+		// Run channel migration with a working legacy Matrix client available
 		_, err = plugin.migrateChannelMappingsWithResults()
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Check that alias reverse mapping was created
 		aliasReverseBytes, err := plugin.kvstore.Get("room_mapping_#test:matrix.org")
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, "channel123", string(aliasReverseBytes))
 
-		// Room ID mapping may or may not exist depending on alias resolution success
-		// but migration should complete either way
+		// With a working legacy client, alias resolution succeeds, and the resolved
+		// room ID must also get its own mapping written.
+		roomIDMapping, err := plugin.kvstore.Get("room_mapping_" + resolvedRoomID)
+		require.NoError(t, err)
+		assert.Equal(t, "channel123", string(roomIDMapping))
 	})
 
 	t.Run("OverwriteIncorrectReverseMappings", func(t *testing.T) {

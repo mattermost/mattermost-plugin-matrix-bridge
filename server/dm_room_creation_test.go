@@ -405,5 +405,6 @@ func (suite *DMRoomCreationTestSuite) TestDMRoomCreationFallbackName() {
 
 // Run the test suite
 func TestDMRoomCreationSuite(t *testing.T) {
+	skipIfShort(t)
 	suite.Run(t, new(DMRoomCreationTestSuite))
 }

@@ -15,6 +15,8 @@ import (
 
 // TestMatrixMentionProcessing tests mention processing with real Matrix server
 func TestMatrixMentionProcessing(t *testing.T) {
+	skipIfShort(t)
+
 	// Start Matrix container
 	matrixContainer := matrixtest.StartMatrixContainer(t, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(t)
@@ -94,8 +96,9 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Mention Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			mappingData, _ := kvstore.BuildSingleChannelMapping(setup.ServerID, freshRoomID)
-			_ = setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData)
+			mappingData, err := kvstore.BuildSingleChannelMapping(setup.ServerID, freshRoomID)
+			require.NoError(t, err)
+			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData))
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
@@ -163,6 +166,8 @@ func TestMatrixMentionProcessing(t *testing.T) {
 
 // TestMatrixMentionEdgeCases tests mention processing edge cases
 func TestMatrixMentionEdgeCases(t *testing.T) {
+	skipIfShort(t)
+
 	// Start Matrix container
 	matrixContainer := matrixtest.StartMatrixContainer(t, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(t)
@@ -297,8 +302,9 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Edge Case Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			mappingData, _ := kvstore.BuildSingleChannelMapping(setup.ServerID, freshRoomID)
-			_ = setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData)
+			mappingData, err := kvstore.BuildSingleChannelMapping(setup.ServerID, freshRoomID)
+			require.NoError(t, err)
+			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData))
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)

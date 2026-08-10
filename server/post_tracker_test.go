@@ -209,7 +209,13 @@ func TestPendingFileTracker_IsolatesIdenticalPostIDsAcrossServers(t *testing.T) 
 		t.Fatalf("Expected server-a's files to contain only its own file, got %+v", filesA)
 	}
 
-	// GetFiles removes what it returns; server-b's files must be unaffected.
+	// GetFiles removes what it returns; a second read of server-a must now be empty.
+	filesAAgain := tracker.GetFiles("server-a", postID)
+	if len(filesAAgain) != 0 {
+		t.Fatalf("Expected server-a's files to have been removed by the prior GetFiles call, got %+v", filesAAgain)
+	}
+
+	// ...and server-b's files must be unaffected by server-a's removal.
 	filesB := tracker.GetFiles("server-b", postID)
 	if len(filesB) != 1 || filesB[0].MxcURI != "mxc://server-b/b" {
 		t.Fatalf("Expected server-b's files to contain only its own file, got %+v", filesB)
