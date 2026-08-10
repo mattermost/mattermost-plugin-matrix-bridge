@@ -100,8 +100,8 @@ Mattermost channel may be bridged to exactly one Matrix server at a time** - map
 channel that's already bridged to another server is rejected; unmap it first if you need
 to move it.
 
-Common commands (all require System Admin, except `/matrix status` which is open to
-everyone and never prints secrets):
+Common commands (all require System Admin, including `/matrix status` - it reports every
+registered homeserver's domain and health, and probes each one on every invocation):
 
 | Command                                                            | Behavior                                                                  |
 | -------------------------------------------------------------------- | -------------------------------------------------------------------------- |

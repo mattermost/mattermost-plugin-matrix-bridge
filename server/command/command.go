@@ -134,7 +134,7 @@ const (
 	unmapCommandDesc   = "Remove mapping between current channel and Matrix room, and uninvite plugin from shared channel (System Admin only)"
 	unmapCommandHint   = ""
 	listCommandDesc    = "List all channel-to-room mappings (System Admin only)"
-	statusCommandDesc  = "Show bridge status for every configured Matrix server"
+	statusCommandDesc  = "Show bridge status for every configured Matrix server (System Admin only)"
 	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings (System Admin only)"
 	serverCommandDesc  = "Manage Matrix homeserver registrations (System Admin only)"
 	serverCommandHint  = "[subcommand]"
@@ -217,7 +217,9 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	listCmd.RoleID = model.SystemAdminRoleId
 	matrixData.AddCommand(listCmd)
 
-	matrixData.AddCommand(model.NewAutocompleteData("status", "", statusCommandDesc))
+	statusCmd := model.NewAutocompleteData("status", "", statusCommandDesc)
+	statusCmd.RoleID = model.SystemAdminRoleId
+	matrixData.AddCommand(statusCmd)
 
 	migrateCmd := model.NewAutocompleteData("migrate", "", migrateCommandDesc)
 	migrateCmd.RoleID = model.SystemAdminRoleId
@@ -1194,16 +1196,9 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 
 	subcommand := fields[1]
 
-	// Every subcommand except status is System Admin only (see README): test/create/map/
-	// unmap/list/migrate mutate state or leak server details, and an unrecognized
-	// subcommand shouldn't hand a non-admin the subcommand list either. Gating here in
-	// the dispatcher - rather than in each leaf handler - keeps this a single choke
-	// point and lets executeServerGroup's own internal check stay as harmless,
-	// non-duplicated defense in depth for the "server" branch.
-	if subcommand != "status" {
-		if resp := c.requireSystemAdmin(args.UserId); resp != nil {
-			return resp
-		}
+	// Every subcommand is System Admin only
+	if resp := c.requireSystemAdmin(args.UserId); resp != nil {
+		return resp
 	}
 
 	switch subcommand {

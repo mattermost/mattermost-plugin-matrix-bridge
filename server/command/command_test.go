@@ -418,9 +418,9 @@ func TestExecuteMigrateCommandRefusesWithMultipleServers(t *testing.T) {
 	assert.Contains(t, resp.Text, "refuses to run")
 }
 
-// TestExecuteMatrixCommandAdminGate exercises the dispatcher-level admin gate added in
-// executeMatrixCommand: every subcommand except "status" (including an unrecognized
-// one) must be rejected for a non-admin caller before any handler logic runs.
+// TestExecuteMatrixCommandAdminGate exercises the dispatcher-level admin gate in
+// executeMatrixCommand: every subcommand - including status and an unrecognized one -
+// must be rejected for a non-admin caller before any handler logic runs.
 func TestExecuteMatrixCommandAdminGate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -431,6 +431,7 @@ func TestExecuteMatrixCommandAdminGate(t *testing.T) {
 		{"map", "/matrix map #room:server.com"},
 		{"unmap", "/matrix unmap"},
 		{"list", "/matrix list"},
+		{"status", "/matrix status"},
 		{"migrate", "/matrix migrate"},
 		{"server", "/matrix server list"},
 		{"unknown subcommand", "/matrix bogus"},
@@ -453,15 +454,16 @@ func TestExecuteMatrixCommandAdminGate(t *testing.T) {
 	}
 }
 
-// TestExecuteMatrixCommandStatusOpenToNonAdmin verifies /matrix status bypasses the
-// admin gate entirely. plugintest.API panics on any unstubbed call, so the absence of a
-// HasPermissionTo stub here proves the dispatcher never calls it for "status".
-func TestExecuteMatrixCommandStatusOpenToNonAdmin(t *testing.T) {
+// TestExecuteMatrixCommandStatusReachableByAdmin confirms that gating status did not
+// break it: an admin still clears the guard and gets the real status report back.
+func TestExecuteMatrixCommandStatusReachableByAdmin(t *testing.T) {
 	serverA := kvstore.ServerConfig{ServerID: "serverA", ServerName: "a.example.com", ServerURL: "https://a.example.com", Enabled: true}
-	h, _, _ := newTestHandler(t, serverA)
+	h, _, api := newTestHandler(t, serverA)
+	userID := model.NewId()
+	api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 
-	resp := h.executeMatrixCommand(&model.CommandArgs{UserId: model.NewId(), Command: "/matrix status"})
-	assert.NotContains(t, resp.Text, "System Admin")
+	resp := h.executeMatrixCommand(&model.CommandArgs{UserId: userID, Command: "/matrix status"})
+	assert.NotContains(t, resp.Text, "System Admin to use")
 	assert.Contains(t, resp.Text, "Matrix Bridge Status")
 }
 
