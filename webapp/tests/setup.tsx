@@ -3,4 +3,6 @@
 
 // import '@mattermost/webapp/tests/setup';
 
+import '@testing-library/jest-dom';
+
 export {};

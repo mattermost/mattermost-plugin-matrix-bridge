@@ -1,6 +1,15 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
+// @emotion/babel-preset-css-prop is deliberately not included: no component in
+// this codebase uses the css prop, and the preset's automatic-JSX-runtime rewrite
+// (importing every element factory from @emotion/react instead of react) makes
+// @emotion/react's precompiled bundle throw ("React.createContext is not a
+// function") the moment anything actually renders under Jest + jsdom - a gap this
+// config never hit before @testing-library/react was added, since no prior test
+// rendered a component. Babel's `env` key merges onto, rather than replacing, the
+// top-level config, so this preset had to be removed here rather than filtered
+// out of config.env.test alone.
 const config = {
     presets: [
         ['@babel/preset-env', {
@@ -23,7 +32,6 @@ const config = {
             allExtensions: true,
             isTSX: true,
         }],
-        ['@emotion/babel-preset-css-prop'],
     ],
     plugins: [
         'babel-plugin-typescript-to-proptypes',
