@@ -4,9 +4,12 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 )
 
@@ -38,6 +41,7 @@ func (p *Plugin) ServeHTTP(_ *plugin.Context, w http.ResponseWriter, r *http.Req
 	apiRouter := router.PathPrefix("/api/v1").Subrouter()
 	apiRouter.Use(p.MattermostAuthorizationRequired)
 	apiRouter.HandleFunc("/hello", p.HelloWorld).Methods(http.MethodGet)
+	apiRouter.HandleFunc(autocompleteServersPath, p.handleServerAutocomplete).Methods(http.MethodGet)
 
 	router.ServeHTTP(w, r)
 }
@@ -124,6 +128,50 @@ func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 type serverAuthMatch struct {
 	serverID string
 	enabled  bool
+}
+
+// autocompleteServersPath is the apiRouter-relative path serving the slash-command
+// autocomplete list of registered Matrix servers. The command package builds its
+// FetchURL from this (see command.ServerAutocompleteURL), so the route and the URL
+// advertised to the webapp cannot drift apart.
+const autocompleteServersPath = "/autocomplete/servers"
+
+// handleServerAutocomplete serves the dynamic autocomplete list for arguments that take a
+// server_id, so admins can pick a server instead of copying an opaque 26-character ID.
+//
+// MattermostAuthorizationRequired only proves the caller is logged in; server IDs are
+// admin-only information, so this additionally requires PermissionManageSystem - the same
+// gate the /matrix commands themselves use.
+//
+// An empty list is returned (rather than an error) whenever there is nothing to suggest,
+// including when the client cache has not been built yet. Autocomplete then shows no
+// suggestions, which degrades better than surfacing an error while someone is typing.
+func (p *Plugin) handleServerAutocomplete(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("Mattermost-User-ID")
+	if !p.API.HasPermissionTo(userID, model.PermissionManageSystem) {
+		http.Error(w, "Not authorized", http.StatusForbidden)
+		return
+	}
+
+	servers, _ := p.cachedServerConfigs()
+
+	items := make([]model.AutocompleteListItem, 0, len(servers))
+	for _, s := range servers {
+		state := "disabled"
+		if s.Enabled {
+			state = "enabled"
+		}
+		items = append(items, model.AutocompleteListItem{
+			Item:     s.ServerID,
+			Hint:     s.ServerName,
+			HelpText: fmt.Sprintf("%s (%s)", s.ServerURL, state),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		p.logger.LogError("Failed to encode server autocomplete list", "error", err)
+	}
 }
 
 // HelloWorld handles GET requests to /hello endpoint.

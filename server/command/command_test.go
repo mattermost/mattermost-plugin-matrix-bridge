@@ -590,3 +590,89 @@ func TestExecuteServerTest(t *testing.T) {
 		assert.Contains(t, resp.Text, "no registered Matrix server matches")
 	})
 }
+
+// TestOptionalServerIDArgRejectsExtraPositionals covers the four /matrix server
+// subcommands that take an optional server identifier: a stray extra word must be a
+// usage error rather than silently retargeting the command at the first argument.
+func TestOptionalServerIDArgRejectsExtraPositionals(t *testing.T) {
+	userID := model.NewId()
+	args := &model.CommandArgs{UserId: userID}
+	serverA := kvstore.ServerConfig{ServerID: "serverAserverAserverAserv1", ServerName: "a.example.com", ServerURL: "https://a.example.com", Enabled: true}
+
+	for _, sub := range []string{"unmap", "registration", "status", "test"} {
+		t.Run(sub+" rejects two positionals", func(t *testing.T) {
+			h, _, api := newTestHandler(t, serverA)
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, []string{sub, "a.example.com", "stray"})
+			assert.Contains(t, resp.Text, "Usage: /matrix server "+sub+" [server_id]")
+		})
+	}
+
+	t.Run("zero and one positional still work", func(t *testing.T) {
+		got, errResp := optionalServerIDArg(nil, "usage")
+		assert.Nil(t, errResp)
+		assert.Empty(t, got)
+
+		got, errResp = optionalServerIDArg([]string{"serverA"}, "usage")
+		assert.Nil(t, errResp)
+		assert.Equal(t, "serverA", got)
+	})
+}
+
+func TestServerAutocompleteURL(t *testing.T) {
+	assert.Equal(t,
+		"/plugins/com.mattermost.plugin-matrix-bridge/api/v1/autocomplete/servers",
+		ServerAutocompleteURL("com.mattermost.plugin-matrix-bridge"))
+}
+
+// TestExecuteServerMapDispatch covers /matrix server map's positional grammar:
+// [server_id] <room_alias|room_id>, strict at one or two arguments.
+func TestExecuteServerMapDispatch(t *testing.T) {
+	userID := model.NewId()
+	args := &model.CommandArgs{UserId: userID, ChannelId: model.NewId()}
+	serverA := kvstore.ServerConfig{ServerID: "serverAserverAserverAserv1", ServerName: "a.example.com", ServerURL: "https://a.example.com", Enabled: true}
+	serverB := kvstore.ServerConfig{ServerID: "serverBserverBserverBserv2", ServerName: "b.example.com", ServerURL: "https://b.example.com", Enabled: true}
+
+	t.Run("server id then room resolves the named server", func(t *testing.T) {
+		h, _, api := newTestHandler(t, serverA, serverB)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		// mockPlugin has no Matrix client, so mapChannelCore stops at that check - which
+		// still proves the arguments resolved to a registered server.
+		resp := h.executeServerGroup(args, []string{"map", serverB.ServerID, "#room:b.example.com"})
+		assert.Equal(t, matrixClientNotConfigured, resp.Text)
+	})
+
+	t.Run("room only resolves the sole server", func(t *testing.T) {
+		h, _, api := newTestHandler(t, serverA)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		resp := h.executeServerGroup(args, []string{"map", "#room:a.example.com"})
+		assert.Equal(t, matrixClientNotConfigured, resp.Text)
+	})
+
+	t.Run("room only is ambiguous with several servers", func(t *testing.T) {
+		h, _, api := newTestHandler(t, serverA, serverB)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		resp := h.executeServerGroup(args, []string{"map", "#room:a.example.com"})
+		assert.Contains(t, resp.Text, "multiple Matrix servers are registered")
+	})
+
+	for _, tc := range []struct {
+		name string
+		rest []string
+	}{
+		{"no arguments", []string{}},
+		{"three arguments", []string{serverA.ServerID, "#room:a.example.com", "stray"}},
+	} {
+		t.Run(tc.name+" is a usage error", func(t *testing.T) {
+			h, _, api := newTestHandler(t, serverA)
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, append([]string{"map"}, tc.rest...))
+			assert.Contains(t, resp.Text, "Usage: /matrix server map [server_id] <room_alias|room_id>")
+		})
+	}
+}

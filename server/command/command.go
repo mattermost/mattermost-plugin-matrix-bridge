@@ -60,6 +60,14 @@ type PluginAccessor interface {
 	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 }
 
+// ServerAutocompleteURL builds the plugin-relative URL the webapp fetches the registered
+// Matrix servers from when autocompleting a server_id argument. It must match the route
+// registered in ServeHTTP (server/api.go, autocompleteServersPath); pluginID comes from
+// the generated manifest via PluginAccessor.GetPluginID rather than being hardcoded.
+func ServerAutocompleteURL(pluginID string) string {
+	return "/plugins/" + pluginID + "/api/v1/autocomplete/servers"
+}
+
 // statusProbeDeadline bounds how long /matrix status and /matrix server status wait for
 // all server health probes together. The Matrix HTTP client allows up to 30s per
 // request, so probing servers sequentially could outlast Mattermost's slash-command
@@ -234,16 +242,34 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	addCmd.AddTextArgument("Application Service token", "<as_token>", "")
 	addCmd.AddTextArgument("Homeserver token", "<hs_token>", "")
 	serverCmd.AddCommand(addCmd)
-	removeCmd := model.NewAutocompleteData("remove", "<server_id>", "Remove a registered Matrix server")
-	removeCmd.AddTextArgument("Server ID", "<server_id>", "")
-	serverCmd.AddCommand(removeCmd)
-	serverCmd.AddCommand(model.NewAutocompleteData("map", "[server_id] <room_alias|room_id>", "Map current channel to a Matrix server's room"))
-	serverCmd.AddCommand(model.NewAutocompleteData("unmap", "[server_id]", "Unmap current channel from a Matrix server"))
-	serverCmd.AddCommand(model.NewAutocompleteData("registration", "[server_id]", "Print the Application Service registration YAML"))
-	serverCmd.AddCommand(model.NewAutocompleteData("status", "[server_id]", "Show status for one Matrix server"))
-	serverCmd.AddCommand(model.NewAutocompleteData("test", "[server_id]", "Test one Matrix server's connection and Application Service permissions"))
-	serverCmd.AddCommand(model.NewAutocompleteData("enable", "<server_id>", "Enable syncing for a Matrix server"))
-	serverCmd.AddCommand(model.NewAutocompleteData("disable", "<server_id>", "Disable syncing for a Matrix server"))
+
+	// Subcommands taking a server identifier offer the registered servers as a dynamic
+	// list, so an admin picks one instead of copying a 26-character ID out of
+	// `/matrix server list`. resolveServerIDArg still accepts a server name or URL host
+	// typed by hand.
+	serversURL := ServerAutocompleteURL(plugin.GetPluginID())
+	withServerID := func(name, hint, desc string, required bool) *model.AutocompleteData {
+		cmd := model.NewAutocompleteData(name, hint, desc)
+		cmd.AddDynamicListArgument("Matrix server", serversURL, required)
+		return cmd
+	}
+
+	serverCmd.AddCommand(withServerID("remove", "<server_id>", "Remove a registered Matrix server", true))
+	serverCmd.AddCommand(withServerID("unmap", "[server_id]", "Unmap current channel from a Matrix server", false))
+	serverCmd.AddCommand(withServerID("registration", "[server_id]", "Print the Application Service registration YAML", false))
+	serverCmd.AddCommand(withServerID("status", "[server_id]", "Show status for one Matrix server", false))
+	serverCmd.AddCommand(withServerID("test", "[server_id]", "Test one Matrix server's connection and Application Service permissions", false))
+	serverCmd.AddCommand(withServerID("enable", "<server_id>", "Enable syncing for a Matrix server", true))
+	serverCmd.AddCommand(withServerID("disable", "<server_id>", "Disable syncing for a Matrix server", true))
+
+	// `map` takes an optional server id followed by a required room identifier, both
+	// positional. With the id omitted the server list is still offered in the first slot;
+	// typing a room alias there instead is accepted (see executeServerMapDispatch).
+	mapServerCmd := model.NewAutocompleteData("map", "[server_id] <room_alias|room_id>", "Map current channel to a Matrix server's room")
+	mapServerCmd.AddDynamicListArgument("Matrix server", serversURL, false)
+	mapServerCmd.AddTextArgument("Matrix room alias or room ID", "<room_alias|room_id>", "")
+	serverCmd.AddCommand(mapServerCmd)
+
 	matrixData.AddCommand(serverCmd)
 
 	err := client.SlashCommand.Register(&model.Command{
@@ -955,6 +981,31 @@ func stripFlags(fields []string, flagNames ...string) ([]string, map[string]stri
 	return positional, values, nil
 }
 
+// requireArgs validates a subcommand's positional argument count, returning the usage
+// response when it falls outside [minArgs, maxArgs] and nil when it is acceptable.
+//
+// Every subcommand checks its count through this, including the ones taking no arguments
+// at all: extra positionals used to be silently dropped, so a typo or a stray word could
+// quietly change which server a command acted on instead of reporting the mistake.
+func requireArgs(rest []string, minArgs, maxArgs int, usage string) *model.CommandResponse {
+	if len(rest) < minArgs || len(rest) > maxArgs {
+		return ephemeral(usage)
+	}
+	return nil
+}
+
+// optionalServerIDArg reads the single optional server identifier from a subcommand's
+// remaining arguments.
+func optionalServerIDArg(rest []string, usage string) (string, *model.CommandResponse) {
+	if resp := requireArgs(rest, 0, 1, usage); resp != nil {
+		return "", resp
+	}
+	if len(rest) == 0 {
+		return "", nil
+	}
+	return rest[0], nil
+}
+
 func (c *Handler) executeServerAddCommand(fields []string) *model.CommandResponse {
 	positional, flags, err := stripFlags(fields, "server-id", "server-name")
 	if err != nil {
@@ -1034,9 +1085,12 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 	return ephemeral(b.String())
 }
 
+// executeServerMapDispatch takes the server identifier as an optional leading positional:
+// `[server_id] <room_alias|room_id>`. One argument is the room; two are the server and the
+// room.
 func (c *Handler) executeServerMapDispatch(args *model.CommandArgs, rest []string) *model.CommandResponse {
-	if len(rest) == 0 {
-		return ephemeral("Usage: /matrix server map [server_id] <room_alias|room_id>")
+	if resp := requireArgs(rest, 1, 2, "Usage: /matrix server map [server_id] <room_alias|room_id>"); resp != nil {
+		return resp
 	}
 
 	var serverIDArg, roomIdentifier string
@@ -1147,20 +1201,23 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 
 	switch sub {
 	case "list":
+		if resp := requireArgs(rest, 0, 0, "Usage: /matrix server list"); resp != nil {
+			return resp
+		}
 		return c.executeServerListCommand()
 	case "add":
 		return c.executeServerAddCommand(rest)
 	case "remove":
-		if len(rest) < 1 {
-			return ephemeral("Usage: /matrix server remove <server_id>")
+		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server remove <server_id>"); resp != nil {
+			return resp
 		}
 		return c.executeServerRemoveCommand(rest[0])
 	case "map":
 		return c.executeServerMapDispatch(args, rest)
 	case "unmap":
-		serverIDArg := ""
-		if len(rest) > 0 {
-			serverIDArg = rest[0]
+		serverIDArg, errResp := optionalServerIDArg(rest, "Usage: /matrix server unmap [server_id]")
+		if errResp != nil {
+			return errResp
 		}
 		serverID, err := c.resolveServerIDArg(serverIDArg)
 		if err != nil {
@@ -1168,21 +1225,21 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 		}
 		return c.unmapChannelCore(args, serverID)
 	case "registration":
-		serverIDArg := ""
-		if len(rest) > 0 {
-			serverIDArg = rest[0]
+		serverIDArg, errResp := optionalServerIDArg(rest, "Usage: /matrix server registration [server_id]")
+		if errResp != nil {
+			return errResp
 		}
 		return c.executeServerRegistrationCommand(serverIDArg)
 	case "status":
-		serverIDArg := ""
-		if len(rest) > 0 {
-			serverIDArg = rest[0]
+		serverIDArg, errResp := optionalServerIDArg(rest, "Usage: /matrix server status [server_id]")
+		if errResp != nil {
+			return errResp
 		}
 		return c.executeServerStatusCommand(serverIDArg)
 	case "test":
-		serverIDArg := ""
-		if len(rest) > 0 {
-			serverIDArg = rest[0]
+		serverIDArg, errResp := optionalServerIDArg(rest, "Usage: /matrix server test [server_id]")
+		if errResp != nil {
+			return errResp
 		}
 		serverID, err := c.resolveServerIDArg(serverIDArg)
 		if err != nil {
@@ -1190,13 +1247,13 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 		}
 		return c.testServerConnection(serverID)
 	case "enable":
-		if len(rest) < 1 {
-			return ephemeral("Usage: /matrix server enable <server_id>")
+		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server enable <server_id>"); resp != nil {
+			return resp
 		}
 		return c.executeServerEnableCommand(rest[0], true)
 	case "disable":
-		if len(rest) < 1 {
-			return ephemeral("Usage: /matrix server disable <server_id>")
+		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server disable <server_id>"); resp != nil {
+			return resp
 		}
 		return c.executeServerEnableCommand(rest[0], false)
 	default:
@@ -1217,8 +1274,16 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 		return resp
 	}
 
+	// rest is every positional after the subcommand. `create` is excluded from the strict
+	// count below: its room name is deliberately variadic (unquoted multi-word names are
+	// joined back together), so it validates its own arguments.
+	rest := fields[2:]
+
 	switch subcommand {
 	case "test":
+		if resp := requireArgs(rest, 0, 0, "Usage: /matrix test"); resp != nil {
+			return resp
+		}
 		serverID, errResp := c.resolveSoleServerID()
 		if errResp != nil {
 			return errResp
@@ -1265,28 +1330,40 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 		}
 		return c.createRoomCore(args, serverID, roomName, publish)
 	case "map":
-		if len(fields) < 3 {
-			return ephemeral(mapCommandUsage)
+		if resp := requireArgs(rest, 1, 1, mapCommandUsage); resp != nil {
+			return resp
 		}
 		serverID, errResp := c.resolveSoleServerID()
 		if errResp != nil {
 			return errResp
 		}
-		return c.mapChannelCore(args, serverID, fields[2])
+		return c.mapChannelCore(args, serverID, rest[0])
 	case "unmap":
+		if resp := requireArgs(rest, 0, 0, "Usage: /matrix unmap"); resp != nil {
+			return resp
+		}
 		serverID, errResp := c.resolveSoleServerID()
 		if errResp != nil {
 			return errResp
 		}
 		return c.unmapChannelCore(args, serverID)
 	case "list":
+		if resp := requireArgs(rest, 0, 0, "Usage: /matrix list"); resp != nil {
+			return resp
+		}
 		return c.executeListMappingsCommand(args)
 	case "status":
+		if resp := requireArgs(rest, 0, 0, "Usage: /matrix status"); resp != nil {
+			return resp
+		}
 		return c.executeStatusCommand()
 	case "migrate":
+		if resp := requireArgs(rest, 0, 0, "Usage: /matrix migrate"); resp != nil {
+			return resp
+		}
 		return c.executeMigrateCommand(args)
 	case "server":
-		return c.executeServerGroup(args, fields[2:])
+		return c.executeServerGroup(args, rest)
 	default:
 		return ephemeral(unknownSubcommandError)
 	}

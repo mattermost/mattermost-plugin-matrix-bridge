@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/mattermost/mattermost/server/public/model"
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
@@ -210,5 +214,73 @@ func TestMatrixAuthorizationRequiredCacheRefresh(t *testing.T) {
 		w = httptest.NewRecorder()
 		handler.ServeHTTP(w, newAuthRequest("hs-a"))
 		assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+	})
+}
+
+// TestHandleServerAutocomplete covers the dynamic autocomplete endpoint. The admin gate
+// is the important part: MattermostAuthorizationRequired only proves the caller is logged
+// in, and server IDs are admin-only information.
+func TestHandleServerAutocomplete(t *testing.T) {
+	userID := "userid1userid1userid1userid"
+
+	newPlugin := func(t *testing.T, admin bool, servers []kvstore.ServerConfig) *Plugin {
+		t.Helper()
+		api := &plugintest.API{}
+		api.On("LogError", mock.Anything, mock.Anything, mock.Anything).Maybe()
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(admin)
+		plugin := setupPluginForTestWithLogger(t, api)
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.serverConfigs = make(map[string]kvstore.ServerConfig, len(servers))
+		for _, s := range servers {
+			plugin.serverConfigs[s.ServerID] = s
+		}
+		return plugin
+	}
+
+	serve := func(plugin *Plugin, userID string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/autocomplete/servers", nil)
+		if userID != "" {
+			req.Header.Set("Mattermost-User-ID", userID)
+		}
+		rec := httptest.NewRecorder()
+		plugin.handleServerAutocomplete(rec, req)
+		return rec
+	}
+
+	t.Run("non-admin is forbidden", func(t *testing.T) {
+		plugin := newPlugin(t, false, []kvstore.ServerConfig{
+			{ServerID: "serverA", ServerName: "a.example.com", ServerURL: "https://a.example.com", Enabled: true},
+		})
+		rec := serve(plugin, userID)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.NotContains(t, rec.Body.String(), "serverA")
+	})
+
+	t.Run("admin gets one item per server", func(t *testing.T) {
+		plugin := newPlugin(t, true, []kvstore.ServerConfig{
+			{ServerID: "serverA", ServerName: "a.example.com", ServerURL: "https://a.example.com", Enabled: true},
+			{ServerID: "serverB", ServerName: "b.example.com", ServerURL: "https://b.example.com", Enabled: false},
+		})
+		rec := serve(plugin, userID)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		var items []model.AutocompleteListItem
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &items))
+		require.Len(t, items, 2)
+
+		byItem := map[string]model.AutocompleteListItem{}
+		for _, it := range items {
+			byItem[it.Item] = it
+		}
+		assert.Equal(t, "a.example.com", byItem["serverA"].Hint)
+		assert.Contains(t, byItem["serverA"].HelpText, "enabled")
+		assert.Contains(t, byItem["serverB"].HelpText, "disabled")
+	})
+
+	t.Run("no servers yields an empty array, not an error", func(t *testing.T) {
+		plugin := newPlugin(t, true, nil)
+		rec := serve(plugin, userID)
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.JSONEq(t, "[]", rec.Body.String())
 	})
 }
