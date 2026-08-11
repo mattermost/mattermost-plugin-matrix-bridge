@@ -15,9 +15,12 @@ Docker Compose.
 
 ## Prerequisites
 
-1. Install the plugin. Homeservers are managed entirely with the `/matrix server`
-   slash commands (System Admin only) - there is nothing to configure in System
-   Console for them.
+1. Install the plugin. Homeservers can be managed either with the `/matrix server`
+   slash commands or from **System Console → Plugins → Mattermost bridge for Matrix →
+   Matrix homeservers** (both System Admin only, both equivalent - the steps below use
+   the slash commands, since that's the fastest path from a terminal, but "Add Matrix
+   server" in the console does the same thing and can open the registration YAML for
+   you immediately afterward).
 2. Register the homeserver with the plugin, choosing your own Application Service and
    homeserver tokens (any strings; keep them secret):
 
@@ -36,6 +39,10 @@ Docker Compose.
     ```text
     /matrix server registration
     ```
+
+    (or use the "Registration" action on the server's row in the console, which shows
+    the same YAML with a copy/download button - copy it verbatim, including the `url:`
+    line; do not append `/_matrix/app/v1` to it).
 
 ## Starting the Matrix Synapse Server
 
