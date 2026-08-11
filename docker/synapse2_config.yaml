@@ -3,42 +3,42 @@ pid_file: /data/homeserver.pid
 public_baseurl: http://synapse2.localhost:8889/
 
 listeners:
-  - port: 8008
-    tls: false
-    type: http
-    x_forwarded: true
-    resources:
-      - names: [client, federation]
-        compress: false
+    - port: 8008
+      tls: false
+      type: http
+      x_forwarded: true
+      resources:
+          - names: [client, federation]
+            compress: false
 
 database:
-  name: psycopg2
-  args:
-    user: synapse
-    password: synapse
-    database: synapse
-    host: postgres2
-    port: 5432
-    cp_min: 5
-    cp_max: 10
+    name: psycopg2
+    args:
+        user: synapse
+        password: synapse
+        database: synapse
+        host: postgres2
+        port: 5432
+        cp_min: 5
+        cp_max: 10
 
 log:
-  version: 1
-  formatters:
-    precise:
-      format: '%(asctime)s - %(name)s - %(lineno)d - %(levelname)s - %(request)s - %(message)s'
-  handlers:
-    console:
-      class: logging.StreamHandler
-      formatter: precise
-  loggers:
-    synapse:
-      level: INFO
-    synapse.access:
-      level: INFO
-  root:
-    level: INFO
-    handlers: [console]
+    version: 1
+    formatters:
+        precise:
+            format: "%(asctime)s - %(name)s - %(lineno)d - %(levelname)s - %(request)s - %(message)s"
+    handlers:
+        console:
+            class: logging.StreamHandler
+            formatter: precise
+    loggers:
+        synapse:
+            level: INFO
+        synapse.access:
+            level: INFO
+    root:
+        level: INFO
+        handlers: [console]
 
 media_store_path: "/data/media_store"
 max_upload_size: 50M
@@ -51,7 +51,7 @@ form_secret: "development_form_secret_change_in_production"
 signing_key_path: "/data/signing.key"
 
 trusted_key_servers:
-  - server_name: "matrix.org"
+    - server_name: "matrix.org"
 
 enable_registration: true
 enable_registration_without_verification: true
@@ -59,12 +59,12 @@ enable_registration_without_verification: true
 suppress_key_server_warning: true
 
 room_list_publication_rules:
-  - user_id: "@_mattermost_bridge:synapse2.localhost"
-    action: allow
-  - user_id: "*"
-    action: deny
+    - user_id: "@_mattermost_bridge:synapse2.localhost"
+      action: allow
+    - user_id: "*"
+      action: deny
 
 app_service_config_files:
-  - /data/mattermost-bridge-registration.yaml
+    - /data/mattermost-bridge-registration.yaml
 
 report_stats: false
