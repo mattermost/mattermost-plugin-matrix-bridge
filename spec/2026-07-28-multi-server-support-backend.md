@@ -153,7 +153,7 @@ the primary channel.
 place, a channel can hold an entry for a `ServerID` that is no longer registered.
 `setChannelMapping`'s `maxServersPerChannel` check therefore counts **live** entries only —
 otherwise a channel left pointing at a removed server hits an `ErrChannelAlreadyMapped`
-dead end naming a server that no longer exists (pitfall 16) — and drops the stale entry in
+dead end naming a server that no longer exists — and drops the stale entry in
 the same CAS write. Read the live registry **once before** entering the CAS callback and
 close over the result: the callback may run several times and must stay a pure function of
 the mapping slice (§3.1). Re-adopting the prior `ServerID` makes such entries live again,
@@ -322,7 +322,9 @@ Semantics:
 - Entries for servers no longer in the registry are **stale** and do not count toward
   `maxServersPerChannel`; they are dropped in the same CAS write (§3.1.1). Only live
   entries can block a map.
-- Removing the last entry **deletes the key** rather than storing `[]` (see pitfall 8).
+- Removing the last entry **deletes the key** rather than storing `[]`: the migration's
+  converter reads a zero-length array as "not yet converted" and would re-map the channel to
+  a literal room ID of `"[]"`.
 
 Everything downstream of the write is already per-server and needs no change when the limit
 is lifted: `room_mapping_<serverID>_<room>` keys, ghost/event/reaction namespaces, the
@@ -446,6 +448,19 @@ live.
   `isGhostUser`, `handleMatrixInitiatedDM`, `handleMatrixMemberDM`,
   `createDMChannelForGhostUser`.
 
+**Autocomplete endpoint.** `GET /api/v1/autocomplete/servers` on the existing
+`apiRouter` (behind `MattermostAuthorizationRequired`) serves the dynamic server list for
+§3.9's autocomplete. Two requirements:
+
+- That middleware only proves the caller is logged in, so the handler **additionally**
+  requires `model.PermissionManageSystem` — server IDs are admin-only information and this
+  route is reachable by any authenticated user.
+- Serve from the per-node `serverConfigs` cache, not KV, and return an **empty array rather
+  than an error** whenever there is nothing to suggest (including before the cache is first
+  built). Autocomplete then shows no suggestions instead of erroring while someone types.
+
+Items are `{Item: ServerID, Hint: ServerName, HelpText: "<url> (enabled|disabled)"}`.
+
 `isGhostUser(serverID, userID)` resolves the domain from the registry entry's
 **`ServerName`**, with **no URL-host fallback** — `ServerName` is guaranteed non-empty and
 unique by §3.1.2, so a fallback would only ever mask a bug. Ghosts are created with the
@@ -512,6 +527,16 @@ probe that starts succeeding once federation is routed), and the
 moment it does, every property written under the old key becomes unreachable — edits and
 deletes of those posts silently stop working, because the code sees no existing event ID and
 treats an edit as a new message. Persisting the resolved value makes that impossible.
+
+**Bridge filtering aliases.** Rooms also get a `#mattermost-bridge-<name>:<ServerName>`
+alias, built by one shared helper (`matrix.CreateBridgeAlias`) rather than concatenated at
+each site — `CreateRoom` and the manual `map` path both need it, and the prefix has to stay
+inside the `aliases` namespace regex the registration declares (§3.9) or the homeserver will
+not route those rooms to the bridge. Note the two paths still sanitize the localpart
+differently: `CreateRoom` strips characters invalid in an alias localpart and falls back when
+nothing survives, while the `map` path only lowercases and replaces spaces/underscores, so a
+punctuated channel name can still produce an alias the homeserver rejects. Best-effort in
+both cases (a failure is a warning, not an error), so unifying that is a follow-up.
 
 **The migrated entry keeps the legacy key.** Master computes this property as
 `matrix_event_id_<sanitized URL hostname>` (`extractServerDomain`, `matrix_util.go:23-42` —
@@ -627,13 +652,23 @@ keys, and it must refuse to run when ≥2 servers are registered (same reasoning
 GetManagedServers() ([]kvstore.ServerConfig, error)
 AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID, serverNameOverride string) (string, error) // §3.1.1, §3.1.2
 RemoveServer(serverID string) (bool, error) // refuses an entry with SiteURL == "" (§3.1.1)
+SetServerEnabled(serverID string, enabled bool) error // §3.11
 GetMatrixClientForServer(serverID string) *matrix.Client
 GetRemoteIDForServer(serverID string) string
 CreateOrGetGhostUserForServer(serverID, mattermostUserID string) (string, error)
 GetMatrixUserIDFromMattermostUserForServer(serverID, mattermostUserID string) (string, error)
+MapChannelToServer(serverID, channelID, matrixRoomIdentifier string) error   // the §3.3 choke point
+UnmapChannelFromServer(serverID, channelID string) error
+GetPluginID() string // from the generated manifest; for plugin-relative URLs (below)
 ```
 
-**New group — `/matrix server`, gated on `model.PermissionManageSystem`:**
+**Every `/matrix` subcommand is gated on `model.PermissionManageSystem`**, checked once in
+`executeMatrixCommand` before the subcommand switch so no branch can forget it. Note that
+`AutocompleteData.RoleID = model.SystemAdminRoleId` is **not** that gate — it only hides a
+suggestion from non-admins in the autocomplete UI and does not stop anyone typing the
+command out in full. Set it for tidiness, but never rely on it for authorization.
+
+**`/matrix server` subcommands:**
 
 | Command                                                                                                           | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -642,8 +677,9 @@ GetMatrixUserIDFromMattermostUserForServer(serverID, mattermostUserID string) (s
 | `server remove <server_id>`                                                                                       | Remove the entry, `UnregisterPluginRemoteForSharedChannels`, `refreshServersAndBroadcast`. The server's KV records are **kept** (§3.1.1); the response must print the `server_id` as the recovery key for re-adopting them. **Refuses** an entry with `SiteURL == ""` (the migrated server — it cannot be re-created; use `server disable`).                                                                                    |
 | `server map [server_id] <room_alias\|room_id>`                                                                    | Map the current channel — refuses if already mapped to another server.                                                                                                                                                                                                                                                                                                                                                          |
 | `server unmap [server_id]`                                                                                        | Unmap the current channel for that server.                                                                                                                                                                                                                                                                                                                                                                                      |
-| `server registration [server_id]`                                                                                 | Print the Application Service registration YAML, built server-side from the registry entry (the webapp download is gone).                                                                                                                                                                                                                                                                                                       |
+| `server registration [server_id]`                                                                                 | Print the Application Service registration YAML, built server-side from the registry entry (the webapp download is gone). See the `url` rule below — getting it wrong silently kills inbound sync.                                                                                                                                                                                                                               |
 | `server status [server_id]`                                                                                       | Status for one server.                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `server test [server_id]`                                                                                         | Full connection diagnostic for one server: registry entry, client initialized, `TestConnection`, homeserver name/version, and `TestApplicationServicePermissions`. The AS-permission check exists nowhere else, and `/matrix test` cannot reach it once a second server is registered, so this subcommand is required rather than a convenience.                                                                                   |
 | `server enable\|disable <server_id>`                                                                              | **Required, not optional** — flips `Enabled` and refreshes. This is the only supported way to take the migrated server out of service, since `remove` refuses it (§3.1.1).                                                                                                                                                                                                                                                      |
 
 `[server_id]` may be omitted when exactly one server is registered. `resolveServerIDArg`
@@ -652,11 +688,57 @@ matches by `server_id` first, then by `ServerName`, then by URL host.
 `--server-id` and `--server-name` must be stripped **before** positional parsing (accept
 both `--flag <value>` and `--flag=<value>`) so they can appear anywhere without shifting the
 optional trailing `username_prefix`. An unrecognized `--flag` is an error, not a positional
-value — otherwise a typo silently becomes a username prefix.
+value — otherwise a typo silently becomes a username prefix. These two flags belong to
+`server add` only; no other subcommand takes a flag.
+
+**The registration `url` is the plugin base path and nothing more:**
+
+```yaml
+url: <SiteURL>/plugins/<plugin_id>
+```
+
+The homeserver appends `/_matrix/app/v1/transactions/{txnId}` itself, matching the route
+registered in `server/api.go`. Including `/_matrix/app/v1` in the `url` produces
+`/plugins/<plugin_id>/_matrix/app/v1/_matrix/app/v1/transactions/{txnId}`, which matches no
+route: **every inbound transaction for that server is dropped while outbound keeps working**,
+because outbound never reads the registration. Build `<plugin_id>` from the generated
+manifest (`GetPluginID`), never a literal. Assert the exact `url` line in a test — this is a
+silent, one-directional failure that no other check catches.
+
+**Strict positional counts.** Every subcommand validates its argument count through one
+helper and rejects anything outside its range with its usage string:
+
+```go
+func requireArgs(rest []string, minArgs, maxArgs int, usage string) *model.CommandResponse
+```
+
+Extra positionals must **not** be silently dropped: a stray word would otherwise change
+which server a command acted on. This applies to the zero-argument subcommands too
+(`server list`, `/matrix list|status|unmap|migrate|test`). `optionalServerIDArg` (0–1, for
+`server unmap|registration|status|test`) is built on the same helper. `/matrix create` is the
+one exception — its room name is deliberately variadic, so it validates its own arguments.
+
+**Server-ID autocomplete.** Copying a 26-character opaque ID out of `server list` is the
+main friction in the multi-server UX, so subcommands taking a server identifier offer the
+registered servers as a dynamic list:
+
+- `AddDynamicListArgument("Matrix server", <url>, required)` on `server remove|unmap|`
+  `registration|status|test|enable|disable`, and on `server map`'s optional first
+  positional.
+- The fetch URL is `/plugins/<plugin_id>/api/v1/autocomplete/servers`, built by one exported
+  helper (`command.ServerAutocompleteURL`) from `GetPluginID()` so it cannot drift from the
+  route (§3.5).
+- `server map`'s server ID stays **positional**. A named `--server` flag would avoid
+  suggesting servers in the room-identifier slot when the ID is omitted, but it adds a second
+  accepted grammar for one command; the positional list is the accepted trade-off.
+
+Typing a `ServerName` or URL host by hand still works — the list is a convenience over
+`resolveServerIDArg`, not a replacement for it.
 
 **Existing commands**
 
-- `/matrix status` — no admin gate, no secrets. Lists **every** configured server with
+- `/matrix status` — admin-gated like every other subcommand (it exposes server names, URLs
+  and health), and never prints tokens. Lists **every** configured server with
   enabled state, live connection health and mapped-channel count. Probe connections
   **concurrently under a single deadline** (~8s, in a `var` so tests can shorten it): the
   Matrix HTTP client allows 30s per request, so sequential probes would outlast
@@ -755,14 +837,18 @@ finish with a commit following the conventional commits notation.
 8. **Outbound routing** — `serverIDForSyncMsg` + all of `hooks.go` + `UserHasJoinedChannel`.
 9. **One-server-per-channel enforcement** — in `setChannelRoomMapping` and every command
    map path.
-10. **Commands** — `/matrix server` group, multi-server `status`/`list`, registration YAML.
+10. **Commands** — `/matrix server` group (including `test`), multi-server `status`/`list`,
+    registration YAML with the plugin-base `url`, strict positional counts via `requireArgs`,
+    and the autocomplete endpoint plus its dynamic-list arguments.
 11. **Tests** — unit throughout (steps 1–10 should each bring their own), then the
     integration suites.
 12. **Docs** — README "Multiple homeservers" section (state the one-server-per-channel rule
     explicitly; document the remove/re-adopt recovery path — `remove` keeps the server's
     records and prints its `server_id`, `add --server-id <id>` restores them, and the
     migrated server cannot be removed at all; and note that `server_name` is discovered from
-    the homeserver rather than supplied, with `--server-name` as the escape hatch), and
+    the homeserver rather than supplied, with `--server-name` as the escape hatch; and that
+    `server registration` output is copied verbatim — admins must not append
+    `/_matrix/app/v1` to its `url`), and
     `docs/local-development.md` + `docker-compose.yml` for a second Synapse — stating the
     distinct-port-less-`server_name` requirement from §5.2.
 
@@ -857,12 +943,25 @@ finish with a commit following the conventional commits notation.
   invite/uninvite that server's remote only.
 - **Trackers** — `PostTracker` / `PendingFileTracker` isolate identical post IDs across
   two `serverID`s.
-- **Commands** — `server add/remove/list/map/unmap/registration/status` happy paths and
+- **Commands** — `server add/remove/list/map/unmap/registration/status/test` happy paths and
   arg-count errors; `--server-id <id>` and `--server-id=<id>` stripping does not shift the
   optional trailing `username_prefix` regardless of position (same for `--server-name`), and
   an unknown `--flag` errors instead of being taken as a positional; `remove` prints the
   recovery key and refuses the migrated entry; `server enable`/`disable` flip `Enabled` and
-  refresh; non-admin is rejected for the whole `server` group; `/matrix status`
+  refresh; non-admin is rejected for the whole `server` group;
+- **Registration YAML** — assert the exact `url:` line equals `<SiteURL>/plugins/<plugin_id>`
+  with **no** `_matrix/app/v1` anywhere in the output, over both a plain SiteURL and one with
+  a trailing slash (§3.9). This is the guard for a silent inbound-only failure.
+- **Strict arg counts** — every subcommand rejects one argument beyond its maximum with its
+  usage string, including the zero-argument ones; `server map` accepts one or two and rejects
+  zero or three; `optionalServerIDArg` returns the value for 0–1 and a usage response beyond.
+- **`server test`** — targets a named server while two are registered and does **not** touch
+  the other; resolves the sole server from a bare invocation; is ambiguous with several; errors
+  on an unknown identifier.
+- **Autocomplete endpoint** — a non-admin gets 403 and **no server IDs in the body**; an admin
+  gets one item per server with the right `Hint` and an enabled/disabled `HelpText`; zero
+  servers yields `[]` with 200, not an error; `ServerAutocompleteURL` matches the route
+  registered in `ServeHTTP`. `/matrix status`
   with 0/1/N servers and with a probe that exceeds the deadline; registration YAML content;
   `resolveServerIDArg` matching by ID, server name and host; ambiguity errors when several
   servers exist.
@@ -914,7 +1013,7 @@ The suites themselves:
   and confirm the channel resumes bridging to the same room with the **same ghost users**
   (no duplicate ghosts, no re-map needed) and that the platform hands back A's original
   `remoteID`. Then repeat the removal without re-adopting and confirm the channel can be
-  mapped to server B instead (the stale-entry path, pitfall 16).
+  mapped to server B instead (the stale-entry path, §3.1.1).
 - **Full feature sweep** — run the complete feature matrix (posts, edits, deletes,
   reactions, threads, attachments, mentions, DMs, avatars) once with one server configured
   and once with two, to prove nothing regresses in either topology.
