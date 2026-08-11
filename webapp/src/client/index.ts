@@ -24,7 +24,13 @@ import type {
 // plugin's MattermostAuthorizationRequired middleware needs for cookie-authenticated
 // non-GET requests. A request missing them fails with a 401 that reads as "not logged
 // in" - if you hit that, it's this, not an auth bug.
-const baseRoute = () => `${Client4.getPluginRoute(manifest.id)}/api/v1`;
+//
+// Client4.getPluginRoute(id) resolves to "<url>/api/v4/plugins/<id>" - that is
+// Mattermost's OWN REST API for managing plugins (install/enable/disable), not
+// where a plugin's ServeHTTP is mounted. A plugin's own HTTP routes live at
+// "<url>/plugins/<id>/..." instead, so this builds the base route from
+// Client4.getUrl() directly.
+const baseRoute = () => `${Client4.getUrl()}/plugins/${manifest.id}/api/v1`;
 
 async function errorMessageFrom(response: Response): Promise<string> {
     try {

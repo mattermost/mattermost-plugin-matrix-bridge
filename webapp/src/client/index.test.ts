@@ -23,14 +23,21 @@ describe('client', () => {
         global.fetch = fetchMock as unknown as typeof fetch;
     });
 
-    it('builds URLs from Client4.getPluginRoute(manifest.id)', async () => {
+    it('builds URLs from Client4.getUrl() + /plugins/<id>/api/v1 - never Client4.getPluginRoute', async () => {
         fetchMock.mockResolvedValue(jsonResponse(200, {servers: []}));
 
         await client.listServers();
 
         expect(fetchMock).toHaveBeenCalledTimes(1);
         const [url] = fetchMock.mock.calls[0];
-        expect(String(url)).toContain(`/plugins/${manifest.id}/api/v1/servers`);
+
+        // Client4.getPluginRoute(id) resolves under /api/v4/plugins/<id> - Mattermost's
+        // own plugin-management API, not where this plugin's ServeHTTP is mounted. A
+        // request built from it 404s in production even though it also happens to
+        // contain "/plugins/<id>/api/v1/servers" as a substring, which is why this
+        // asserts the full path rather than just that substring.
+        expect(String(url)).toMatch(new RegExp(`/plugins/${manifest.id}/api/v1/servers$`));
+        expect(String(url)).not.toContain('/api/v4/plugins');
     });
 
     it('sends Client4.getOptions-derived headers, including X-Requested-With', async () => {
