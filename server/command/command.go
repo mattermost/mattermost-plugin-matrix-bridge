@@ -53,6 +53,7 @@ type PluginAccessor interface {
 	// Mattermost API access
 	GetPluginAPI() plugin.API
 	GetPluginAPIClient() *pluginapi.Client
+	GetPluginID() string
 
 	// Migration access
 	RunKVStoreMigrations() error
@@ -1068,7 +1069,11 @@ func (c *Handler) executeServerRegistrationCommand(serverIDArg string) *model.Co
 	if cfg := c.pluginAPI.GetConfig(); cfg != nil && cfg.ServiceSettings.SiteURL != nil {
 		siteURL = *cfg.ServiceSettings.SiteURL
 	}
-	webhookURL := strings.TrimSuffix(siteURL, "/") + "/plugins/com.mattermost.plugin-matrix-bridge/_matrix/app/v1"
+	// The registration url is the plugin's base path ONLY. The homeserver appends the
+	// appservice path itself ("/_matrix/app/v1/transactions/{txnId}" - see the router in
+	// server/api.go), so including "/_matrix/app/v1" here produces a doubled path that
+	// matches no route and silently breaks all inbound traffic for that server.
+	webhookURL := strings.TrimSuffix(siteURL, "/") + "/plugins/" + c.plugin.GetPluginID()
 
 	registrationYAML := fmt.Sprintf(`id: mattermost-bridge-%s
 url: %s

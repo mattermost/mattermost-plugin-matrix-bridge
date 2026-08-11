@@ -506,6 +506,12 @@ func (p *Plugin) GetPluginAPIClient() *pluginapi.Client {
 	return p.client
 }
 
+// GetPluginID returns this plugin's ID from the generated manifest, so callers that build
+// plugin-relative URLs do not hardcode it and cannot drift from plugin.json.
+func (p *Plugin) GetPluginID() string {
+	return manifest.Id
+}
+
 // GetManagedServers returns every registered Matrix homeserver.
 func (p *Plugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
 	return p.getServers()

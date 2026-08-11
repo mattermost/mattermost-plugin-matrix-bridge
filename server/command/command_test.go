@@ -111,6 +111,7 @@ func (m *mockPlugin) UnmapChannelFromServer(_, _ string) error { return m.unmapE
 
 func (m *mockPlugin) GetPluginAPI() plugin.API              { return m.pluginAPI }
 func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client { return m.client }
+func (m *mockPlugin) GetPluginID() string                   { return "com.mattermost.plugin-matrix-bridge" }
 
 func (m *mockPlugin) RunKVStoreMigrations() error { return m.migrationErr }
 func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error) {
@@ -500,6 +501,44 @@ func TestSanitizeShareName(t *testing.T) {
 			// A ShareName must start and end with alphanumeric.
 			assert.False(t, strings.HasPrefix(result, "-") || strings.HasPrefix(result, "_"))
 			assert.False(t, strings.HasSuffix(result, "-") || strings.HasSuffix(result, "_"))
+		})
+	}
+}
+
+// TestExecuteServerRegistrationURL pins the registration `url` to the plugin's base path.
+// The homeserver appends "/_matrix/app/v1/transactions/{txnId}" itself, so a url that
+// already carries "/_matrix/app/v1" yields a doubled path that matches no route in
+// server/api.go and silently breaks every inbound transaction for that server.
+func TestExecuteServerRegistrationURL(t *testing.T) {
+	server := kvstore.ServerConfig{
+		ServerID:   "serverAserverAserverAserv1",
+		ServerName: "a.example.com",
+		ServerURL:  "https://a.example.com",
+		ASToken:    "as_token_value",
+		HSToken:    "hs_token_value",
+	}
+
+	for _, tc := range []struct {
+		name    string
+		siteURL string
+	}{
+		{"plain site url", "https://mm.example.com"},
+		{"site url with trailing slash", "https://mm.example.com/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, api := newTestHandler(t, server)
+			siteURL := tc.siteURL
+			api.On("GetConfig").Return(&model.Config{
+				ServiceSettings: model.ServiceSettings{SiteURL: &siteURL},
+			})
+
+			resp := h.executeServerRegistrationCommand(server.ServerID)
+
+			assert.Contains(t, resp.Text, "url: https://mm.example.com/plugins/com.mattermost.plugin-matrix-bridge\n")
+			assert.NotContains(t, resp.Text, "_matrix/app/v1")
+			assert.NotContains(t, resp.Text, "//plugins/")
+			assert.Contains(t, resp.Text, "as_token: as_token_value")
+			assert.Contains(t, resp.Text, "hs_token: hs_token_value")
 		})
 	}
 }
