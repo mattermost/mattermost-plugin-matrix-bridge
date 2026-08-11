@@ -241,13 +241,17 @@ func TestHandleServerAutocomplete(t *testing.T) {
 		return plugin
 	}
 
+	// serve routes through SystemAdminRequired, exactly as ServeHTTP wires this
+	// handler in production - the permission gate now lives there, not inline in
+	// handleServerAutocomplete.
 	serve := func(plugin *Plugin, userID string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/autocomplete/servers", nil)
 		if userID != "" {
 			req.Header.Set("Mattermost-User-ID", userID)
 		}
 		rec := httptest.NewRecorder()
-		plugin.handleServerAutocomplete(rec, req)
+		handler := plugin.SystemAdminRequired(http.HandlerFunc(plugin.handleServerAutocomplete))
+		handler.ServeHTTP(rec, req)
 		return rec
 	}
 
