@@ -545,6 +545,207 @@ func TestSetEnabled(t *testing.T) {
 	})
 }
 
+// --- Update ---
+
+func seedOneServer(t *testing.T, kv *memoryKVStore, entry kvstore.ServerConfig) {
+	t.Helper()
+	data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{entry})
+	require.NoError(t, err)
+	require.NoError(t, kv.Set(kvstore.KeyServersConfig, data))
+}
+
+func TestUpdate(t *testing.T) {
+	baseEntry := func() kvstore.ServerConfig {
+		return kvstore.ServerConfig{
+			ServerID:       "s1",
+			ServerURL:      "https://a.example.com",
+			Endpoint:       "a.example.com:443",
+			ServerName:     "a.example.com",
+			EventDomain:    "a_example_com_443",
+			ASToken:        "as1",
+			HSToken:        "hs1",
+			UsernamePrefix: "matrix",
+			Enabled:        true,
+			RemoteID:       "remote-1",
+			SiteURL:        "https://a.example.com:443",
+		}
+	}
+
+	t.Run("a nil field leaves the stored value untouched", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		seedOneServer(t, kv, baseEntry())
+
+		updated, warnings, err := svc.Update("s1", Update{ASToken: new("as1-new")})
+		require.NoError(t, err)
+		assert.Empty(t, warnings)
+		assert.Equal(t, "as1-new", updated.ASToken)
+		assert.Equal(t, "hs1", updated.HSToken)
+		assert.Equal(t, "https://a.example.com", updated.ServerURL)
+		assert.Equal(t, "a.example.com", updated.ServerName)
+		assert.Equal(t, "matrix", updated.UsernamePrefix)
+	})
+
+	t.Run("EventDomain, SiteURL, RemoteID and ServerID are unchanged after a ServerURL change", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		seedOneServer(t, kv, baseEntry())
+
+		updated, warnings, err := svc.Update("s1", Update{ServerURL: new("https://a.example.com:8448")})
+		require.NoError(t, err)
+		require.Len(t, warnings, 1, "an endpoint change must warn that EventDomain/remote key are unaffected")
+		assert.Equal(t, "s1", updated.ServerID)
+		assert.Equal(t, "a_example_com_443", updated.EventDomain, "EventDomain must never be recomputed")
+		assert.Equal(t, "https://a.example.com:443", updated.SiteURL, "SiteURL is the remote's identity key and must never be re-keyed")
+		assert.Equal(t, "remote-1", updated.RemoteID)
+		assert.Equal(t, "a.example.com:8448", updated.Endpoint, "Endpoint must be re-derived from the new URL")
+
+		// Assert the stored bytes directly - this is the silent-orphaning regression.
+		stored, err := svc.Get("s1")
+		require.NoError(t, err)
+		assert.Equal(t, "a_example_com_443", stored.EventDomain)
+		assert.Equal(t, "https://a.example.com:443", stored.SiteURL)
+	})
+
+	t.Run("an endpoint colliding with another entry is rejected", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{
+			baseEntry(),
+			{ServerID: "s2", ServerURL: "https://b.example.com", Endpoint: "b.example.com:443", ServerName: "b.example.com"},
+		})))
+
+		_, _, err := svc.Update("s1", Update{ServerURL: new("https://b.example.com")})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrEndpointTaken)
+	})
+
+	t.Run("re-submitting the entry's own endpoint succeeds", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		seedOneServer(t, kv, baseEntry())
+
+		updated, warnings, err := svc.Update("s1", Update{ServerURL: new("https://a.example.com")})
+		require.NoError(t, err)
+		assert.Empty(t, warnings, "no genuine endpoint change means no warning")
+		assert.Equal(t, "a.example.com:443", updated.Endpoint)
+	})
+
+	t.Run("empty ASToken is rejected", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		seedOneServer(t, kv, baseEntry())
+		_, _, err := svc.Update("s1", Update{ASToken: new("")})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+	})
+
+	t.Run("empty HSToken is rejected", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		seedOneServer(t, kv, baseEntry())
+		_, _, err := svc.Update("s1", Update{HSToken: new("")})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+	})
+
+	t.Run("empty UsernamePrefix resets to the default", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		entry := baseEntry()
+		entry.UsernamePrefix = "custom"
+		seedOneServer(t, kv, entry)
+		updated, warnings, err := svc.Update("s1", Update{UsernamePrefix: new("")})
+		require.NoError(t, err)
+		assert.Equal(t, DefaultUsernamePrefix, updated.UsernamePrefix)
+		assert.Len(t, warnings, 1)
+	})
+
+	t.Run("a ServerName colliding with another entry is rejected", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{
+			baseEntry(),
+			{ServerID: "s2", ServerURL: "https://b.example.com", Endpoint: "b.example.com:443", ServerName: "b.example.com"},
+		})))
+
+		_, _, err := svc.Update("s1", Update{ServerName: new("b.example.com")})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNameTaken)
+	})
+
+	t.Run("a successful ServerName change returns a warning", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		seedOneServer(t, kv, baseEntry())
+
+		updated, warnings, err := svc.Update("s1", Update{ServerName: new("renamed.example.com")})
+		require.NoError(t, err)
+		assert.Equal(t, "renamed.example.com", updated.ServerName)
+		require.Len(t, warnings, 1)
+		assert.Contains(t, warnings[0], "ghost")
+	})
+
+	t.Run("a migrated entry (SiteURL empty) is editable", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		entry := baseEntry()
+		entry.SiteURL = ""
+		seedOneServer(t, kv, entry)
+
+		updated, _, err := svc.Update("s1", Update{ASToken: new("as-new")})
+		require.NoError(t, err)
+		assert.Equal(t, "as-new", updated.ASToken)
+		assert.Empty(t, updated.SiteURL, "SiteURL must stay empty - Update never sets it")
+	})
+
+	t.Run("unknown server_id is not registered", func(t *testing.T) {
+		svc, _, _ := newTestService(t)
+		_, _, err := svc.Update("nonexistent", Update{ASToken: new("x")})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNotRegistered)
+	})
+
+	t.Run("Update calls only RefreshAndBroadcast - never register or unregister a remote", func(t *testing.T) {
+		svc, host, kv := newTestService(t)
+		seedOneServer(t, kv, baseEntry())
+
+		_, _, err := svc.Update("s1", Update{ASToken: new("as-new")})
+		require.NoError(t, err)
+
+		calls := host.Calls()
+		require.Len(t, calls, 1)
+		assert.Equal(t, "RefreshAndBroadcast:server_updated", calls[0])
+	})
+
+	t.Run("concurrent edits produce one winner", func(t *testing.T) {
+		store := newCASConflictKVStore()
+		host := &fakeHost{matrixClients: map[string]*matrix.Client{}}
+		svc := New(store, testLogger{}, host)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{baseEntry()})))
+
+		store.onFirstRead = func(kv kvstore.KVStore) {
+			current, getErr := kv.Get(kvstore.KeyServersConfig)
+			require.NoError(t, getErr)
+			list, parseErr := kvstore.ParseServersConfig(current)
+			require.NoError(t, parseErr)
+			for i := range list {
+				if list[i].ServerID == "s1" {
+					list[i].HSToken = "hs-from-concurrent-writer"
+				}
+			}
+			updatedBytes, marshalErr := kvstore.MarshalServersConfig(list)
+			require.NoError(t, marshalErr)
+			require.NoError(t, kv.Set(kvstore.KeyServersConfig, updatedBytes))
+		}
+
+		_, _, err := svc.Update("s1", Update{ASToken: new("as-from-this-call")})
+		require.NoError(t, err)
+
+		final, err := svc.Get("s1")
+		require.NoError(t, err)
+		assert.Equal(t, "as-from-this-call", final.ASToken, "this call's own write must still land")
+		assert.Equal(t, "hs-from-concurrent-writer", final.HSToken, "the concurrent writer's change must survive, not be clobbered by a stale retry")
+	})
+}
+
+func mustMarshal(t *testing.T, servers []kvstore.ServerConfig) []byte {
+	t.Helper()
+	data, err := kvstore.MarshalServersConfig(servers)
+	require.NoError(t, err)
+	return data
+}
+
 // --- Seed ---
 
 func TestSeed(t *testing.T) {

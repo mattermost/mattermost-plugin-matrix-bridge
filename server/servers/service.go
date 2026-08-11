@@ -479,6 +479,147 @@ func (s *Service) SetEnabled(serverID string, enabled bool) error {
 	return s.host.RefreshAndBroadcast("server_enabled_changed")
 }
 
+// Update carries a partial update. A nil field means "leave alone" - an absent
+// field and an empty string are NOT the same thing, which is what lets the edit
+// form send only what the admin actually changed. ServerID, EventDomain, SiteURL
+// and RemoteID are never editable through Update - see the field-by-field notes on
+// each setter below.
+type Update struct {
+	ServerURL      *string
+	ASToken        *string
+	HSToken        *string
+	UsernamePrefix *string // "" -> DefaultUsernamePrefix, matching Add
+	ServerName     *string // "" -> re-discovered, matching Add
+}
+
+// Update applies a partial edit to serverID and returns the updated entry plus any
+// human-readable warnings for changes that succeeded but have consequences the
+// admin must know about. Validation and name resolution happen before the CAS
+// mutator runs (ResolveServerName performs a network probe, and the callback must
+// stay pure); uniqueness checks run inside it, against the live slice and
+// excluding the entry being edited, so two concurrent edits cannot both win.
+//
+// EventDomain, SiteURL and RemoteID are never touched, even when ServerURL
+// changes: recomputing EventDomain would orphan the matrix_event_id_<domain>
+// property on every already-synced post, and re-deriving SiteURL would make the
+// platform hand back a different shared-channels remote than the one already
+// registered. Update does not re-register or unregister that remote - SiteURL is
+// unchanged, so there is nothing to re-key.
+func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []string, error) {
+	current, err := s.Get(serverID)
+	if err != nil {
+		return kvstore.ServerConfig{}, nil, err
+	}
+
+	newServerURL := current.ServerURL
+	newEndpoint := current.Endpoint
+	endpointChanged := false
+	if u.ServerURL != nil {
+		endpoint, normErr := NormalizeEndpoint(*u.ServerURL)
+		if normErr != nil {
+			return kvstore.ServerConfig{}, nil, wrapf(ErrInvalidInput, "invalid server URL: %v", normErr)
+		}
+		newServerURL = *u.ServerURL
+		if endpoint != current.Endpoint {
+			newEndpoint = endpoint
+			endpointChanged = true
+		}
+	}
+
+	if u.ASToken != nil && *u.ASToken == "" {
+		return kvstore.ServerConfig{}, nil, wrapf(ErrInvalidInput, "as_token cannot be empty")
+	}
+	if u.HSToken != nil && *u.HSToken == "" {
+		return kvstore.ServerConfig{}, nil, wrapf(ErrInvalidInput, "hs_token cannot be empty")
+	}
+
+	newUsernamePrefix := current.UsernamePrefix
+	usernamePrefixChanged := false
+	if u.UsernamePrefix != nil {
+		resolved := *u.UsernamePrefix
+		if resolved == "" {
+			resolved = DefaultUsernamePrefix
+		}
+		if resolved != current.UsernamePrefix {
+			newUsernamePrefix = resolved
+			usernamePrefixChanged = true
+		}
+	}
+
+	// Resolved through ResolveServerName exactly like Add, against the (possibly
+	// just-updated) URL, so normalization matches add-time behaviour.
+	newServerName := current.ServerName
+	serverNameChanged := false
+	if u.ServerName != nil {
+		resolved, resolveErr := s.ResolveServerName(newServerURL, *u.ServerName)
+		if resolveErr != nil {
+			return kvstore.ServerConfig{}, nil, errors.Wrap(resolveErr, "failed to resolve server name")
+		}
+		if resolved != current.ServerName {
+			newServerName = resolved
+			serverNameChanged = true
+		}
+	}
+
+	var updated kvstore.ServerConfig
+	err = s.mutate(func(list []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
+		idx := -1
+		for i, entry := range list {
+			if entry.ServerID == serverID {
+				idx = i
+				continue
+			}
+			if endpointChanged && entry.Endpoint == newEndpoint {
+				return nil, wrapf(ErrEndpointTaken, "a server is already registered at this endpoint (server_id: %s); use `/matrix server remove %s` first", entry.ServerID, entry.ServerID)
+			}
+			if serverNameChanged && entry.ServerName == newServerName {
+				return nil, wrapf(ErrNameTaken, "server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", newServerName, entry.ServerID)
+			}
+		}
+		if idx == -1 {
+			// Concurrently removed between the Get above and this callback.
+			return nil, wrapf(ErrNotRegistered, "server %s is not registered", serverID)
+		}
+
+		result := make([]kvstore.ServerConfig, len(list))
+		copy(result, list)
+		entry := result[idx]
+		entry.ServerURL = newServerURL
+		entry.Endpoint = newEndpoint
+		entry.ServerName = newServerName
+		entry.UsernamePrefix = newUsernamePrefix
+		if u.ASToken != nil {
+			entry.ASToken = *u.ASToken
+		}
+		if u.HSToken != nil {
+			entry.HSToken = *u.HSToken
+		}
+		result[idx] = entry
+		updated = entry
+		return result, nil
+	})
+	if err != nil {
+		return kvstore.ServerConfig{}, nil, err
+	}
+
+	var warnings []string
+	if endpointChanged {
+		warnings = append(warnings, "The server URL changed. Its event domain and shared-channels remote key stay at their original values by design, so editing or deleting posts synced before this change keeps working and the server's existing remote identity is unaffected.")
+	}
+	if usernamePrefixChanged {
+		warnings = append(warnings, "The username prefix only applies to new Mattermost users created for Matrix-originated users from now on; existing users keep their current usernames.")
+	}
+	if serverNameChanged {
+		warnings = append(warnings, fmt.Sprintf("Changing the server name to %q means every existing ghost user for this server is no longer recognized as one; inbound events from them will be treated as regular Matrix users' events until they are recreated.", newServerName))
+	}
+
+	if err := s.host.RefreshAndBroadcast("server_updated"); err != nil {
+		s.logger.LogWarn("Failed to refresh Matrix clients after updating server", "server_id", serverID, "error", err)
+	}
+
+	return updated, warnings, nil
+}
+
 // Seed idempotently inserts entry if no existing entry shares its Endpoint,
 // returning the ID that ends up registered at that endpoint (entry.ServerID on a
 // fresh insert, or the existing entry's ID if it was already materialized).
