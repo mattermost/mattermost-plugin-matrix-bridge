@@ -492,7 +492,7 @@ func (p *Plugin) legacyMatrixClientForMigration() *matrix.Client {
 //
 // The v3 migration must not be run when this returns an error - see the call site.
 func (p *Plugin) resolveMigrationServerID() (string, error) {
-	servers, err := p.getServers()
+	servers, err := p.servers.List()
 	if err != nil {
 		return "", errors.Wrap(err, "failed to read servers config")
 	}

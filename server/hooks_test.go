@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -23,6 +24,7 @@ func newTestPluginForHooks(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	api := plugin.API.(*plugintest.API)
 	api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
 	mockAnyLogCalls(api)
@@ -106,7 +108,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
-		require.NoError(t, plugin.SetServerEnabled(serverID, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverID, false))
 
 		_, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		assert.False(t, ok, "a disabled server must be skipped - this is the only thing stopping its outbound traffic")
@@ -116,7 +118,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverIDA, remoteIDA := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 		serverIDB, remoteIDB := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
-		require.NoError(t, plugin.SetServerEnabled(serverIDB, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverIDB, false))
 
 		mappingA, err := kvstore.BuildSingleChannelMapping(serverIDA, "!room:a.example.com")
 		require.NoError(t, err)
@@ -160,7 +162,7 @@ func TestOnSharedChannelsPing(t *testing.T) {
 		// short-circuit before the client lookup, this would panic/error instead of
 		// returning true.
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
-		require.NoError(t, plugin.SetServerEnabled(serverID, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverID, false))
 
 		assert.True(t, plugin.OnSharedChannelsPing(&model.RemoteCluster{RemoteId: remoteID}))
 	})

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -19,6 +20,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 	t.Run("NoMigrationNeeded", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Set current version to target version
@@ -40,6 +42,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 	t.Run("MigrationFromVersion0", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// No version key exists (version 0)
@@ -77,6 +80,7 @@ func TestRunKVStoreMigrations(t *testing.T) {
 	t.Run("InvalidVersionHandledGracefully", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Set invalid version
@@ -100,6 +104,7 @@ func TestMigrateUserMappings(t *testing.T) {
 	t.Run("MigrateMultipleUsers", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Add test user mappings
@@ -148,6 +153,7 @@ func TestMigrateUserMappings(t *testing.T) {
 	t.Run("OverwriteIncorrectReverseMappings", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Add user mapping (source of truth)
@@ -171,6 +177,7 @@ func TestMigrateUserMappings(t *testing.T) {
 	t.Run("HandlesPaginationWithManyKeys", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Add more than one batch worth of keys to test pagination
@@ -210,6 +217,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 	t.Run("MigrateChannelsWithRoomIDs", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Add test channel mappings with room IDs
@@ -243,6 +251,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 	t.Run("MigrateChannelsWithAliases", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 		// No legacy configuration mocked, so legacyMatrixClientForMigration returns nil,
 		// simulating alias resolution being unavailable.
@@ -280,6 +289,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Override the default "no legacy configuration" expectation from
@@ -322,6 +332,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 	t.Run("OverwriteIncorrectReverseMappings", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Add channel mapping (source of truth)
@@ -345,6 +356,7 @@ func TestMigrateChannelMappings(t *testing.T) {
 	t.Run("HandlesPaginationWithManyChannels", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Add more than one batch worth of channel mappings to test pagination
@@ -376,6 +388,7 @@ func TestMigrationIntegration(t *testing.T) {
 	t.Run("FullMigrationScenario", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Setup a complete scenario with users, channels, and other keys
@@ -472,6 +485,7 @@ func TestMigrationIntegration(t *testing.T) {
 	t.Run("RunMigrationTwiceIsIdempotent", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Add test data
@@ -517,6 +531,7 @@ func TestMigrationIntegration(t *testing.T) {
 	t.Run("EmptyKVStoreHandledGracefully", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
 		// Run migration on empty KV store

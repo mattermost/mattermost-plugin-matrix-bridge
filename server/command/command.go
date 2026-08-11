@@ -2,12 +2,9 @@
 package command
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
@@ -15,6 +12,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -35,10 +33,7 @@ type PluginAccessor interface {
 	GetKVStore() kvstore.KVStore
 
 	// Server registry
-	GetManagedServers() ([]kvstore.ServerConfig, error)
-	AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID, serverNameOverride string) (string, error)
-	RemoveServer(serverID string) (bool, error)
-	SetServerEnabled(serverID string, enabled bool) error
+	Servers() *servers.Service
 
 	// Per-server Matrix access
 	GetMatrixClientForServer(serverID string) *matrix.Client
@@ -67,13 +62,6 @@ type PluginAccessor interface {
 func ServerAutocompleteURL(pluginID string) string {
 	return "/plugins/" + pluginID + "/api/v1/autocomplete/servers"
 }
-
-// statusProbeDeadline bounds how long /matrix status and /matrix server status wait for
-// all server health probes together. The Matrix HTTP client allows up to 30s per
-// request, so probing servers sequentially could outlast Mattermost's slash-command
-// timeout; probes run concurrently under this single deadline instead. A var so tests
-// can shorten it.
-var statusProbeDeadline = 8 * time.Second
 
 // sanitizeShareName creates a valid ShareName matching the regex: ^[a-z0-9]+([a-z\-\_0-9]+|(__)?)[a-z0-9]*$
 func sanitizeShareName(name string) string {
@@ -245,8 +233,8 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 
 	// Subcommands taking a server identifier offer the registered servers as a dynamic
 	// list, so an admin picks one instead of copying a 26-character ID out of
-	// `/matrix server list`. resolveServerIDArg still accepts a server name or URL host
-	// typed by hand.
+	// `/matrix server list`. Servers().ResolveIdentifier still accepts a server name or
+	// URL host typed by hand.
 	serversURL := ServerAutocompleteURL(plugin.GetPluginID())
 	withServerID := func(name, hint, desc string, required bool) *model.AutocompleteData {
 		cmd := model.NewAutocompleteData(name, hint, desc)
@@ -312,50 +300,11 @@ func ephemeral(text string) *model.CommandResponse {
 	}
 }
 
-// resolveServerIDArg resolves a user-supplied server identifier. It matches, in order,
-// by server_id, then by ServerName, then by URL host. An empty arg is only valid when
-// exactly one server is registered.
-func (c *Handler) resolveServerIDArg(arg string) (string, error) {
-	servers, err := c.plugin.GetManagedServers()
-	if err != nil {
-		return "", errors.Wrap(err, "failed to list Matrix servers")
-	}
-
-	if arg == "" {
-		switch len(servers) {
-		case 0:
-			return "", errors.New("no Matrix servers are registered; use `/matrix server add` first")
-		case 1:
-			return servers[0].ServerID, nil
-		default:
-			return "", errors.New("multiple Matrix servers are registered; specify a server_id (see `/matrix server list`)")
-		}
-	}
-
-	for _, s := range servers {
-		if s.ServerID == arg {
-			return s.ServerID, nil
-		}
-	}
-	for _, s := range servers {
-		if s.ServerName == arg {
-			return s.ServerID, nil
-		}
-	}
-	for _, s := range servers {
-		if host, err := matrix.ExtractServerDomain(s.ServerURL); err == nil && host != "" && host == arg {
-			return s.ServerID, nil
-		}
-	}
-
-	return "", errors.Errorf("no registered Matrix server matches %q", arg)
-}
-
 // resolveSoleServerID resolves the single registered server for the legacy
 // single-server commands (test, create, map, unmap). Returns an ephemeral error
 // response pointing at /matrix server when zero or several servers are registered.
 func (c *Handler) resolveSoleServerID() (string, *model.CommandResponse) {
-	servers, err := c.plugin.GetManagedServers()
+	servers, err := c.plugin.Servers().List()
 	if err != nil {
 		return "", ephemeral(fmt.Sprintf("❌ Failed to load Matrix servers: %v", err))
 	}
@@ -369,94 +318,14 @@ func (c *Handler) resolveSoleServerID() (string, *model.CommandResponse) {
 	}
 }
 
+// serverByID is a thin convenience wrapper around Servers().Get for the many
+// command handlers below that want a *kvstore.ServerConfig.
 func (c *Handler) serverByID(serverID string) (*kvstore.ServerConfig, error) {
-	servers, err := c.plugin.GetManagedServers()
+	server, err := c.plugin.Servers().Get(serverID)
 	if err != nil {
 		return nil, err
 	}
-	for i := range servers {
-		if servers[i].ServerID == serverID {
-			return &servers[i], nil
-		}
-	}
-	return nil, errors.Errorf("server %s is not registered", serverID)
-}
-
-// countMappedChannelsPerServer does a single keyspace scan shared by /matrix list,
-// /matrix status, /matrix server list and /matrix server status.
-func (c *Handler) countMappedChannelsPerServer() (map[string]int, error) {
-	keys, err := kvstore.ListAllKeysWithPrefix(c.kvstore, kvstore.KeyPrefixChannelMapping, 1000)
-	if err != nil {
-		return nil, err
-	}
-
-	counts := make(map[string]int)
-	for _, key := range keys {
-		data, err := c.kvstore.Get(key)
-		if err != nil {
-			continue
-		}
-		mappings, err := kvstore.ParseChannelServerMappings(data)
-		if err != nil {
-			continue
-		}
-		for _, m := range mappings {
-			counts[m.ServerID]++
-		}
-	}
-	return counts, nil
-}
-
-// probeServerHealth concurrently health-checks every server in servers under a single
-// deadline, so N servers cost roughly one probe's worth of wall-clock time rather than
-// N. Servers whose probe misses the deadline render as "timed out", never as healthy.
-func (c *Handler) probeServerHealth(servers []kvstore.ServerConfig) map[string]string {
-	results := make(map[string]string, len(servers))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	ctx, cancel := context.WithTimeout(context.Background(), statusProbeDeadline)
-	defer cancel()
-
-	setResult := func(serverID, status string) {
-		mu.Lock()
-		results[serverID] = status
-		mu.Unlock()
-	}
-
-	for _, s := range servers {
-		if !s.Enabled {
-			setResult(s.ServerID, "disabled")
-			continue
-		}
-
-		matrixClient := c.plugin.GetMatrixClientForServer(s.ServerID)
-		if matrixClient == nil {
-			setResult(s.ServerID, "unavailable")
-			continue
-		}
-
-		wg.Add(1)
-		go func(serverID string, client *matrix.Client) {
-			defer wg.Done()
-			done := make(chan error, 1)
-			go func() { done <- client.TestConnection() }()
-
-			select {
-			case err := <-done:
-				if err != nil {
-					setResult(serverID, "unhealthy")
-				} else {
-					setResult(serverID, "healthy")
-				}
-			case <-ctx.Done():
-				setResult(serverID, "timed out")
-			}
-		}(s.ServerID, matrixClient)
-	}
-
-	wg.Wait()
-	return results
+	return &server, nil
 }
 
 // syncChannelMembersToMatrixRoom creates ghost users for all channel members and joins them to the Matrix room
@@ -745,51 +614,63 @@ func (c *Handler) createRoomCore(args *model.CommandArgs, serverID, roomName str
 	return ephemeral(fmt.Sprintf("✅ **Matrix Room Created & Mapped**\n\n**Room Name:** %s\n**Room ID:** `%s`\n**Channel:** %s%s%s%s", roomName, roomID, channelName, publishStatus, joinStatus, shareStatus))
 }
 
+// testServerConnection runs Servers().Diagnose and renders its structured checks as
+// the same markdown /matrix test and /matrix server test have always printed. The
+// service returns data, not prose; only this rendering step is command-specific.
 func (c *Handler) testServerConnection(serverID string) *model.CommandResponse {
+	return ephemeral(renderDiagnostics(c.plugin.Servers().Diagnose(serverID)))
+}
+
+// renderDiagnostics formats a servers.Diagnostics as markdown, preserving
+// testServerConnection's original short-circuit: a failed registry check stops
+// there; a nil client renders as skip (not fail) for the connection and appservice
+// checks skipped as a consequence; the "Next Steps" footer only appears once the
+// connection check actually succeeded, exactly as when this logic lived here inline.
+func renderDiagnostics(diag servers.Diagnostics) string {
 	var b strings.Builder
 	b.WriteString("🔍 **Matrix Connection Test**\n\n")
 
-	server, err := c.serverByID(serverID)
-	if err != nil {
-		fmt.Fprintf(&b, "❌ %v\n", err)
-		return ephemeral(b.String())
-	}
-
-	fmt.Fprintf(&b, "✅ **Server URL:** %s\n", server.ServerURL)
-
-	matrixClient := c.plugin.GetMatrixClientForServer(serverID)
-	if matrixClient == nil {
-		b.WriteString("❌ **Matrix Client:** Not initialized\n")
-		return ephemeral(b.String())
-	}
-	b.WriteString("✅ **Matrix Client:** Initialized\n")
-
-	if err := matrixClient.TestConnection(); err != nil {
-		b.WriteString("❌ **Connection:** Failed to connect to Matrix server\n")
-		fmt.Fprintf(&b, "🔍 **Error:** %s\n", err.Error())
-		return ephemeral(b.String())
-	}
-	b.WriteString("✅ **Connection:** Successfully connected to Matrix server\n")
-
-	if serverInfo, infoErr := matrixClient.GetServerInfo(); infoErr == nil && serverInfo != nil {
-		if serverInfo.Name != "Matrix Server" || serverInfo.Version != "Unknown" {
-			fmt.Fprintf(&b, "📊 **Matrix Server:** %s", serverInfo.Name)
-			if serverInfo.Version != "Unknown" {
-				fmt.Fprintf(&b, " v%s", serverInfo.Version)
+	for _, check := range diag.Checks {
+		switch check.Key {
+		case "registry":
+			if check.Status == "fail" {
+				fmt.Fprintf(&b, "❌ %s\n", check.Detail)
+				return b.String()
 			}
-			b.WriteString("\n")
+			fmt.Fprintf(&b, "✅ **Server URL:** %s\n", check.Detail)
+		case "client":
+			if check.Status == "fail" {
+				b.WriteString("❌ **Matrix Client:** Not initialized\n")
+				return b.String()
+			}
+			b.WriteString("✅ **Matrix Client:** Initialized\n")
+		case "connection":
+			if check.Status == "fail" {
+				b.WriteString("❌ **Connection:** Failed to connect to Matrix server\n")
+				fmt.Fprintf(&b, "🔍 **Error:** %s\n", check.Detail)
+				return b.String()
+			}
+			b.WriteString("✅ **Connection:** Successfully connected to Matrix server\n")
+
+			if diag.ServerInfo != nil && (diag.ServerInfo.Name != "Matrix Server" || diag.ServerInfo.Version != "Unknown") {
+				fmt.Fprintf(&b, "📊 **Matrix Server:** %s", diag.ServerInfo.Name)
+				if diag.ServerInfo.Version != "Unknown" {
+					fmt.Fprintf(&b, " v%s", diag.ServerInfo.Version)
+				}
+				b.WriteString("\n")
+			}
+		case "appservice":
+			if check.Status == "fail" {
+				b.WriteString("❌ **Application Service:** Permission test failed\n")
+				fmt.Fprintf(&b, "🔍 **Error:** %s\n", check.Detail)
+			} else {
+				b.WriteString("✅ **Application Service:** Permissions verified (can query namespace)\n")
+			}
 		}
 	}
 
-	if err := matrixClient.TestApplicationServicePermissions(); err != nil {
-		b.WriteString("❌ **Application Service:** Permission test failed\n")
-		fmt.Fprintf(&b, "🔍 **Error:** %s\n", err.Error())
-	} else {
-		b.WriteString("✅ **Application Service:** Permissions verified (can query namespace)\n")
-	}
-
 	b.WriteString(testCommandNextSteps)
-	return ephemeral(b.String())
+	return b.String()
 }
 
 func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.CommandResponse {
@@ -798,7 +679,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 		return ephemeral(fmt.Sprintf("❌ Failed to retrieve mappings: %v", err))
 	}
 
-	servers, _ := c.plugin.GetManagedServers()
+	servers, _ := c.plugin.Servers().List()
 	serverNames := make(map[string]string, len(servers))
 	for _, s := range servers {
 		serverNames[s.ServerID] = s.ServerName
@@ -861,7 +742,7 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 // connection health (probed concurrently under statusProbeDeadline) and mapped-channel
 // count. No admin gate, no secrets.
 func (c *Handler) executeStatusCommand() *model.CommandResponse {
-	servers, err := c.plugin.GetManagedServers()
+	servers, err := c.plugin.Servers().List()
 	if err != nil {
 		return ephemeral(fmt.Sprintf("❌ Failed to load Matrix servers: %v", err))
 	}
@@ -869,8 +750,8 @@ func (c *Handler) executeStatusCommand() *model.CommandResponse {
 		return ephemeral("No Matrix servers are registered. Use `/matrix server add` to add one.")
 	}
 
-	counts, countsErr := c.countMappedChannelsPerServer()
-	health := c.probeServerHealth(servers)
+	counts, countsErr := c.plugin.Servers().CountMappedChannels()
+	health := c.plugin.Servers().ProbeHealth(servers)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Matrix Bridge Status (%d server(s)):**\n\n", len(servers))
@@ -894,7 +775,7 @@ func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResp
 	// one server's records into another's namespace). Check before resetting the
 	// version marker, so a refusal here doesn't leave it reset with no migration having
 	// actually run to fix it back up.
-	if servers, err := c.plugin.GetManagedServers(); err == nil && len(servers) >= 2 {
+	if servers, err := c.plugin.Servers().List(); err == nil && len(servers) >= 2 {
 		return ephemeral("❌ `/matrix migrate` refuses to run while 2 or more Matrix servers are registered - it would rekey one server's records into another's namespace.")
 	}
 
@@ -1024,22 +905,26 @@ func (c *Handler) executeServerAddCommand(fields []string) *model.CommandRespons
 		usernamePrefix = positional[3]
 	}
 
-	serverID, err := c.plugin.AddServer(serverURL, asToken, hsToken, usernamePrefix, flags["server-id"], flags["server-name"])
+	created, err := c.plugin.Servers().Add(servers.AddRequest{
+		ServerURL:      serverURL,
+		ASToken:        asToken,
+		HSToken:        hsToken,
+		UsernamePrefix: usernamePrefix,
+		ServerID:       flags["server-id"],
+		ServerName:     flags["server-name"],
+	})
 	if err != nil {
 		return ephemeral(fmt.Sprintf("❌ Failed to add server: %v", err))
 	}
-
-	serverName := serverID
-	if server, err := c.serverByID(serverID); err == nil {
-		serverName = server.ServerName
-	}
+	serverID := created.ServerID
+	serverName := created.ServerName
 
 	return ephemeral(fmt.Sprintf("✅ **Matrix server added**\n\n**Server ID:** `%s`\n**Server name:** `%s`\n**URL:** %s\n\nUse `/matrix server map %s <room_alias|room_id>` in a channel to bridge it.",
 		serverID, serverName, serverURL, serverID))
 }
 
 func (c *Handler) executeServerRemoveCommand(serverID string) *model.CommandResponse {
-	removed, err := c.plugin.RemoveServer(serverID)
+	removed, err := c.plugin.Servers().Remove(serverID)
 	if err != nil {
 		return ephemeral(fmt.Sprintf("❌ Failed to remove server: %v", err))
 	}
@@ -1053,7 +938,7 @@ func (c *Handler) executeServerRemoveCommand(serverID string) *model.CommandResp
 }
 
 func (c *Handler) executeServerListCommand() *model.CommandResponse {
-	servers, err := c.plugin.GetManagedServers()
+	servers, err := c.plugin.Servers().List()
 	if err != nil {
 		return ephemeral(fmt.Sprintf("❌ Failed to list servers: %v", err))
 	}
@@ -1061,7 +946,7 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 		return ephemeral("No Matrix servers are registered. Use `/matrix server add` to add one.")
 	}
 
-	counts, countsErr := c.countMappedChannelsPerServer()
+	counts, countsErr := c.plugin.Servers().CountMappedChannels()
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Matrix Servers (%d):**\n\n", len(servers))
@@ -1101,7 +986,7 @@ func (c *Handler) executeServerMapDispatch(args *model.CommandArgs, rest []strin
 		roomIdentifier = rest[1]
 	}
 
-	serverID, err := c.resolveServerIDArg(serverIDArg)
+	serverID, err := c.plugin.Servers().ResolveIdentifier(serverIDArg)
 	if err != nil {
 		return ephemeral("❌ " + err.Error())
 	}
@@ -1110,7 +995,7 @@ func (c *Handler) executeServerMapDispatch(args *model.CommandArgs, rest []strin
 }
 
 func (c *Handler) executeServerRegistrationCommand(serverIDArg string) *model.CommandResponse {
-	serverID, err := c.resolveServerIDArg(serverIDArg)
+	serverID, err := c.plugin.Servers().ResolveIdentifier(serverIDArg)
 	if err != nil {
 		return ephemeral("❌ " + err.Error())
 	}
@@ -1120,37 +1005,16 @@ func (c *Handler) executeServerRegistrationCommand(serverIDArg string) *model.Co
 		return ephemeral(fmt.Sprintf("❌ %v", err))
 	}
 
-	siteURL := ""
-	if cfg := c.pluginAPI.GetConfig(); cfg != nil && cfg.ServiceSettings.SiteURL != nil {
-		siteURL = *cfg.ServiceSettings.SiteURL
+	_, registrationYAML, err := c.plugin.Servers().RegistrationYAML(serverID)
+	if err != nil {
+		return ephemeral(fmt.Sprintf("❌ %v", err))
 	}
-	// The registration url is the plugin's base path ONLY. The homeserver appends the
-	// appservice path itself ("/_matrix/app/v1/transactions/{txnId}" - see the router in
-	// server/api.go), so including "/_matrix/app/v1" here produces a doubled path that
-	// matches no route and silently breaks all inbound traffic for that server.
-	webhookURL := strings.TrimSuffix(siteURL, "/") + "/plugins/" + c.plugin.GetPluginID()
-
-	registrationYAML := fmt.Sprintf(`id: mattermost-bridge-%s
-url: %s
-as_token: %s
-hs_token: %s
-sender_localpart: _mattermost_bot
-rate_limited: false
-namespaces:
-  users:
-    - exclusive: true
-      regex: '@_mattermost_.*'
-  aliases:
-    - exclusive: false
-      regex: '#mattermost-bridge-.*'
-  rooms: []
-`, server.ServerID, webhookURL, server.ASToken, server.HSToken)
 
 	return ephemeral(fmt.Sprintf("**Application Service registration for %s (`%s`):**\n```yaml\n%s```", server.ServerName, server.ServerID, registrationYAML))
 }
 
 func (c *Handler) executeServerStatusCommand(serverIDArg string) *model.CommandResponse {
-	serverID, err := c.resolveServerIDArg(serverIDArg)
+	serverID, err := c.plugin.Servers().ResolveIdentifier(serverIDArg)
 	if err != nil {
 		return ephemeral("❌ " + err.Error())
 	}
@@ -1160,8 +1024,8 @@ func (c *Handler) executeServerStatusCommand(serverIDArg string) *model.CommandR
 		return ephemeral(fmt.Sprintf("❌ %v", err))
 	}
 
-	health := c.probeServerHealth([]kvstore.ServerConfig{*server})
-	counts, countsErr := c.countMappedChannelsPerServer()
+	health := c.plugin.Servers().ProbeHealth([]kvstore.ServerConfig{*server})
+	counts, countsErr := c.plugin.Servers().CountMappedChannels()
 	countStr := "unavailable"
 	if countsErr == nil {
 		countStr = strconv.Itoa(counts[server.ServerID])
@@ -1177,7 +1041,7 @@ func (c *Handler) executeServerStatusCommand(serverIDArg string) *model.CommandR
 }
 
 func (c *Handler) executeServerEnableCommand(serverID string, enabled bool) *model.CommandResponse {
-	if err := c.plugin.SetServerEnabled(serverID, enabled); err != nil {
+	if err := c.plugin.Servers().SetEnabled(serverID, enabled); err != nil {
 		return ephemeral(fmt.Sprintf("❌ Failed to update server: %v", err))
 	}
 	state := "disabled"
@@ -1219,7 +1083,7 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 		if errResp != nil {
 			return errResp
 		}
-		serverID, err := c.resolveServerIDArg(serverIDArg)
+		serverID, err := c.plugin.Servers().ResolveIdentifier(serverIDArg)
 		if err != nil {
 			return ephemeral("❌ " + err.Error())
 		}
@@ -1241,7 +1105,7 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 		if errResp != nil {
 			return errResp
 		}
-		serverID, err := c.resolveServerIDArg(serverIDArg)
+		serverID, err := c.plugin.Servers().ResolveIdentifier(serverIDArg)
 		if err != nil {
 			return ephemeral("❌ " + err.Error())
 		}

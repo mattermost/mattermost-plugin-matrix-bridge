@@ -13,25 +13,40 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// mockPlugin implements PluginAccessor for testing, backed by an in-memory server list
-// instead of a real KV store or Matrix client.
+// fakeHost is a minimal servers.Host for command package tests: every method is a
+// configurable no-op except MatrixClient, which serves whatever a test wired up.
+type fakeHost struct {
+	matrixClients map[string]*matrix.Client
+	siteURL       string
+	pluginID      string
+
+	registerErr   error
+	unregisterErr error
+	refreshErr    error
+}
+
+func (h *fakeHost) MatrixClient(serverID string) *matrix.Client { return h.matrixClients[serverID] }
+func (h *fakeHost) RegisterRemote(_ string) error               { return h.registerErr }
+func (h *fakeHost) UnregisterRemote(_ string) error             { return h.unregisterErr }
+func (h *fakeHost) RefreshAndBroadcast(_ string) error          { return h.refreshErr }
+func (h *fakeHost) SiteURL() string                             { return h.siteURL }
+func (h *fakeHost) PluginID() string                            { return h.pluginID }
+
+// mockPlugin implements PluginAccessor for testing. The server registry itself is a
+// real *servers.Service backed by an in-memory KV store and fakeHost - only the
+// non-registry PluginAccessor methods (Matrix client access, channel mapping,
+// migrations) are hand-faked here.
 type mockPlugin struct {
 	client    *pluginapi.Client
 	kvstore   kvstore.KVStore
 	pluginAPI plugin.API
 
-	servers []kvstore.ServerConfig
-
-	addServerErr error
-	addServerID  string
-
-	removeServerOK  bool
-	removeServerErr error
-
-	setEnabledErr error
+	serverSvc *servers.Service
+	host      *fakeHost
 
 	mapErr   error
 	unmapErr error
@@ -42,58 +57,7 @@ type mockPlugin struct {
 
 func (m *mockPlugin) GetKVStore() kvstore.KVStore { return m.kvstore }
 
-func (m *mockPlugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
-	return m.servers, nil
-}
-
-func (m *mockPlugin) AddServer(serverURL, _, _, _, serverID, _ string) (string, error) {
-	if m.addServerErr != nil {
-		return "", m.addServerErr
-	}
-	id := m.addServerID
-	if id == "" {
-		id = serverID
-	}
-	if id == "" {
-		id = model.NewId()
-	}
-	m.servers = append(m.servers, kvstore.ServerConfig{
-		ServerID:   id,
-		ServerURL:  serverURL,
-		ServerName: serverURL,
-		Enabled:    true,
-	})
-	return id, nil
-}
-
-func (m *mockPlugin) RemoveServer(serverID string) (bool, error) {
-	if m.removeServerErr != nil {
-		return false, m.removeServerErr
-	}
-	if !m.removeServerOK {
-		return false, nil
-	}
-	for i, s := range m.servers {
-		if s.ServerID == serverID {
-			m.servers = append(m.servers[:i], m.servers[i+1:]...)
-			break
-		}
-	}
-	return true, nil
-}
-
-func (m *mockPlugin) SetServerEnabled(serverID string, enabled bool) error {
-	if m.setEnabledErr != nil {
-		return m.setEnabledErr
-	}
-	for i := range m.servers {
-		if m.servers[i].ServerID == serverID {
-			m.servers[i].Enabled = enabled
-			return nil
-		}
-	}
-	return assert.AnError
-}
+func (m *mockPlugin) Servers() *servers.Service { return m.serverSvc }
 
 func (m *mockPlugin) GetMatrixClientForServer(_ string) *matrix.Client { return nil }
 func (m *mockPlugin) GetRemoteIDForServer(serverID string) string      { return "remote-" + serverID }
@@ -180,20 +144,40 @@ func (m *memoryKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue
 	return m.Set(key, newValue)
 }
 
+// testLogger is a servers.Logger that discards everything - command tests assert on
+// command output, not on what the registry logged internally.
+type testLogger struct{}
+
+func (testLogger) LogDebug(string, ...any) {}
+func (testLogger) LogInfo(string, ...any)  {}
+func (testLogger) LogWarn(string, ...any)  {}
+func (testLogger) LogError(string, ...any) {}
+
 // newTestHandler builds a Handler with a fresh mockPlugin and mock Mattermost API,
 // without going through NewCommandHandler (which registers a real slash command).
-func newTestHandler(t *testing.T, servers ...kvstore.ServerConfig) (*Handler, *mockPlugin, *plugintest.API) {
+// seedServers, if any, are written directly to the KV store - bypassing
+// Servers().Add's name-resolution network probe and server_id format validation, so
+// fixtures can use readable IDs like "serverA".
+func newTestHandler(t *testing.T, seedServers ...kvstore.ServerConfig) (*Handler, *mockPlugin, *plugintest.API) {
 	t.Helper()
 
 	api := &plugintest.API{}
 	client := pluginapi.NewClient(api, nil)
 	store := newMemoryKVStore()
 
+	if len(seedServers) > 0 {
+		data, err := kvstore.MarshalServersConfig(seedServers)
+		require.NoError(t, err)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
+	}
+
+	host := &fakeHost{matrixClients: map[string]*matrix.Client{}, pluginID: "com.mattermost.plugin-matrix-bridge"}
 	mp := &mockPlugin{
 		client:    client,
 		pluginAPI: api,
 		kvstore:   store,
-		servers:   servers,
+		serverSvc: servers.New(store, testLogger{}, host),
+		host:      host,
 	}
 
 	return &Handler{
@@ -204,57 +188,10 @@ func newTestHandler(t *testing.T, servers ...kvstore.ServerConfig) (*Handler, *m
 	}, mp, api
 }
 
-func TestResolveServerIDArg(t *testing.T) {
-	serverA := kvstore.ServerConfig{ServerID: "serverA", ServerName: "a.example.com", ServerURL: "https://a.example.com"}
-	serverB := kvstore.ServerConfig{ServerID: "serverB", ServerName: "b.example.com", ServerURL: "https://b.example.com"}
-
-	t.Run("empty arg with zero servers errors", func(t *testing.T) {
-		h, _, _ := newTestHandler(t)
-		_, err := h.resolveServerIDArg("")
-		require.Error(t, err)
-	})
-
-	t.Run("empty arg with exactly one server resolves it", func(t *testing.T) {
-		h, _, _ := newTestHandler(t, serverA)
-		id, err := h.resolveServerIDArg("")
-		require.NoError(t, err)
-		assert.Equal(t, "serverA", id)
-	})
-
-	t.Run("empty arg with multiple servers is ambiguous", func(t *testing.T) {
-		h, _, _ := newTestHandler(t, serverA, serverB)
-		_, err := h.resolveServerIDArg("")
-		require.Error(t, err)
-	})
-
-	t.Run("matches by server_id", func(t *testing.T) {
-		h, _, _ := newTestHandler(t, serverA, serverB)
-		id, err := h.resolveServerIDArg("serverB")
-		require.NoError(t, err)
-		assert.Equal(t, "serverB", id)
-	})
-
-	t.Run("matches by server name", func(t *testing.T) {
-		h, _, _ := newTestHandler(t, serverA, serverB)
-		id, err := h.resolveServerIDArg("a.example.com")
-		require.NoError(t, err)
-		assert.Equal(t, "serverA", id)
-	})
-
-	t.Run("matches by URL host", func(t *testing.T) {
-		serverC := kvstore.ServerConfig{ServerID: "serverC", ServerName: "different-name.example.org", ServerURL: "https://c.example.com"}
-		h, _, _ := newTestHandler(t, serverC)
-		id, err := h.resolveServerIDArg("c.example.com")
-		require.NoError(t, err)
-		assert.Equal(t, "serverC", id)
-	})
-
-	t.Run("no match errors", func(t *testing.T) {
-		h, _, _ := newTestHandler(t, serverA)
-		_, err := h.resolveServerIDArg("nonexistent")
-		require.Error(t, err)
-	})
-}
+// Server identifier resolution (server_id / ServerName / URL host matching) now
+// lives in servers.Service.ResolveIdentifier - see server/servers/service_test.go.
+// TestExecuteServerMapDispatch and TestExecuteServerTest below still exercise it
+// end-to-end through the command layer.
 
 func TestStripFlags(t *testing.T) {
 	t.Run("no flags present", func(t *testing.T) {
@@ -337,23 +274,26 @@ func TestExecuteServerGroupAddRemoveList(t *testing.T) {
 		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		resp := h.executeServerGroup(args, []string{"add", "https://matrix.example.com", "as-token", "hs-token"})
 		assert.Contains(t, resp.Text, "added")
-		assert.Len(t, mp.servers, 1)
+		list, err := mp.serverSvc.List()
+		require.NoError(t, err)
+		assert.Len(t, list, 1)
 	})
 
 	t.Run("add failure surfaces the error", func(t *testing.T) {
-		h2, mp2, api2 := newTestHandler(t)
+		h2, _, api2 := newTestHandler(t)
 		api2.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
-		mp2.addServerErr = assert.AnError
-		resp := h2.executeServerGroup(args, []string{"add", "https://matrix.example.com", "as-token", "hs-token"})
+		// An invalid server_id forces Servers().Add to fail its own validation,
+		// without needing to fake a registry-write failure.
+		resp := h2.executeServerGroup(args, []string{"add", "https://matrix.example.com", "as-token", "hs-token", "--server-id", "not-a-valid-id"})
 		assert.Contains(t, resp.Text, "Failed to add server")
 	})
 
 	t.Run("list shows the registered server", func(t *testing.T) {
 		seeded := kvstore.ServerConfig{ServerID: "server-list-test", ServerName: "list.example.com", ServerURL: "https://list.example.com", Enabled: true}
-		h, mp, api := newTestHandler(t, seeded)
+		h, _, api := newTestHandler(t, seeded)
 		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		resp := h.executeServerGroup(args, []string{"list"})
-		assert.Contains(t, resp.Text, mp.servers[0].ServerID)
+		assert.Contains(t, resp.Text, seeded.ServerID)
 	})
 
 	t.Run("remove requires a server_id", func(t *testing.T) {
@@ -364,19 +304,17 @@ func TestExecuteServerGroupAddRemoveList(t *testing.T) {
 	})
 
 	t.Run("remove of unknown server reports not found", func(t *testing.T) {
-		h3, mp3, api3 := newTestHandler(t)
+		h3, _, api3 := newTestHandler(t)
 		api3.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
-		mp3.removeServerOK = false
 		resp := h3.executeServerGroup(args, []string{"remove", "nonexistent"})
 		assert.Contains(t, resp.Text, "No server found")
 	})
 
 	t.Run("remove happy path prints the recovery key", func(t *testing.T) {
-		seeded := kvstore.ServerConfig{ServerID: "server-remove-test", ServerName: "remove.example.com", ServerURL: "https://remove.example.com", Enabled: true}
-		h, mp, api := newTestHandler(t, seeded)
+		seeded := kvstore.ServerConfig{ServerID: "server-remove-test", ServerName: "remove.example.com", ServerURL: "https://remove.example.com", Enabled: true, SiteURL: "https://remove.example.com"}
+		h, _, api := newTestHandler(t, seeded)
 		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
-		mp.removeServerOK = true
-		serverID := mp.servers[0].ServerID
+		serverID := seeded.ServerID
 		resp := h.executeServerGroup(args, []string{"remove", serverID})
 		assert.Contains(t, resp.Text, serverID)
 		assert.Contains(t, resp.Text, "--server-id")
@@ -526,11 +464,8 @@ func TestExecuteServerRegistrationURL(t *testing.T) {
 		{"site url with trailing slash", "https://mm.example.com/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, _, api := newTestHandler(t, server)
-			siteURL := tc.siteURL
-			api.On("GetConfig").Return(&model.Config{
-				ServiceSettings: model.ServiceSettings{SiteURL: &siteURL},
-			})
+			h, mp, _ := newTestHandler(t, server)
+			mp.host.siteURL = tc.siteURL
 
 			resp := h.executeServerRegistrationCommand(server.ServerID)
 

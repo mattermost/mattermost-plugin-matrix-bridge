@@ -10,6 +10,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -26,6 +27,13 @@ var (
 	htmlEntityRegex = regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
 )
 
+// ServerGetter is the one-method registry read BridgeUtils needs, the same pattern
+// it already uses for ChannelMapper. Satisfied by *servers.Service in production;
+// keeps this package from depending on the servers package's full method set.
+type ServerGetter interface {
+	Get(serverID string) (kvstore.ServerConfig, error)
+}
+
 // BridgeUtilsConfig contains all dependencies needed for BridgeUtils
 type BridgeUtilsConfig struct {
 	Logger              Logger
@@ -39,6 +47,9 @@ type BridgeUtilsConfig struct {
 	// ChannelMapper is the one choke point for channel<->room mapping writes (see
 	// channel_mapping.go). Always the Plugin itself in production.
 	ChannelMapper ChannelMapper
+	// ServerGetter reads this bridge's server's registry entry. Always
+	// *servers.Service in production.
+	ServerGetter ServerGetter
 }
 
 // BridgeUtils contains common utilities used by both bridge types. There is one
@@ -54,6 +65,7 @@ type BridgeUtils struct {
 	maxProfileImageSize int64
 	maxFileSize         int64
 	channelMapper       ChannelMapper
+	serverGetter        ServerGetter
 }
 
 // NewBridgeUtils creates a new BridgeUtils instance
@@ -68,6 +80,7 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 		maxProfileImageSize: config.MaxProfileImageSize,
 		maxFileSize:         config.MaxFileSize,
 		channelMapper:       config.ChannelMapper,
+		serverGetter:        config.ServerGetter,
 	}
 }
 
@@ -145,39 +158,26 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	return nil
 }
 
-// serverConfig returns this bridge's server's current registry entry, read live from
-// the KV store (never cached), so a runtime change to e.g. UsernamePrefix takes effect
-// immediately.
+// serverConfig returns this bridge's server's current registry entry, read live
+// through serverGetter (never cached), so a runtime change to e.g. UsernamePrefix
+// takes effect immediately.
 func (s *BridgeUtils) serverConfig() (kvstore.ServerConfig, error) {
-	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
-	if err != nil {
-		return kvstore.ServerConfig{}, errors.Wrap(err, "failed to read servers config")
-	}
-	servers, err := kvstore.ParseServersConfig(data)
-	if err != nil {
-		return kvstore.ServerConfig{}, err
-	}
-	for _, sv := range servers {
-		if sv.ServerID == s.serverID {
-			return sv, nil
-		}
-	}
-	return kvstore.ServerConfig{}, errors.Errorf("server %s is not registered", s.serverID)
+	return s.serverGetter.Get(s.serverID)
 }
 
 // matrixUsernamePrefix returns this bridge's server's configured username prefix,
-// falling back to DefaultMatrixUsernamePrefix if the server has none set. A non-nil
-// error means the server config could not be read at all - callers should treat this
-// as a failure rather than silently falling back, since a transient read error must
-// never be conflated with "no prefix configured" (that fallback could collide with
-// another server's distinct, correctly-configured prefix).
+// falling back to servers.DefaultUsernamePrefix if the server has none set. A
+// non-nil error means the server config could not be read at all - callers should
+// treat this as a failure rather than silently falling back, since a transient read
+// error must never be conflated with "no prefix configured" (that fallback could
+// collide with another server's distinct, correctly-configured prefix).
 func (s *BridgeUtils) matrixUsernamePrefix() (string, error) {
 	server, err := s.serverConfig()
 	if err != nil {
 		return "", err
 	}
 	if server.UsernamePrefix == "" {
-		return DefaultMatrixUsernamePrefix, nil
+		return servers.DefaultUsernamePrefix, nil
 	}
 	return server.UsernamePrefix, nil
 }

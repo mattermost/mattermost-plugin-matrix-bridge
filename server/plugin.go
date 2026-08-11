@@ -14,6 +14,7 @@ import (
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/command"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -35,6 +36,12 @@ type Plugin struct {
 
 	// kvstore is the client used to read/write KV records for this plugin.
 	kvstore kvstore.KVStore
+
+	// servers owns the Matrix homeserver registry (add/remove/enable/diagnostics).
+	// See server/servers for the package and Host for what it needs back from
+	// Plugin. Constructed in OnActivate immediately after kvstore and before
+	// runKVStoreMigrations, which reads and seeds the registry.
+	servers *servers.Service
 
 	// client is the Mattermost server API client.
 	client *pluginapi.Client
@@ -99,6 +106,7 @@ func (p *Plugin) OnActivate() error {
 	p.logger = NewPluginAPILogger(p.API)
 
 	p.kvstore = kvstore.NewKVStore(p.client)
+	p.servers = servers.New(p.kvstore, pluginLogger{p}, pluginHost{p})
 
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	p.pendingFiles = NewPendingFileTracker()
@@ -169,14 +177,14 @@ func (p *Plugin) ExecuteCommand(_ *plugin.Context, args *model.CommandArgs) (*mo
 // the existing maps in place, since a stale-but-silent cache is worse than a visible
 // activation failure.
 func (p *Plugin) initMatrixClients() error {
-	if p.kvstore == nil {
+	if p.kvstore == nil || p.servers == nil {
 		return nil
 	}
 
 	p.initMatrixClientsMu.Lock()
 	defer p.initMatrixClientsMu.Unlock()
 
-	servers, err := p.getServers()
+	servers, err := p.servers.List()
 	if err != nil {
 		return errors.Wrap(err, "failed to read servers config")
 	}
@@ -320,7 +328,7 @@ func (p *Plugin) serverConfigForRouting(serverID string) (kvstore.ServerConfig, 
 	if server, ok := p.cachedServerConfig(serverID); ok {
 		return server, nil
 	}
-	return p.serverByID(serverID)
+	return p.servers.Get(serverID)
 }
 
 // remoteIDForServer returns the shared-channels remote ID for serverID, or "" if it is
@@ -377,20 +385,20 @@ func (p *Plugin) doRegisterPluginForSharedChannels(siteURL string) (string, erro
 // the registry looks like at write time, so a concurrent AddServer/RemoveServer is never
 // clobbered. A failure registering one server is logged and does not block the others.
 func (p *Plugin) registerForSharedChannels() error {
-	servers, err := p.getServers()
+	allServers, err := p.servers.List()
 	if err != nil {
 		return errors.Wrap(err, "failed to read servers config for shared-channels registration")
 	}
 
-	remoteIDs := make(map[string]string, len(servers))
-	seenRemoteIDs := make(map[string]string, len(servers)) // remoteID -> the server_id that claimed it first
-	for _, s := range servers {
+	remoteIDs := make(map[string]string, len(allServers))
+	seenRemoteIDs := make(map[string]string, len(allServers)) // remoteID -> the server_id that claimed it first
+	for _, s := range allServers {
 		remoteID, err := p.doRegisterPluginForSharedChannels(s.SiteURL)
 		if err != nil {
 			p.logger.LogWarn("Failed to register server for shared channels", "server_id", s.ServerID, "error", err)
 			continue
 		}
-		// Each server's SiteURL is already unique in the registry (normalizeServerEndpoint
+		// Each server's SiteURL is already unique in the registry (servers.NormalizeEndpoint
 		// enforces it), so this should never happen in practice - but a colliding remote ID
 		// would silently merge two servers' shared-channels state, so guard against it
 		// regardless of what actually causes it.
@@ -402,27 +410,14 @@ func (p *Plugin) registerForSharedChannels() error {
 		remoteIDs[s.ServerID] = remoteID
 	}
 
-	if len(remoteIDs) == 0 {
-		return nil
-	}
-
-	return p.mutateServers(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		updated := make([]kvstore.ServerConfig, len(current))
-		copy(updated, current)
-		for i := range updated {
-			if remoteID, ok := remoteIDs[updated[i].ServerID]; ok {
-				updated[i].RemoteID = remoteID
-			}
-		}
-		return updated, nil
-	})
+	return p.servers.MergeRemoteIDs(remoteIDs)
 }
 
 // registerServerForSharedChannels registers a shared-channels remote for a single,
 // already-persisted server entry. Used by AddServer so a newly added server gets a
 // working remote immediately, without waiting for the next activation.
 func (p *Plugin) registerServerForSharedChannels(serverID string) error {
-	server, err := p.serverByID(serverID)
+	server, err := p.servers.Get(serverID)
 	if err != nil {
 		return err
 	}
@@ -432,18 +427,7 @@ func (p *Plugin) registerServerForSharedChannels(serverID string) error {
 		return err
 	}
 
-	return p.mutateServers(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		updated := make([]kvstore.ServerConfig, len(current))
-		copy(updated, current)
-		for i := range updated {
-			if updated[i].ServerID == serverID {
-				updated[i].RemoteID = remoteID
-				return updated, nil
-			}
-		}
-		// Server was concurrently removed; nothing to persist.
-		return current, nil
-	})
+	return p.servers.SetRemoteID(serverID, remoteID)
 }
 
 // bridgeUtilsForServer builds the shared BridgeUtils for one server, on demand. Returns
@@ -465,6 +449,7 @@ func (p *Plugin) bridgeUtilsForServer(serverID string) (*BridgeUtils, error) {
 		MaxProfileImageSize: p.maxProfileImageSize,
 		MaxFileSize:         p.maxFileSize,
 		ChannelMapper:       p,
+		ServerGetter:        p.servers,
 	}), nil
 }
 
@@ -512,9 +497,10 @@ func (p *Plugin) GetPluginID() string {
 	return manifest.Id
 }
 
-// GetManagedServers returns every registered Matrix homeserver.
-func (p *Plugin) GetManagedServers() ([]kvstore.ServerConfig, error) {
-	return p.getServers()
+// Servers returns the Matrix homeserver registry service, for command handlers and
+// (via the REST API) the System Console.
+func (p *Plugin) Servers() *servers.Service {
+	return p.servers
 }
 
 // GetMatrixClientForServer returns the Matrix client for serverID, or nil if this node
@@ -546,33 +532,6 @@ func (p *Plugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermost
 		return "", err
 	}
 	return bridge.GetMatrixUserIDFromMattermostUser(mattermostUserID)
-}
-
-// SetServerEnabled flips a server's Enabled flag and refreshes every node's caches.
-// This is a pure flag flip - no re-registration, no re-invites, no cursor reset. The
-// shared-channels remote stays registered and the channel invitations stay in place;
-// routing alone consults Enabled (§3.11).
-func (p *Plugin) SetServerEnabled(serverID string, enabled bool) error {
-	found := false
-	err := p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		updated := make([]kvstore.ServerConfig, len(servers))
-		copy(updated, servers)
-		for i := range updated {
-			if updated[i].ServerID == serverID {
-				updated[i].Enabled = enabled
-				found = true
-			}
-		}
-		return updated, nil
-	})
-	if err != nil {
-		return err
-	}
-	if !found {
-		return errors.Errorf("server %s is not registered", serverID)
-	}
-
-	return p.refreshServersAndBroadcast("server_enabled_changed")
 }
 
 // RunKVStoreMigrations exposes migration functionality to command handlers

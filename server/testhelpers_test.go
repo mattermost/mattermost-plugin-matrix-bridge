@@ -17,9 +17,25 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
+
+// addTestServer wraps plugin.servers.Add with AddServer's old positional signature,
+// so the many call sites written against it don't all need to spell out an
+// AddRequest literal.
+func addTestServer(plugin *Plugin, serverURL, asToken, hsToken, usernamePrefix, serverID, serverNameOverride string) (string, error) {
+	created, err := plugin.servers.Add(servers.AddRequest{
+		ServerURL:      serverURL,
+		ASToken:        asToken,
+		HSToken:        hsToken,
+		UsernamePrefix: usernamePrefix,
+		ServerID:       serverID,
+		ServerName:     serverNameOverride,
+	})
+	return created.ServerID, err
+}
 
 // testLogger implements Logger interface for testing
 type testLogger struct {
@@ -129,6 +145,7 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 
 	// Initialize kvstore with in-memory implementation for testing
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 	// Initialize required plugin components
 	plugin.pendingFiles = NewPendingFileTracker()
@@ -207,7 +224,7 @@ func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName stri
 		SiteURL:     "https://" + serverName,
 	}
 
-	existing, err := plugin.getServers()
+	existing, err := plugin.servers.List()
 	if err != nil {
 		t.Fatalf("failed to read existing test servers: %v", err)
 	}
@@ -253,7 +270,7 @@ func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName stri
 func setTestServerUsernamePrefix(t *testing.T, plugin *Plugin, serverID, prefix string) {
 	t.Helper()
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 
 	found := false
@@ -296,7 +313,7 @@ func syncTestServerConfigsCache(plugin *Plugin, servers []kvstore.ServerConfig) 
 func setTestServerEnabled(t *testing.T, plugin *Plugin, serverID string, enabled bool) {
 	t.Helper()
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 
 	found := false
@@ -361,6 +378,7 @@ func setupSingleServerTest(t *testing.T, api plugin.API, matrixContainer *matrix
 	p := &Plugin{}
 	p.SetAPI(api)
 	p.kvstore = NewMemoryKVStore()
+	p.servers = servers.New(p.kvstore, pluginLogger{p}, pluginHost{p})
 	p.pendingFiles = NewPendingFileTracker()
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	p.configuration = &configuration{}

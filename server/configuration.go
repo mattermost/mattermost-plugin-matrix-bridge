@@ -9,17 +9,14 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
-// DefaultMatrixUsernamePrefix is the default username prefix for Matrix-originated users
-const DefaultMatrixUsernamePrefix = "matrix"
-
 // configuration captures the plugin's external configuration as exposed in the Mattermost server
 // configuration, as well as values computed from the configuration. Any public fields will be
 // deserialized from the Mattermost server configuration in OnConfigurationChange.
 //
 // Per-homeserver connection settings (URL, tokens, server name, username prefix, enabled
 // state) are NOT part of this struct - they live in the KV-backed server registry
-// (server/servers.go), managed through /matrix server commands. This struct now holds
-// only settings that are genuinely global to the plugin.
+// (server/servers package), managed through /matrix server commands and the System
+// Console. This struct now holds only settings that are genuinely global to the plugin.
 //
 // As plugins are inherently concurrent (hooks being called asynchronously), and the plugin
 // configuration can change at any time, access to the configuration must be synchronized. The

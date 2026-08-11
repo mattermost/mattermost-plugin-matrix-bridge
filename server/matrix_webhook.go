@@ -300,7 +300,7 @@ func (p *Plugin) getChannelIDFromMatrixRoom(serverID, roomID string) (string, er
 // cause the bridge to re-import its own ghost-user events (loops) or to skip valid DM
 // creation.
 func (p *Plugin) isGhostUser(serverID, userID string) (bool, error) {
-	serverDomain, err := p.serverDomainForID(serverID)
+	serverDomain, err := p.servers.Domain(serverID)
 	if err != nil {
 		return false, err
 	}

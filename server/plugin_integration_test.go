@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
@@ -53,6 +54,7 @@ func (suite *PluginIntegrationTestSuite) SetupTest() {
 
 	// Initialize KV store with in-memory implementation
 	suite.plugin.kvstore = NewMemoryKVStore()
+	suite.plugin.servers = servers.New(suite.plugin.kvstore, pluginLogger{suite.plugin}, pluginHost{suite.plugin})
 
 	// Initialize required components
 	suite.plugin.pendingFiles = NewPendingFileTracker()

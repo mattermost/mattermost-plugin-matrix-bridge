@@ -83,7 +83,7 @@ func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 		servers, ok := p.cachedServerConfigs()
 		if !ok {
 			var err error
-			servers, err = p.getServers()
+			servers, err = p.servers.List()
 			if err != nil {
 				p.logger.LogError("Failed to read servers config for Matrix webhook authorization", "error", err)
 				http.Error(w, "Internal error", http.StatusInternalServerError)

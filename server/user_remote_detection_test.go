@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
@@ -337,6 +338,7 @@ func TestUserRemoteDetectionIntegration(t *testing.T) {
 func TestDefaultUsernamePrefix(t *testing.T) {
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	matrixClient := createMatrixClientWithTestLogger(t, "https://matrix.example.com", "as-token", "")
 	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 
@@ -344,7 +346,7 @@ func TestDefaultUsernamePrefix(t *testing.T) {
 
 	prefix, err := m2mx.matrixUsernamePrefix()
 	require.NoError(t, err)
-	assert.Equal(t, DefaultMatrixUsernamePrefix, prefix, "Empty prefix should return default")
+	assert.Equal(t, servers.DefaultUsernamePrefix, prefix, "Empty prefix should return default")
 
 	// Test with an explicit per-server prefix
 	setTestServerUsernamePrefix(t, plugin, serverID, "customprefix")
@@ -352,7 +354,7 @@ func TestDefaultUsernamePrefix(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "customprefix", prefix, "Should return the configured per-server prefix")
 
-	t.Logf("✓ Default prefix: %s", DefaultMatrixUsernamePrefix)
+	t.Logf("✓ Default prefix: %s", servers.DefaultUsernamePrefix)
 	t.Logf("✓ Custom prefix: %s", prefix)
 
 	// A registry read failure must be surfaced as an error, never silently treated as
@@ -363,6 +365,7 @@ func TestDefaultUsernamePrefix(t *testing.T) {
 		KVStore:     plugin.kvstore,
 		errOnGetKey: kvstore.KeyServersConfig,
 	}
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	m2mxErr, mx2mErr := plugin.testBridges(t, serverID)
 
 	_, err = m2mxErr.matrixUsernamePrefix()
