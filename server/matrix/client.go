@@ -1068,8 +1068,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 
 	// Add bridge alias for Matrix Application Service filtering
 	if roomAlias != "" {
-		// Create bridge alias with mattermost-bridge- prefix
-		bridgeAlias := "#mattermost-bridge-" + alias + ":" + serverDomain
+		bridgeAlias := CreateBridgeAlias(alias, serverDomain)
 		err = c.AddRoomAlias(response.RoomID, bridgeAlias)
 		if err != nil {
 			c.logger.LogWarn("Failed to add bridge filtering alias", "error", err, "bridge_alias", bridgeAlias, "room_id", response.RoomID)
@@ -1201,6 +1200,14 @@ func (c *Client) extractServerDomain() (string, error) {
 	}
 
 	return serverName, nil
+}
+
+// CreateBridgeAlias builds the bridge filtering alias for a room. The
+// "mattermost-bridge-" prefix must stay in sync with the aliases namespace regex in the
+// Application Service registration (see /matrix server registration), which is what
+// makes the homeserver route these rooms' events to the bridge.
+func CreateBridgeAlias(roomName, serverDomain string) string {
+	return "#mattermost-bridge-" + roomName + ":" + serverDomain
 }
 
 // AddRoomAlias adds an additional alias to an existing Matrix room

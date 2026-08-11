@@ -602,7 +602,7 @@ func (c *Handler) mapChannelCore(args *model.CommandArgs, serverID, roomIdentifi
 	}
 	if roomName != "" {
 		if server, err := c.serverByID(serverID); err == nil {
-			bridgeAlias := "#mattermost-bridge-" + roomName + ":" + server.ServerName
+			bridgeAlias := matrix.CreateBridgeAlias(roomName, server.ServerName)
 			if roomID, err := matrixClient.ResolveRoomAlias(roomIdentifier); err == nil && roomID != "" {
 				if err := matrixClient.AddRoomAlias(roomID, bridgeAlias); err != nil {
 					c.client.Log.Warn("Failed to add bridge filtering alias for manual mapping", "error", err, "bridge_alias", bridgeAlias, "room_id", roomID)
