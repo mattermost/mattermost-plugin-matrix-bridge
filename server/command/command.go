@@ -139,7 +139,7 @@ const (
 	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings (System Admin only)"
 	serverCommandDesc  = "Manage Matrix homeserver registrations (System Admin only)"
 	serverCommandHint  = "[subcommand]"
-	serverCommandUsage = "Usage: /matrix server [list|add|remove|map|unmap|registration|status|enable|disable] ..."
+	serverCommandUsage = "Usage: /matrix server [list|add|remove|map|unmap|registration|status|test|enable|disable] ..."
 	adminRequiredError = "❌ You must be a System Admin to use Matrix bridge commands."
 
 	// Map command usage and validation
@@ -241,6 +241,7 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	serverCmd.AddCommand(model.NewAutocompleteData("unmap", "[server_id]", "Unmap current channel from a Matrix server"))
 	serverCmd.AddCommand(model.NewAutocompleteData("registration", "[server_id]", "Print the Application Service registration YAML"))
 	serverCmd.AddCommand(model.NewAutocompleteData("status", "[server_id]", "Show status for one Matrix server"))
+	serverCmd.AddCommand(model.NewAutocompleteData("test", "[server_id]", "Test one Matrix server's connection and Application Service permissions"))
 	serverCmd.AddCommand(model.NewAutocompleteData("enable", "<server_id>", "Enable syncing for a Matrix server"))
 	serverCmd.AddCommand(model.NewAutocompleteData("disable", "<server_id>", "Disable syncing for a Matrix server"))
 	matrixData.AddCommand(serverCmd)
@@ -338,7 +339,7 @@ func (c *Handler) resolveSoleServerID() (string, *model.CommandResponse) {
 	case 1:
 		return servers[0].ServerID, nil
 	default:
-		return "", ephemeral("❌ Multiple Matrix servers are registered. Use `/matrix server map`/`unmap`/`status` and specify a server_id (see `/matrix server list`).")
+		return "", ephemeral("❌ Multiple Matrix servers are registered. Use `/matrix server map`/`unmap`/`status`/`test` and specify a server_id (see `/matrix server list`).")
 	}
 }
 
@@ -1178,6 +1179,16 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 			serverIDArg = rest[0]
 		}
 		return c.executeServerStatusCommand(serverIDArg)
+	case "test":
+		serverIDArg := ""
+		if len(rest) > 0 {
+			serverIDArg = rest[0]
+		}
+		serverID, err := c.resolveServerIDArg(serverIDArg)
+		if err != nil {
+			return ephemeral("❌ " + err.Error())
+		}
+		return c.testServerConnection(serverID)
 	case "enable":
 		if len(rest) < 1 {
 			return ephemeral("Usage: /matrix server enable <server_id>")

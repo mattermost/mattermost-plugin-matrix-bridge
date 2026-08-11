@@ -542,3 +542,51 @@ func TestExecuteServerRegistrationURL(t *testing.T) {
 		})
 	}
 }
+
+// TestExecuteServerTest covers /matrix server test, which is the only way to reach the
+// Application Service permission diagnostic once two or more servers are registered:
+// /matrix test resolves the sole server and refuses when there are several.
+func TestExecuteServerTest(t *testing.T) {
+	userID := model.NewId()
+	args := &model.CommandArgs{UserId: userID}
+
+	serverA := kvstore.ServerConfig{ServerID: "serverAserverAserverAserv1", ServerName: "a.example.com", ServerURL: "https://a.example.com", Enabled: true}
+	serverB := kvstore.ServerConfig{ServerID: "serverBserverBserverBserv2", ServerName: "b.example.com", ServerURL: "https://b.example.com", Enabled: true}
+
+	t.Run("targets a named server when several are registered", func(t *testing.T) {
+		h, _, api := newTestHandler(t, serverA, serverB)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		resp := h.executeServerGroup(args, []string{"test", "b.example.com"})
+
+		// mockPlugin has no Matrix client, so the run stops at that check - which still
+		// proves the right server was resolved and reached testServerConnection.
+		assert.Contains(t, resp.Text, serverB.ServerURL)
+		assert.NotContains(t, resp.Text, serverA.ServerURL)
+		assert.Contains(t, resp.Text, "Matrix Client")
+	})
+
+	t.Run("bare arg resolves the only server", func(t *testing.T) {
+		h, _, api := newTestHandler(t, serverA)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		resp := h.executeServerGroup(args, []string{"test"})
+		assert.Contains(t, resp.Text, serverA.ServerURL)
+	})
+
+	t.Run("bare arg is ambiguous with several servers", func(t *testing.T) {
+		h, _, api := newTestHandler(t, serverA, serverB)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		resp := h.executeServerGroup(args, []string{"test"})
+		assert.Contains(t, resp.Text, "multiple Matrix servers")
+	})
+
+	t.Run("unknown server errors", func(t *testing.T) {
+		h, _, api := newTestHandler(t, serverA, serverB)
+		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		resp := h.executeServerGroup(args, []string{"test", "nope.example.com"})
+		assert.Contains(t, resp.Text, "no registered Matrix server matches")
+	})
+}
