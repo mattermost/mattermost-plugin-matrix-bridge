@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
@@ -200,5 +204,262 @@ func TestHandleServersHealth(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		assert.Equal(t, "unavailable", body.Health["s1"])
+	})
+}
+
+// jsonRequest builds a request carrying body as its JSON payload, with
+// server_id/channel_id mux vars injected the way the real router would populate
+// them - the handlers under test read serverID via mux.Vars, which only a router
+// (or mux.SetURLVars, for tests) can supply.
+func jsonRequest(t *testing.T, method, path string, body any, vars map[string]string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		require.NoError(t, json.NewEncoder(&buf).Encode(body))
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	if len(vars) > 0 {
+		req = mux.SetURLVars(req, vars)
+	}
+	return req
+}
+
+// mockSharedChannelsAPI stubs the platform calls Servers().Add's best-effort
+// shared-channels remote registration makes, so tests can exercise the real
+// registry write without wiring up a full RegisterPluginForSharedChannels round
+// trip. Mirrors newTestPluginForAddServer in servers_test.go.
+func mockSharedChannelsAPI(api *plugintest.API) {
+	api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
+	api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
+	api.On("RegisterPluginForSharedChannels", mock.Anything).Return("remote-"+model.NewId(), nil).Maybe()
+	api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
+	api.On("UnregisterPluginRemoteForSharedChannels", mock.Anything).Return(nil).Maybe()
+	mockAnyLogCalls(api)
+}
+
+func TestHandleAddServer(t *testing.T) {
+	t.Run("happy path returns 201 and the created view", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		mockSharedChannelsAPI(plugin.API.(*plugintest.API))
+		req := jsonRequest(t, http.MethodPost, "/servers", addServerRequest{
+			ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerName: "a.example.com",
+		}, nil)
+		rec := httptest.NewRecorder()
+		plugin.handleAddServer(rec, req)
+
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var body struct {
+			Server   ServerView `json:"server"`
+			Warnings []string   `json:"warnings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.NotEmpty(t, body.Server.ServerID)
+		assert.Equal(t, "a.example.com", body.Server.ServerName)
+		assert.NotNil(t, body.Server.MappedChannelCount)
+		assert.Equal(t, 0, *body.Server.MappedChannelCount)
+		assert.Empty(t, body.Warnings)
+	})
+
+	t.Run("duplicate endpoint returns 409 with the registry's message", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		mockSharedChannelsAPI(plugin.API.(*plugintest.API))
+		_, err := plugin.servers.Add(servers.AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerName: "a.example.com"})
+		require.NoError(t, err)
+
+		req := jsonRequest(t, http.MethodPost, "/servers", addServerRequest{
+			ServerURL: "https://a.example.com", ASToken: "as2", HSToken: "hs2", ServerName: "second.example.com",
+		}, nil)
+		rec := httptest.NewRecorder()
+		plugin.handleAddServer(rec, req)
+
+		require.Equal(t, http.StatusConflict, rec.Code)
+		assert.Contains(t, rec.Body.String(), "already registered")
+	})
+
+	t.Run("a malformed body returns 400", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := httptest.NewRequest(http.MethodPost, "/servers", strings.NewReader("not json"))
+		rec := httptest.NewRecorder()
+		plugin.handleAddServer(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("a malformed URL returns 400", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := jsonRequest(t, http.MethodPost, "/servers", addServerRequest{ServerURL: "not-a-url", ASToken: "as1", HSToken: "hs1"}, nil)
+		rec := httptest.NewRecorder()
+		plugin.handleAddServer(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("a server_id re-adoption is passed through verbatim", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		mockSharedChannelsAPI(plugin.API.(*plugintest.API))
+		priorID := model.NewId()
+		req := jsonRequest(t, http.MethodPost, "/servers", addServerRequest{
+			ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerID: priorID, ServerName: "a.example.com",
+		}, nil)
+		rec := httptest.NewRecorder()
+		plugin.handleAddServer(rec, req)
+
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var body struct {
+			Server ServerView `json:"server"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, priorID, body.Server.ServerID)
+	})
+}
+
+func TestHandleUpdateServer(t *testing.T) {
+	seed := func(t *testing.T, plugin *Plugin, entry kvstore.ServerConfig) {
+		t.Helper()
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{entry})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+	}
+
+	t.Run("a partial update applies", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		seed(t, plugin, kvstore.ServerConfig{ServerID: "s1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "a.example.com", ASToken: "as1", HSToken: "hs1"})
+
+		newHS := "hs1-new"
+		req := jsonRequest(t, http.MethodPatch, "/servers/s1", updateServerRequest{HSToken: &newHS}, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUpdateServer(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			Server   ServerView `json:"server"`
+			Warnings []string   `json:"warnings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "https://a.example.com", body.Server.ServerURL, "an untouched field must keep its stored value")
+		assert.NotContains(t, rec.Body.String(), "hs1-new", "the new token itself must never appear in the response body")
+		assert.Empty(t, body.Warnings, "an HSToken-only change has no consequence worth warning about")
+	})
+
+	t.Run("unknown server_id is 404", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		newHS := "x"
+		req := jsonRequest(t, http.MethodPatch, "/servers/nope", updateServerRequest{HSToken: &newHS}, map[string]string{"server_id": "nope"})
+		rec := httptest.NewRecorder()
+		plugin.handleUpdateServer(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("a conflict is 409", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "s1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "a.example.com"},
+			{ServerID: "s2", ServerURL: "https://b.example.com", Endpoint: "b.example.com:443", ServerName: "b.example.com"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		newURL := "https://b.example.com"
+		req := jsonRequest(t, http.MethodPatch, "/servers/s1", updateServerRequest{ServerURL: &newURL}, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUpdateServer(rec, req)
+		assert.Equal(t, http.StatusConflict, rec.Code)
+	})
+
+	t.Run("warnings are present in the body on a server_name change", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		seed(t, plugin, kvstore.ServerConfig{ServerID: "s1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "a.example.com"})
+
+		newName := "renamed.example.com"
+		req := jsonRequest(t, http.MethodPatch, "/servers/s1", updateServerRequest{ServerName: &newName}, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUpdateServer(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			Warnings []string `json:"warnings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.NotEmpty(t, body.Warnings)
+	})
+}
+
+func TestHandleRemoveServer(t *testing.T) {
+	t.Run("success returns the server_id and a recovery command containing it", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "s1", ServerURL: "https://a.example.com", ServerName: "a.example.com", SiteURL: "https://a.example.com"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		req := jsonRequest(t, http.MethodDelete, "/servers/s1", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleRemoveServer(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			ServerID        string `json:"server_id"`
+			RecoveryCommand string `json:"recovery_command"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, "s1", body.ServerID)
+		assert.Contains(t, body.RecoveryCommand, "s1")
+		assert.Contains(t, body.RecoveryCommand, "--server-id")
+	})
+
+	t.Run("a migrated entry is 409", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "legacy1", ServerName: "legacy.example.com", SiteURL: ""},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		req := jsonRequest(t, http.MethodDelete, "/servers/legacy1", nil, map[string]string{"server_id": "legacy1"})
+		rec := httptest.NewRecorder()
+		plugin.handleRemoveServer(rec, req)
+		assert.Equal(t, http.StatusConflict, rec.Code)
+	})
+
+	t.Run("an unknown ID is 404", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := jsonRequest(t, http.MethodDelete, "/servers/nope", nil, map[string]string{"server_id": "nope"})
+		rec := httptest.NewRecorder()
+		plugin.handleRemoveServer(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
+func TestHandleSetServerEnabled(t *testing.T) {
+	t.Run("flips the flag both ways", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		api := plugin.API.(*plugintest.API)
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "s1", ServerURL: "https://a.example.com", ServerName: "a.example.com", Enabled: false},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		req := jsonRequest(t, http.MethodPut, "/servers/s1/enabled", setServerEnabledRequest{Enabled: true}, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleSetServerEnabled(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			Server ServerView `json:"server"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.True(t, body.Server.Enabled)
+
+		// §3.11: enabling/disabling never re-registers or re-invites a remote.
+		api.AssertNotCalled(t, "RegisterPluginForSharedChannels", mock.Anything)
+		api.AssertNotCalled(t, "InviteRemoteToChannel", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("unknown ID is 404", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := jsonRequest(t, http.MethodPut, "/servers/nope/enabled", setServerEnabledRequest{Enabled: true}, map[string]string{"server_id": "nope"})
+		rec := httptest.NewRecorder()
+		plugin.handleSetServerEnabled(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/gorilla/mux"
@@ -17,7 +18,11 @@ import (
 // which row it implements.
 func (p *Plugin) registerServersRoutes(router *mux.Router) {
 	router.HandleFunc("/servers", p.handleListServers).Methods(http.MethodGet)
+	router.HandleFunc("/servers", p.handleAddServer).Methods(http.MethodPost)
 	router.HandleFunc("/servers/health", p.handleServersHealth).Methods(http.MethodGet)
+	router.HandleFunc("/servers/{server_id}", p.handleUpdateServer).Methods(http.MethodPatch)
+	router.HandleFunc("/servers/{server_id}", p.handleRemoveServer).Methods(http.MethodDelete)
+	router.HandleFunc("/servers/{server_id}/enabled", p.handleSetServerEnabled).Methods(http.MethodPut)
 }
 
 // apiErrorBody is the one error shape every handler in this file uses:
@@ -157,4 +162,168 @@ func (p *Plugin) handleServersHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]map[string]string{"health": p.servers.ProbeHealth(list)})
+}
+
+// serverViewWithCount builds a ServerView carrying s's current mapped-channel
+// count, for the mutating handlers' response bodies. A fresh scan on every
+// mutation is an acceptable cost here - unlike GET /servers, this never runs on a
+// list render or any other hot/repeated path.
+func (p *Plugin) serverViewWithCount(s kvstore.ServerConfig) ServerView {
+	counts, err := p.servers.CountMappedChannels()
+	if err != nil {
+		return newServerView(s, nil)
+	}
+	count := counts[s.ServerID]
+	return newServerView(s, &count)
+}
+
+// actingUserID reads the caller's Mattermost user ID for the structured log line
+// every mutating handler below writes, naming the action, the server_id and the
+// acting user - and never a token value.
+func actingUserID(r *http.Request) string {
+	return r.Header.Get("Mattermost-User-ID")
+}
+
+// addServerRequest is POST /servers's body.
+type addServerRequest struct {
+	ServerURL      string `json:"server_url"`
+	ASToken        string `json:"as_token"`
+	HSToken        string `json:"hs_token"`
+	UsernamePrefix string `json:"username_prefix,omitempty"`
+	ServerID       string `json:"server_id,omitempty"`   // re-adopt a previously removed server
+	ServerName     string `json:"server_name,omitempty"` // override discovery
+}
+
+// handleAddServer implements `POST /servers`.
+func (p *Plugin) handleAddServer(w http.ResponseWriter, r *http.Request) {
+	var req addServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+
+	created, err := p.servers.Add(servers.AddRequest{
+		ServerURL:      req.ServerURL,
+		ASToken:        req.ASToken,
+		HSToken:        req.HSToken,
+		UsernamePrefix: req.UsernamePrefix,
+		ServerID:       req.ServerID,
+		ServerName:     req.ServerName,
+	})
+	if err != nil {
+		p.writeServersError(w, "add server", err)
+		return
+	}
+
+	p.logger.LogInfo("Matrix server added via System Console", "server_id", created.ServerID, "user_id", actingUserID(r))
+
+	// A just-created server cannot yet have any channel mapped to it - no scan
+	// needed to know the count is 0.
+	zero := 0
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"server":   newServerView(created, &zero),
+		"warnings": []string{},
+	})
+}
+
+// updateServerRequest is PATCH /servers/{server_id}'s body. A nil field is
+// "unset" in JSON terms (the key absent, or present as null) - a blank token
+// input must be omitted by the client rather than sent as "", which the registry
+// rejects (see servers.Update's ASToken/HSToken notes).
+type updateServerRequest struct {
+	ServerURL      *string `json:"server_url,omitempty"`
+	ASToken        *string `json:"as_token,omitempty"`
+	HSToken        *string `json:"hs_token,omitempty"`
+	UsernamePrefix *string `json:"username_prefix,omitempty"`
+	ServerName     *string `json:"server_name,omitempty"`
+}
+
+// handleUpdateServer implements `PATCH /servers/{server_id}`.
+func (p *Plugin) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
+	serverID := mux.Vars(r)["server_id"]
+
+	var req updateServerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+
+	updated, warnings, err := p.servers.Update(serverID, servers.Update{
+		ServerURL:      req.ServerURL,
+		ASToken:        req.ASToken,
+		HSToken:        req.HSToken,
+		UsernamePrefix: req.UsernamePrefix,
+		ServerName:     req.ServerName,
+	})
+	if err != nil {
+		p.writeServersError(w, "update server", err)
+		return
+	}
+
+	p.logger.LogInfo("Matrix server updated via System Console", "server_id", serverID, "user_id", actingUserID(r))
+
+	if warnings == nil {
+		warnings = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"server":   p.serverViewWithCount(updated),
+		"warnings": warnings,
+	})
+}
+
+// handleRemoveServer implements `DELETE /servers/{server_id}`. Service.Remove
+// keeps every namespaced KV record - the recovery_command is the cheap path back,
+// so it always names this exact server_id.
+func (p *Plugin) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
+	serverID := mux.Vars(r)["server_id"]
+
+	removed, err := p.servers.Remove(serverID)
+	if err != nil {
+		p.writeServersError(w, "remove server", err)
+		return
+	}
+	if !removed {
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no server found with ID %q", serverID))
+		return
+	}
+
+	p.logger.LogInfo("Matrix server removed via System Console", "server_id", serverID, "user_id", actingUserID(r))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"server_id":        serverID,
+		"recovery_command": fmt.Sprintf("/matrix server add <server_url> <as_token> <hs_token> --server-id %s", serverID),
+	})
+}
+
+// setServerEnabledRequest is PUT /servers/{server_id}/enabled's body.
+type setServerEnabledRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// handleSetServerEnabled implements `PUT /servers/{server_id}/enabled`. Applies
+// immediately, like every other mutation here - Service.SetEnabled is a pure flag
+// flip that never re-registers or re-invites (backend §3.11).
+func (p *Plugin) handleSetServerEnabled(w http.ResponseWriter, r *http.Request) {
+	serverID := mux.Vars(r)["server_id"]
+
+	var req setServerEnabledRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "malformed request body: "+err.Error())
+		return
+	}
+
+	if err := p.servers.SetEnabled(serverID, req.Enabled); err != nil {
+		p.writeServersError(w, "set server enabled", err)
+		return
+	}
+
+	p.logger.LogInfo("Matrix server enabled state changed via System Console", "server_id", serverID, "enabled", req.Enabled, "user_id", actingUserID(r))
+
+	updated, err := p.servers.Get(serverID)
+	if err != nil {
+		p.writeServersError(w, "set server enabled", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"server": p.serverViewWithCount(updated)})
 }

@@ -17,12 +17,19 @@ import (
 )
 
 // newTestPluginForAPI returns a Plugin with an in-memory KV store, ready for
-// api.go/MatrixAuthorizationRequired tests.
+// api.go/MatrixAuthorizationRequired and the System Console REST API's tests.
+// Every registry mutation ends in Host.RefreshAndBroadcast, which rebuilds real
+// matrix.Client instances (logging their rate-limit configuration) and broadcasts a
+// cluster event - mockAnyLogCalls and PublishPluginClusterEvent cover that plumbing
+// so individual tests don't have to.
 func newTestPluginForAPI(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
 	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+	api := plugin.API.(*plugintest.API)
+	mockAnyLogCalls(api)
+	api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
 	return plugin
 }
 
