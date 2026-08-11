@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -461,5 +462,275 @@ func TestHandleSetServerEnabled(t *testing.T) {
 		rec := httptest.NewRecorder()
 		plugin.handleSetServerEnabled(rec, req)
 		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
+func TestHandleTestServer(t *testing.T) {
+	t.Run("unregistered server is 404", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := jsonRequest(t, http.MethodPost, "/servers/nope/test", nil, map[string]string{"server_id": "nope"})
+		rec := httptest.NewRecorder()
+		plugin.handleTestServer(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("a nil client yields skip, not fail, for connection and appservice", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{{ServerID: "s1", ServerURL: "https://a.example.com"}})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		req := jsonRequest(t, http.MethodPost, "/servers/s1/test", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleTestServer(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var diag servers.Diagnostics
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &diag))
+		require.Len(t, diag.Checks, 4)
+		assert.Equal(t, "skip", diag.Checks[2].Status)
+		assert.Equal(t, "skip", diag.Checks[3].Status)
+	})
+}
+
+func TestHandleServerRegistration(t *testing.T) {
+	t.Run("body contains both tokens and nothing is logged", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		api := plugin.API.(*plugintest.API)
+		siteURL := "https://mm.example.com"
+		api.On("GetConfig").Return(&model.Config{ServiceSettings: model.ServiceSettings{SiteURL: &siteURL}}).Maybe()
+
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "s1", ServerName: "a.example.com", ASToken: "secret-as", HSToken: "secret-hs"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		req := jsonRequest(t, http.MethodGet, "/servers/s1/registration", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerRegistration(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			Filename string `json:"filename"`
+			Content  string `json:"content"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.NotEmpty(t, body.Filename)
+		assert.Contains(t, body.Content, "secret-as")
+		assert.Contains(t, body.Content, "secret-hs")
+		assert.NotContains(t, body.Content, "_matrix/app/v1")
+
+		api.AssertNotCalled(t, "LogDebug", mock.Anything, mock.Anything, mock.Anything)
+	})
+
+	t.Run("unknown server is 404", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := jsonRequest(t, http.MethodGet, "/servers/nope/registration", nil, map[string]string{"server_id": "nope"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerRegistration(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
+func TestHandleServerMappings(t *testing.T) {
+	seedServerAndMappings := func(t *testing.T, plugin *Plugin) {
+		t.Helper()
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "s1", ServerName: "a.example.com"},
+			{ServerID: "other-server", ServerName: "other.example.com"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+	}
+
+	t.Run("filters to the requested server and ignores another server's entries in the same array", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		seedServerAndMappings(t, plugin)
+		api := plugin.API.(*plugintest.API)
+
+		mappingData, err := kvstore.MarshalChannelServerMappings([]kvstore.ChannelServerMapping{
+			{ServerID: "other-server", RoomID: "!other:example.com"},
+			{ServerID: "s1", RoomID: "!room1:example.com"},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		api.On("GetChannel", "channel1").Return(&model.Channel{Id: "channel1", Name: "town-square", DisplayName: "Town Square", Type: model.ChannelTypeOpen, TeamId: "team1"}, nil)
+		api.On("GetTeam", "team1").Return(&model.Team{Id: "team1", Name: "core"}, nil)
+
+		req := jsonRequest(t, http.MethodGet, "/servers/s1/mappings", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerMappings(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			TotalCount int           `json:"total_count"`
+			Mappings   []MappingView `json:"mappings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Equal(t, 1, body.TotalCount)
+		require.Len(t, body.Mappings, 1)
+		assert.Equal(t, "channel1", body.Mappings[0].ChannelID)
+		assert.Equal(t, "Town Square", body.Mappings[0].ChannelName)
+		assert.Equal(t, "core", body.Mappings[0].TeamName)
+		assert.False(t, body.Mappings[0].ChannelMissing)
+	})
+
+	t.Run("a deleted channel yields channel_missing true and is still listed", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		seedServerAndMappings(t, plugin)
+		api := plugin.API.(*plugintest.API)
+
+		mappingData, err := kvstore.MarshalChannelServerMappings([]kvstore.ChannelServerMapping{{ServerID: "s1", RoomID: "!room1:example.com"}})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("gone-channel"), mappingData))
+
+		api.On("GetChannel", "gone-channel").Return(nil, &model.AppError{Message: "not found"})
+
+		req := jsonRequest(t, http.MethodGet, "/servers/s1/mappings", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerMappings(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			Mappings []MappingView `json:"mappings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Len(t, body.Mappings, 1)
+		assert.True(t, body.Mappings[0].ChannelMissing)
+	})
+
+	t.Run("a DM yields an empty team_name", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		seedServerAndMappings(t, plugin)
+		api := plugin.API.(*plugintest.API)
+
+		mappingData, err := kvstore.MarshalChannelServerMappings([]kvstore.ChannelServerMapping{{ServerID: "s1", RoomID: "!dm:example.com"}})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("dm-channel"), mappingData))
+
+		api.On("GetChannel", "dm-channel").Return(&model.Channel{Id: "dm-channel", Name: "dm", Type: model.ChannelTypeDirect}, nil)
+
+		req := jsonRequest(t, http.MethodGet, "/servers/s1/mappings", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerMappings(rec, req)
+
+		var body struct {
+			Mappings []MappingView `json:"mappings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Len(t, body.Mappings, 1)
+		assert.Empty(t, body.Mappings[0].TeamName)
+	})
+
+	t.Run("pagination bounds: per_page clamped to 200, page beyond the end yields an empty list with the true total_count", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		seedServerAndMappings(t, plugin)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetChannel", mock.AnythingOfType("string")).Return(&model.Channel{Name: "chan", Type: model.ChannelTypeOpen}, nil)
+
+		for i := range 3 {
+			mappingData, err := kvstore.MarshalChannelServerMappings([]kvstore.ChannelServerMapping{{ServerID: "s1", RoomID: "!room:example.com"}})
+			require.NoError(t, err)
+			require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(model.NewId()+strconv.Itoa(i)), mappingData))
+		}
+
+		req := jsonRequest(t, http.MethodGet, "/servers/s1/mappings?page=5&per_page=500", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerMappings(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			TotalCount int           `json:"total_count"`
+			Mappings   []MappingView `json:"mappings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, 3, body.TotalCount)
+		assert.Empty(t, body.Mappings)
+	})
+
+	t.Run("unknown server is 404", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := jsonRequest(t, http.MethodGet, "/servers/nope/mappings", nil, map[string]string{"server_id": "nope"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerMappings(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+}
+
+func TestHandleUnmapServerChannel(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		api := plugin.API.(*plugintest.API)
+
+		matrixServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer matrixServer.Close()
+
+		serverID, remoteID := registerTestServer(t, plugin, matrixServer.URL, "a.example.com", createMatrixClientWithTestLogger(t, matrixServer.URL, "as1", ""))
+		api.On("UninviteRemoteFromChannel", "channel1", remoteID).Return(nil).Maybe()
+
+		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room1:example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		req := jsonRequest(t, http.MethodDelete, "/servers/"+serverID+"/mappings/channel1", nil, map[string]string{"server_id": serverID, "channel_id": "channel1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUnmapServerChannel(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("not mapped is 404", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		matrixServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer matrixServer.Close()
+		serverID, _ := registerTestServer(t, plugin, matrixServer.URL, "a.example.com", createMatrixClientWithTestLogger(t, matrixServer.URL, "as1", ""))
+
+		req := jsonRequest(t, http.MethodDelete, "/servers/"+serverID+"/mappings/channel1", nil, map[string]string{"server_id": serverID, "channel_id": "channel1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUnmapServerChannel(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("a missing client is 503", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		req := jsonRequest(t, http.MethodDelete, "/servers/nope/mappings/channel1", nil, map[string]string{"server_id": "nope", "channel_id": "channel1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUnmapServerChannel(rec, req)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+
+	t.Run("a failure to clear Matrix room state does not remove the mapping", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+
+		matrixServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer matrixServer.Close()
+
+		serverID, _ := registerTestServer(t, plugin, matrixServer.URL, "a.example.com", createMatrixClientWithTestLogger(t, matrixServer.URL, "as1", ""))
+
+		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room1:example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		req := jsonRequest(t, http.MethodDelete, "/servers/"+serverID+"/mappings/channel1", nil, map[string]string{"server_id": serverID, "channel_id": "channel1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUnmapServerChannel(rec, req)
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+
+		// The mapping must still be readable - nothing was changed.
+		val, err := plugin.kvstore.Get(kvstore.BuildChannelMappingKey("channel1"))
+		require.NoError(t, err)
+		mappings, err := kvstore.ParseChannelServerMappings(val)
+		require.NoError(t, err)
+		assert.Equal(t, "!room1:example.com", kvstore.RoomIDForServer(mappings, serverID))
 	})
 }

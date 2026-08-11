@@ -87,17 +87,17 @@ type ChannelMapping struct {
 
 // Check is one diagnostic step in Diagnostics.Checks.
 type Check struct {
-	Key    string // "registry" | "client" | "connection" | "appservice"
-	Label  string
-	Status string // "ok" | "fail" | "skip"
-	Detail string // error text or supporting detail; may be empty
+	Key    string `json:"key"` // "registry" | "client" | "connection" | "appservice"
+	Label  string `json:"label"`
+	Status string `json:"status"` // "ok" | "fail" | "skip"
+	Detail string `json:"detail"` // error text or supporting detail; may be empty
 }
 
 // Diagnostics is the structured result of Diagnose.
 type Diagnostics struct {
-	ServerID   string
-	Checks     []Check
-	ServerInfo *matrix.ServerInfo // nil when unavailable
+	ServerID   string             `json:"server_id"`
+	Checks     []Check            `json:"checks"`
+	ServerInfo *matrix.ServerInfo `json:"server_info"` // nil when unavailable
 }
 
 // wrapf wraps sentinel with a formatted message, preserving the message text (so

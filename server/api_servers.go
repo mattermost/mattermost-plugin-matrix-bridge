@@ -4,9 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost/server/public/model"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
@@ -23,6 +28,10 @@ func (p *Plugin) registerServersRoutes(router *mux.Router) {
 	router.HandleFunc("/servers/{server_id}", p.handleUpdateServer).Methods(http.MethodPatch)
 	router.HandleFunc("/servers/{server_id}", p.handleRemoveServer).Methods(http.MethodDelete)
 	router.HandleFunc("/servers/{server_id}/enabled", p.handleSetServerEnabled).Methods(http.MethodPut)
+	router.HandleFunc("/servers/{server_id}/test", p.handleTestServer).Methods(http.MethodPost)
+	router.HandleFunc("/servers/{server_id}/registration", p.handleServerRegistration).Methods(http.MethodGet)
+	router.HandleFunc("/servers/{server_id}/mappings", p.handleServerMappings).Methods(http.MethodGet)
+	router.HandleFunc("/servers/{server_id}/mappings/{channel_id}", p.handleUnmapServerChannel).Methods(http.MethodDelete)
 }
 
 // apiErrorBody is the one error shape every handler in this file uses:
@@ -326,4 +335,173 @@ func (p *Plugin) handleSetServerEnabled(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"server": p.serverViewWithCount(updated)})
+}
+
+// handleTestServer implements `POST /servers/{server_id}/test`. A POST, not a
+// GET: it performs real network calls including the Application Service
+// permission probe, and must not be cached by any intermediary. An unregistered
+// server's single failed registry check is surfaced as a 404, matching every
+// other endpoint's not-registered semantics, rather than as a 200 carrying a
+// failed check.
+func (p *Plugin) handleTestServer(w http.ResponseWriter, r *http.Request) {
+	serverID := mux.Vars(r)["server_id"]
+
+	diag := p.servers.Diagnose(serverID)
+	if len(diag.Checks) == 1 && diag.Checks[0].Key == "registry" && diag.Checks[0].Status == "fail" {
+		writeJSONError(w, http.StatusNotFound, diag.Checks[0].Detail)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, diag)
+}
+
+// handleServerRegistration implements `GET /servers/{server_id}/registration`.
+// The response carries both tokens - by design, that is the point - so nothing
+// from this handler is ever logged, not even at debug level.
+func (p *Plugin) handleServerRegistration(w http.ResponseWriter, r *http.Request) {
+	serverID := mux.Vars(r)["server_id"]
+
+	filename, content, err := p.servers.RegistrationYAML(serverID)
+	if err != nil {
+		p.writeServersError(w, "get server registration", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"filename": filename, "content": content})
+}
+
+// MappingView is one row of GET /servers/{server_id}/mappings.
+type MappingView struct {
+	ChannelID      string `json:"channel_id"`
+	ChannelName    string `json:"channel_name"`
+	TeamName       string `json:"team_name"` // "" for a DM/GM - the UI labels that "Direct message"
+	RoomID         string `json:"room_id"`
+	ChannelMissing bool   `json:"channel_missing"`
+}
+
+const (
+	defaultMappingsPerPage = 50
+	maxMappingsPerPage     = 200
+)
+
+// paginationParams reads page/per_page query parameters, defaulting page to 0 and
+// per_page to defaultMappingsPerPage, clamped to [1, maxMappingsPerPage].
+func paginationParams(r *http.Request) (page, perPage int) {
+	page = 0
+	perPage = defaultMappingsPerPage
+
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			page = n
+		}
+	}
+	if v := r.URL.Query().Get("per_page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			perPage = n
+		}
+	}
+	if perPage > maxMappingsPerPage {
+		perPage = maxMappingsPerPage
+	}
+
+	return page, perPage
+}
+
+// handleServerMappings implements `GET /servers/{server_id}/mappings`. The KV
+// half (which channels are mapped to serverID) is Servers().Mappings; this
+// handler decorates each with channel/team display names through the plugin API
+// (memoizing team lookups, since many channels typically share a team), sorts by
+// team then channel name, and paginates in memory - deliberately not pushed into
+// the servers package, which must stay platform-free.
+//
+// This is a full-keyspace scan (via Servers().Mappings) on every call - the
+// webapp must only call this when an admin opens a server's mappings panel,
+// never as part of the server list render.
+func (p *Plugin) handleServerMappings(w http.ResponseWriter, r *http.Request) {
+	serverID := mux.Vars(r)["server_id"]
+
+	if _, err := p.servers.Get(serverID); err != nil {
+		p.writeServersError(w, "get server mappings", err)
+		return
+	}
+
+	mappings, err := p.servers.Mappings(serverID)
+	if err != nil {
+		p.writeServersError(w, "get server mappings", err)
+		return
+	}
+
+	teamNames := make(map[string]string)
+	views := make([]MappingView, 0, len(mappings))
+	for _, m := range mappings {
+		view := MappingView{ChannelID: m.ChannelID, RoomID: m.RoomID}
+
+		channel, appErr := p.API.GetChannel(m.ChannelID)
+		if appErr != nil {
+			view.ChannelMissing = true
+			views = append(views, view)
+			continue
+		}
+
+		view.ChannelName = channel.DisplayName
+		if view.ChannelName == "" {
+			view.ChannelName = channel.Name
+		}
+
+		if channel.Type != model.ChannelTypeDirect && channel.Type != model.ChannelTypeGroup && channel.TeamId != "" {
+			if name, ok := teamNames[channel.TeamId]; ok {
+				view.TeamName = name
+			} else if team, teamErr := p.API.GetTeam(channel.TeamId); teamErr == nil && team != nil {
+				teamNames[channel.TeamId] = team.Name
+				view.TeamName = team.Name
+			}
+		}
+
+		views = append(views, view)
+	}
+
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].TeamName != views[j].TeamName {
+			return views[i].TeamName < views[j].TeamName
+		}
+		return views[i].ChannelName < views[j].ChannelName
+	})
+
+	totalCount := len(views)
+	page, perPage := paginationParams(r)
+	start := min(page*perPage, totalCount)
+	end := min(start+perPage, totalCount)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total_count": totalCount,
+		"mappings":    views[start:end],
+	})
+}
+
+// handleUnmapServerChannel implements
+// `DELETE /servers/{server_id}/mappings/{channel_id}`. Delegates to
+// UnmapChannelFromServer, which clears Matrix room state first and aborts if
+// that fails - so a failure here genuinely means nothing was changed.
+func (p *Plugin) handleUnmapServerChannel(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	serverID := vars["server_id"]
+	channelID := vars["channel_id"]
+
+	if p.getMatrixClient(serverID) == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "no Matrix client configured for this server on this node")
+		return
+	}
+
+	if err := p.UnmapChannelFromServer(serverID, channelID); err != nil {
+		if strings.Contains(err.Error(), "is not mapped to server") {
+			writeJSONError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		p.logger.LogError("Matrix server management API error", "action", "unmap channel", "server_id", serverID, "channel_id", channelID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	p.logger.LogInfo("Channel unmapped from Matrix server via System Console", "server_id", serverID, "channel_id", channelID, "user_id", actingUserID(r))
+	writeJSON(w, http.StatusOK, map[string]any{})
 }
