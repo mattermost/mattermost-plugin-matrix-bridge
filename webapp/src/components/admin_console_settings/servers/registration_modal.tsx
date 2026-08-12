@@ -63,8 +63,11 @@ const RegistrationModal: React.FC<Props> = ({server, onClose}) => {
         URL.revokeObjectURL(url);
     };
 
+    // _mattermost_bot must match the sender_localpart the backend actually registers
+    // (server/servers/service.go's RegistrationYAML) - the bridge's Matrix user ID,
+    // not a made-up "_mattermost_bridge" that these publication rules would never match.
     const roomListRules = `room_list_publication_rules:
-  - user_id: "@_mattermost_bridge:${server.server_name}"
+  - user_id: "@_mattermost_bot:${server.server_name}"
     action: allow
   - user_id: "*"
     action: deny`;

@@ -50,7 +50,7 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                 as_token: asToken || undefined,
                 hs_token: hsToken || undefined,
                 username_prefix: usernamePrefix === server.username_prefix ? undefined : usernamePrefix,
-                server_name: serverNameChanged ? serverName : undefined,
+                server_name: serverNameChanged ? serverName.trim() : undefined,
             });
             setWarnings(resp.warnings);
             setSaved(true);
@@ -130,7 +130,8 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                         <input
                             id='matrix-edit-as-token'
                             className='form-control'
-                            type='text'
+                            type='password'
+                            autoComplete='off'
                             placeholder={server.has_as_token ? 'configured — leave blank to keep' : 'not configured'}
                             value={asToken}
                             onChange={(e) => setASToken(e.target.value)}
@@ -141,7 +142,8 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                         <input
                             id='matrix-edit-hs-token'
                             className='form-control'
-                            type='text'
+                            type='password'
+                            autoComplete='off'
                             placeholder={server.has_hs_token ? 'configured — leave blank to keep' : 'not configured'}
                             value={hsToken}
                             onChange={(e) => setHSToken(e.target.value)}

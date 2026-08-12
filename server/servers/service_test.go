@@ -1100,12 +1100,16 @@ func TestProbeHealthTimesOut(t *testing.T) {
 	defer func() { statusProbeDeadline = old }()
 
 	block := make(chan struct{})
-	defer close(block)
 	matrixServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-block
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer matrixServer.Close()
+	// Registered after Close, so it runs first (defers are LIFO): Close() blocks
+	// until in-flight handlers finish, and the abandoned probe request from
+	// ProbeHealth below is still blocked in the handler at that point. Closing
+	// this first unblocks it so Close() doesn't wait forever.
+	defer close(block)
 
 	svc, host, _ := newTestService(t)
 	client := matrix.NewClientWithLoggerAndRateLimit(matrixServer.URL, "as-token", "", "", testLogger{}, matrix.RateLimitConfig{})

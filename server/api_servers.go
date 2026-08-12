@@ -367,6 +367,9 @@ func (p *Plugin) handleServerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Must be set before writeJSON calls WriteHeader - the response carries both
+	// AS/HS tokens and must never be cached by a browser or intermediary.
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]string{"filename": filename, "content": content})
 }
 
@@ -486,6 +489,14 @@ func (p *Plugin) handleUnmapServerChannel(w http.ResponseWriter, r *http.Request
 	vars := mux.Vars(r)
 	serverID := vars["server_id"]
 	channelID := vars["channel_id"]
+
+	// Check registration before the client: an unregistered server_id must 404
+	// like every other endpoint, not 503 - 503 means "registered, but this node
+	// has no client for it," which getMatrixClient alone can't distinguish.
+	if _, err := p.servers.Get(serverID); err != nil {
+		p.writeServersError(w, "unmap channel", err)
+		return
+	}
 
 	if p.getMatrixClient(serverID) == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "no Matrix client configured for this server on this node")

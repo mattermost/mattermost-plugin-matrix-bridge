@@ -89,7 +89,7 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
     return (
         <div style={{padding: '8px 0'}}>
             {mappings.length === 0 ? (
-                <p className='help-text'>{'No channels are bridged to this server yet. Use `/matrix map` from inside a channel to bridge it.'}</p>
+                <p className='help-text'>{'No channels are bridged to this server yet. Use '}<code>{'/matrix map'}</code>{' from inside a channel to bridge it.'}</p>
             ) : (
                 <table className='table'>
                     <thead>

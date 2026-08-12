@@ -139,7 +139,8 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                     <input
                         id='matrix-add-as-token'
                         className='form-control'
-                        type='text'
+                        type='password'
+                        autoComplete='off'
                         required={true}
                         value={asToken}
                         onChange={(e) => setASToken(e.target.value)}
@@ -150,7 +151,8 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                     <input
                         id='matrix-add-hs-token'
                         className='form-control'
-                        type='text'
+                        type='password'
+                        autoComplete='off'
                         required={true}
                         value={hsToken}
                         onChange={(e) => setHSToken(e.target.value)}

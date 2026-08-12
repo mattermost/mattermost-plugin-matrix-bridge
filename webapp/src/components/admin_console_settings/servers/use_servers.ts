@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 
 import * as client from '@/client';
 import type {ServerView} from '@/types/matrix';
@@ -31,17 +31,31 @@ export default function useServers(): UseServersResult {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
+    // Guards against out-of-order responses: if refresh() is called again before
+    // an in-flight call resolves (e.g. two mutations in quick succession), only the
+    // response from the LATEST call is allowed to land in state.
+    const refreshRequestID = useRef(0);
+
     const refresh = useCallback(async () => {
+        const requestID = ++refreshRequestID.current;
         setLoading(true);
         try {
             const resp = await client.listServers();
+            if (requestID !== refreshRequestID.current) {
+                return;
+            }
             setServers(resp.servers);
             setCountsUnavailable(Boolean(resp.counts_unavailable));
             setError(null);
         } catch (e) {
+            if (requestID !== refreshRequestID.current) {
+                return;
+            }
             setError(messageFrom(e));
         } finally {
-            setLoading(false);
+            if (requestID === refreshRequestID.current) {
+                setLoading(false);
+            }
         }
     }, []);
 

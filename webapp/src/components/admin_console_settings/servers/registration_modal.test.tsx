@@ -60,6 +60,10 @@ describe('RegistrationModal', () => {
         );
 
         await screen.findByText(/room_list_publication_rules/);
-        expect(screen.getByText(/@_mattermost_bridge:a\.example\.com/)).toBeInTheDocument();
+
+        // Must match the sender_localpart the backend actually registers
+        // (server/servers/service.go's RegistrationYAML: "_mattermost_bot"), not a
+        // made-up "_mattermost_bridge" the homeserver would never match.
+        expect(screen.getByText(/@_mattermost_bot:a\.example\.com/)).toBeInTheDocument();
     });
 });

@@ -698,12 +698,28 @@ func TestHandleUnmapServerChannel(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
-	t.Run("a missing client is 503", func(t *testing.T) {
+	t.Run("a missing client on a registered server is 503", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		// Seeded directly into the registry, deliberately without registerTestServer,
+		// so the server is registered but this node has no matrixClients entry for it.
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "s1", ServerURL: "https://a.example.com", ServerName: "a.example.com", Enabled: true},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		req := jsonRequest(t, http.MethodDelete, "/servers/s1/mappings/channel1", nil, map[string]string{"server_id": "s1", "channel_id": "channel1"})
+		rec := httptest.NewRecorder()
+		plugin.handleUnmapServerChannel(rec, req)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	})
+
+	t.Run("an unregistered server_id is 404", func(t *testing.T) {
 		plugin := newTestPluginForAPI(t)
 		req := jsonRequest(t, http.MethodDelete, "/servers/nope/mappings/channel1", nil, map[string]string{"server_id": "nope", "channel_id": "channel1"})
 		rec := httptest.NewRecorder()
 		plugin.handleUnmapServerChannel(rec, req)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 
 	t.Run("a failure to clear Matrix room state does not remove the mapping", func(t *testing.T) {

@@ -26,6 +26,11 @@ interface Props {
 const RemoveServerDialog: React.FC<Props> = ({server, onClose, onRemoved, onDisableInstead}) => {
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
+
+    // Tracked separately from recoveryCommand's string value: an empty/falsy
+    // recovery_command in the response would otherwise read as "not removed yet"
+    // and fall through to the wrong view below.
+    const [removed, setRemoved] = useState(false);
     const [recoveryCommand, setRecoveryCommand] = useState<string | null>(null);
 
     const restoreCommand = `/matrix server add <server_url> <as_token> <hs_token> --server-id ${server.server_id}`;
@@ -36,6 +41,7 @@ const RemoveServerDialog: React.FC<Props> = ({server, onClose, onRemoved, onDisa
         try {
             const resp = await client.removeServer(server.server_id);
             setRecoveryCommand(resp.recovery_command);
+            setRemoved(true);
             await onRemoved();
         } catch (err) {
             setError(messageFrom(err));
@@ -44,7 +50,7 @@ const RemoveServerDialog: React.FC<Props> = ({server, onClose, onRemoved, onDisa
         }
     };
 
-    if (recoveryCommand) {
+    if (removed) {
         return (
             <ModalShell
                 title='Server removed'
