@@ -4,6 +4,7 @@
 import React, {useState} from 'react';
 
 import ModalShell from './modal_shell';
+import {formGroupStyle} from './styles';
 
 import * as client from '@/client';
 import type {ServerView} from '@/types/matrix';
@@ -122,7 +123,10 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                 id='add-matrix-server-form'
                 onSubmit={handleSubmit}
             >
-                <div className='form-group'>
+                <div
+                    className='form-group'
+                    style={formGroupStyle}
+                >
                     <label htmlFor='matrix-add-server-url'>{'Homeserver URL'}</label>
                     <input
                         id='matrix-add-server-url'
@@ -134,7 +138,10 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                         onChange={(e) => setServerURL(e.target.value)}
                     />
                 </div>
-                <div className='form-group'>
+                <div
+                    className='form-group'
+                    style={formGroupStyle}
+                >
                     <label htmlFor='matrix-add-as-token'>{'Application Service token'}</label>
                     <input
                         id='matrix-add-as-token'
@@ -146,7 +153,10 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                         onChange={(e) => setASToken(e.target.value)}
                     />
                 </div>
-                <div className='form-group'>
+                <div
+                    className='form-group'
+                    style={formGroupStyle}
+                >
                     <label htmlFor='matrix-add-hs-token'>{'Homeserver token'}</label>
                     <input
                         id='matrix-add-hs-token'
@@ -158,7 +168,10 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                         onChange={(e) => setHSToken(e.target.value)}
                     />
                 </div>
-                <div className='form-group'>
+                <div
+                    className='form-group'
+                    style={formGroupStyle}
+                >
                     <label htmlFor='matrix-add-username-prefix'>{'Username prefix (optional)'}</label>
                     <input
                         id='matrix-add-username-prefix'
@@ -180,7 +193,10 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
 
                 {showAdvanced && (
                     <div style={{marginTop: '12px'}}>
-                        <div className='form-group'>
+                        <div
+                            className='form-group'
+                            style={formGroupStyle}
+                        >
                             <label htmlFor='matrix-add-server-id'>{'Server ID (optional)'}</label>
                             <input
                                 id='matrix-add-server-id'
@@ -191,7 +207,10 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                             />
                             <p className='help-text'>{'Restore a previously removed server by supplying its exact server_id. Leave blank to register a new server.'}</p>
                         </div>
-                        <div className='form-group'>
+                        <div
+                            className='form-group'
+                            style={formGroupStyle}
+                        >
                             <label htmlFor='matrix-add-server-name'>{'Server name override (optional)'}</label>
                             <input
                                 id='matrix-add-server-name'

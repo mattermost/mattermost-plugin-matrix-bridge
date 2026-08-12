@@ -4,6 +4,7 @@
 import React from 'react';
 
 import ServerRow from './server_row';
+import {emptyStateStyle, warningBannerStyle} from './styles';
 
 import type {ServerView} from '@/types/matrix';
 
@@ -35,58 +36,53 @@ const ServerTable: React.FC<Props> = ({
     onRegistration,
 }) => {
     if (loading) {
-        return <p>{'Loading Matrix servers…'}</p>;
+        return (
+            <p
+                className='help-text'
+                style={emptyStateStyle}
+            >
+                {'Loading Matrix servers…'}
+            </p>
+        );
     }
 
     if (servers.length === 0) {
         return (
-            <div className='help-text'>
-                <p>{'No Matrix servers are registered yet. Click "Add Matrix server" to register your first homeserver.'}</p>
+            <div
+                className='help-text'
+                style={emptyStateStyle}
+            >
+                <p>{'No Matrix servers are registered yet. Click "Add a connection" to register your first homeserver.'}</p>
                 <p>{'Bridging a channel to a homeserver is done with '}<code>{'/matrix map'}</code>{' from inside that channel, once the server is registered and its Application Service registration is installed.'}</p>
             </div>
         );
     }
 
     return (
-        <>
+        <div>
             {countsUnavailable && (
                 <div
                     className='help-text'
-                    style={{color: '#a94442'}}
+                    style={warningBannerStyle}
                 >
                     {'Mapped-channel counts are temporarily unavailable; they are shown as "unavailable" below rather than 0.'}
                 </div>
             )}
-            <table className='table'>
-                <thead>
-                    <tr>
-                        <th>{'Name'}</th>
-                        <th>{'URL'}</th>
-                        <th>{'State'}</th>
-                        <th>{'Health'}</th>
-                        <th>{'Mapped channels'}</th>
-                        <th>{'Enabled'}</th>
-                        <th>{'Actions'}</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {servers.map((server) => (
-                        <ServerRow
-                            key={server.server_id}
-                            server={server}
-                            health={health[server.server_id]}
-                            expanded={expandedServerId === server.server_id}
-                            onToggleExpand={() => onToggleExpand(server.server_id)}
-                            onToggleEnabled={onToggleEnabled}
-                            onEdit={onEdit}
-                            onRemove={onRemove}
-                            onTest={onTest}
-                            onRegistration={onRegistration}
-                        />
-                    ))}
-                </tbody>
-            </table>
-        </>
+            {servers.map((server) => (
+                <ServerRow
+                    key={server.server_id}
+                    server={server}
+                    health={health[server.server_id]}
+                    expanded={expandedServerId === server.server_id}
+                    onToggleExpand={() => onToggleExpand(server.server_id)}
+                    onToggleEnabled={onToggleEnabled}
+                    onEdit={onEdit}
+                    onRemove={onRemove}
+                    onTest={onTest}
+                    onRegistration={onRegistration}
+                />
+            ))}
+        </div>
     );
 };
 

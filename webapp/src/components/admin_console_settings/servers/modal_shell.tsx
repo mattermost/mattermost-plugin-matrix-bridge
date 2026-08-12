@@ -41,16 +41,16 @@ const headerStyle: React.CSSProperties = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: '16px 20px',
+    padding: '20px 24px',
     borderBottom: '1px solid rgba(var(--center-channel-color-rgb), 0.16)',
 };
 
 const bodyStyle: React.CSSProperties = {
-    padding: '16px 20px',
+    padding: '24px',
 };
 
 const footerStyle: React.CSSProperties = {
-    padding: '12px 20px',
+    padding: '16px 24px',
     borderTop: '1px solid rgba(var(--center-channel-color-rgb), 0.16)',
     display: 'flex',
     justifyContent: 'flex-end',

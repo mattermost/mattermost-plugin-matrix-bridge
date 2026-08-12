@@ -8,6 +8,7 @@ import EditServerModal from './edit_server_modal';
 import RegistrationModal from './registration_modal';
 import RemoveServerDialog from './remove_server_dialog';
 import ServerTable from './server_table';
+import {headerActionsStyle, headerStyle, panelStyle, subtitleStyle, titleStyle} from './styles';
 import TestResultsModal from './test_results_modal';
 import useServers from './use_servers';
 
@@ -67,36 +68,47 @@ const MatrixServersSection: React.FC<Props> = (_props) => {
             {error && <p style={{color: '#a94442'}}>{error}</p>}
             {actionError && <p style={{color: '#a94442'}}>{actionError}</p>}
 
-            <div style={{marginBottom: '12px', display: 'flex', gap: '8px'}}>
-                <button
-                    type='button'
-                    className='btn btn-primary'
-                    onClick={() => setModal({type: 'add'})}
-                >
-                    {'Add Matrix server'}
-                </button>
-                <button
-                    type='button'
-                    className='btn btn-tertiary'
-                    onClick={handleRefresh}
-                >
-                    {'Refresh'}
-                </button>
-            </div>
+            <div style={panelStyle}>
+                <div style={headerStyle}>
+                    <div>
+                        <h3 style={titleStyle}>{'Connected Matrix Servers'}</h3>
+                        <p style={subtitleStyle}>{'Matrix servers that are connected to this Mattermost server'}</p>
+                    </div>
+                    <div style={headerActionsStyle}>
+                        <button
+                            type='button'
+                            className='btn btn-tertiary'
+                            title='Refresh the list and health status'
+                            onClick={handleRefresh}
+                        >
+                            <i className='icon icon-refresh'/>
+                            {'Refresh'}
+                        </button>
+                        <button
+                            type='button'
+                            className='btn btn-primary'
+                            onClick={() => setModal({type: 'add'})}
+                        >
+                            <i className='icon icon-plus'/>
+                            {'Add a connection'}
+                        </button>
+                    </div>
+                </div>
 
-            <ServerTable
-                servers={servers}
-                countsUnavailable={countsUnavailable}
-                health={health}
-                loading={loading}
-                expandedServerId={expandedServerId}
-                onToggleExpand={(id) => setExpandedServerId(expandedServerId === id ? null : id)}
-                onToggleEnabled={handleToggleEnabled}
-                onEdit={(server) => setModal({type: 'edit', server})}
-                onRemove={(server) => setModal({type: 'remove', server})}
-                onTest={(server) => setModal({type: 'test', server})}
-                onRegistration={(server) => setModal({type: 'registration', server})}
-            />
+                <ServerTable
+                    servers={servers}
+                    countsUnavailable={countsUnavailable}
+                    health={health}
+                    loading={loading}
+                    expandedServerId={expandedServerId}
+                    onToggleExpand={(id) => setExpandedServerId(expandedServerId === id ? null : id)}
+                    onToggleEnabled={handleToggleEnabled}
+                    onEdit={(server) => setModal({type: 'edit', server})}
+                    onRemove={(server) => setModal({type: 'remove', server})}
+                    onTest={(server) => setModal({type: 'test', server})}
+                    onRegistration={(server) => setModal({type: 'registration', server})}
+                />
+            </div>
 
             {modal.type === 'add' && (
                 <AddServerModal

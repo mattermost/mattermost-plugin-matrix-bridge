@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {render, screen} from '@testing-library/react';
+import {render, screen, fireEvent} from '@testing-library/react';
 import React from 'react';
 
 import ServerTable from './server_table';
@@ -29,8 +29,12 @@ function buildServer(overrides: Partial<ServerView> = {}): ServerView {
 const noop = () => undefined;
 const asyncNoop = () => Promise.resolve();
 
+function openActionsMenu(serverName: string) {
+    fireEvent.click(screen.getByRole('button', {name: `Actions for ${serverName}`}));
+}
+
 describe('ServerTable', () => {
-    it('renders name, URL, state, health and mapped channel count', () => {
+    it('renders name, URL, status pill and mapped channel count', () => {
         render(
             <ServerTable
                 servers={[buildServer()]}
@@ -49,11 +53,8 @@ describe('ServerTable', () => {
 
         expect(screen.getByText('matrix.example.com')).toBeInTheDocument();
         expect(screen.getByText('https://matrix.example.com')).toBeInTheDocument();
-
-        // "Enabled" appears both as the State column's header and its cell value.
-        expect(screen.getAllByText('Enabled')).toHaveLength(2);
-        expect(screen.getByText('healthy')).toBeInTheDocument();
-        expect(screen.getByText('3')).toBeInTheDocument();
+        expect(screen.getByText('Active')).toBeInTheDocument();
+        expect(screen.getByText('3 channels shared')).toBeInTheDocument();
     });
 
     it('renders "unavailable", not 0, when mapped_channel_count is null', () => {
@@ -74,10 +75,10 @@ describe('ServerTable', () => {
         );
 
         expect(screen.getByText('unavailable')).toBeInTheDocument();
-        expect(screen.queryByText('0')).not.toBeInTheDocument();
+        expect(screen.queryByText('0 channels shared')).not.toBeInTheDocument();
     });
 
-    it('disables Remove with an explanation for a migrated server', () => {
+    it('disables Remove with an explanation for a migrated server', async () => {
         render(
             <ServerTable
                 servers={[buildServer({is_migrated: true})]}
@@ -94,9 +95,14 @@ describe('ServerTable', () => {
             />,
         );
 
-        const removeButton = screen.getByRole('button', {name: 'Remove'});
-        expect(removeButton).toBeDisabled();
-        expect(removeButton).toHaveAttribute('title', expect.stringContaining('migrated'));
+        openActionsMenu('matrix.example.com');
+
+        // The disabled item's own "cannot be removed" title text ends up folded
+        // into its computed accessible name alongside "Remove", so match on
+        // text content directly rather than the role's `name` option.
+        const removeItem = screen.getAllByRole('menuitem').find((item) => item.textContent === 'Remove');
+        expect(removeItem).toBeDisabled();
+        expect(removeItem).toHaveAttribute('title', expect.stringContaining('migrated'));
     });
 
     it('rolls back the enable toggle\'s optimistic state when the request fails', async () => {
@@ -117,16 +123,40 @@ describe('ServerTable', () => {
             />,
         );
 
-        const checkbox = screen.getByRole('checkbox') as HTMLInputElement;
-        expect(checkbox.checked).toBe(false);
+        expect(screen.getByText('Disabled')).toBeInTheDocument();
 
-        checkbox.click();
-        expect(checkbox.checked).toBe(true); // optimistic flip
+        openActionsMenu('matrix.example.com');
+        fireEvent.click(screen.getByRole('menuitem', {name: /Enable connection/}));
 
-        await screen.findByRole('checkbox');
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        // Optimistic flip - the row now reads Active immediately.
+        expect(await screen.findByText('Active')).toBeInTheDocument();
 
-        expect(checkbox.checked).toBe(false); // rolled back after the rejection
+        // Rolled back after the rejection.
+        expect(await screen.findByText('Disabled')).toBeInTheDocument();
+    });
+
+    it('renders Disabled, not Active, for a disabled server with a stale healthy reading', () => {
+        // Health is fetched separately (GET /servers/health) and isn't
+        // auto-refreshed, so it can still say "healthy" for a server that was
+        // disabled since the last health probe. `enabled` must win.
+        render(
+            <ServerTable
+                servers={[buildServer({enabled: false})]}
+                countsUnavailable={false}
+                health={{server1: 'healthy'}}
+                loading={false}
+                expandedServerId={null}
+                onToggleExpand={noop}
+                onToggleEnabled={asyncNoop}
+                onEdit={noop}
+                onRemove={noop}
+                onTest={noop}
+                onRegistration={noop}
+            />,
+        );
+
+        expect(screen.getByText('Disabled')).toBeInTheDocument();
+        expect(screen.queryByText('Active')).not.toBeInTheDocument();
     });
 
     it('shows an empty-state message when there are no servers', () => {

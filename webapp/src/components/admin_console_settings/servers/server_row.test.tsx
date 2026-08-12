@@ -30,20 +30,16 @@ const server: ServerView = {
 
 function renderRow(expanded: boolean) {
     return render(
-        <table>
-            <tbody>
-                <ServerRow
-                    server={server}
-                    expanded={expanded}
-                    onToggleExpand={jest.fn()}
-                    onToggleEnabled={jest.fn().mockResolvedValue(undefined)}
-                    onEdit={jest.fn()}
-                    onRemove={jest.fn()}
-                    onTest={jest.fn()}
-                    onRegistration={jest.fn()}
-                />
-            </tbody>
-        </table>,
+        <ServerRow
+            server={server}
+            expanded={expanded}
+            onToggleExpand={jest.fn()}
+            onToggleEnabled={jest.fn().mockResolvedValue(undefined)}
+            onEdit={jest.fn()}
+            onRemove={jest.fn()}
+            onTest={jest.fn()}
+            onRegistration={jest.fn()}
+        />,
     );
 }
 

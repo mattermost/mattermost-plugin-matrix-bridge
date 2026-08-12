@@ -4,6 +4,7 @@
 import React, {useState} from 'react';
 
 import ModalShell from './modal_shell';
+import {formGroupStyle} from './styles';
 
 import * as client from '@/client';
 import type {ServerView} from '@/types/matrix';
@@ -114,7 +115,10 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                     id='edit-matrix-server-form'
                     onSubmit={handleSubmit}
                 >
-                    <div className='form-group'>
+                    <div
+                        className='form-group'
+                        style={formGroupStyle}
+                    >
                         <label htmlFor='matrix-edit-server-url'>{'Homeserver URL'}</label>
                         <input
                             id='matrix-edit-server-url'
@@ -125,7 +129,10 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                             onChange={(e) => setServerURL(e.target.value)}
                         />
                     </div>
-                    <div className='form-group'>
+                    <div
+                        className='form-group'
+                        style={formGroupStyle}
+                    >
                         <label htmlFor='matrix-edit-as-token'>{'Application Service token'}</label>
                         <input
                             id='matrix-edit-as-token'
@@ -137,7 +144,10 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                             onChange={(e) => setASToken(e.target.value)}
                         />
                     </div>
-                    <div className='form-group'>
+                    <div
+                        className='form-group'
+                        style={formGroupStyle}
+                    >
                         <label htmlFor='matrix-edit-hs-token'>{'Homeserver token'}</label>
                         <input
                             id='matrix-edit-hs-token'
@@ -149,7 +159,10 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                             onChange={(e) => setHSToken(e.target.value)}
                         />
                     </div>
-                    <div className='form-group'>
+                    <div
+                        className='form-group'
+                        style={formGroupStyle}
+                    >
                         <label htmlFor='matrix-edit-username-prefix'>{'Username prefix'}</label>
                         <input
                             id='matrix-edit-username-prefix'
@@ -171,7 +184,10 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
 
                     {showAdvanced && (
                         <div style={{marginTop: '12px'}}>
-                            <div className='form-group'>
+                            <div
+                                className='form-group'
+                                style={formGroupStyle}
+                            >
                                 <label htmlFor='matrix-edit-server-name'>{'Server name'}</label>
                                 <input
                                     id='matrix-edit-server-name'
@@ -182,7 +198,10 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                                 />
                             </div>
                             {serverNameChanged && (
-                                <div className='form-group has-warning'>
+                                <div
+                                    className='form-group has-warning'
+                                    style={formGroupStyle}
+                                >
                                     <label
                                         htmlFor='matrix-edit-confirm-name-change'
                                         style={{display: 'flex', gap: '6px', alignItems: 'flex-start'}}
