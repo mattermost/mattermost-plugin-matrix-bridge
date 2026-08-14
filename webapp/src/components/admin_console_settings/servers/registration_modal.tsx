@@ -17,9 +17,13 @@ interface Props {
     onClose: () => void;
 }
 
+// Same theme CSS variables as ModalShell (var(--center-channel-color-rgb) etc.) -
+// the hardcoded #f4f4f4/#ddd this replaced looked fine in light mode but was
+// illegible against a dark-mode ModalShell background.
 const codeBlockStyle: React.CSSProperties = {
-    backgroundColor: '#f4f4f4',
-    border: '1px solid #ddd',
+    backgroundColor: 'rgba(var(--center-channel-color-rgb), 0.04)',
+    border: '1px solid rgba(var(--center-channel-color-rgb), 0.16)',
+    color: 'var(--center-channel-color)',
     borderRadius: '4px',
     padding: '12px',
     fontFamily: 'Monaco, Menlo, "Ubuntu Mono", monospace',

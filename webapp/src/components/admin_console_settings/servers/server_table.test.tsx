@@ -106,7 +106,13 @@ describe('ServerTable', () => {
     });
 
     it('rolls back the enable toggle\'s optimistic state when the request fails', async () => {
-        const onToggleEnabled = jest.fn().mockRejectedValue(new Error('boom'));
+        // The rejection is held back (not mockRejectedValue, which settles on the same
+        // tick) so the "optimistic flip" assertion below genuinely observes the
+        // in-flight state rather than racing straight past it to the rolled-back one.
+        let rejectToggle!: (reason?: unknown) => void;
+        const onToggleEnabled = jest.fn(() => new Promise<void>((_resolve, reject) => {
+            rejectToggle = reject;
+        }));
         render(
             <ServerTable
                 servers={[buildServer({enabled: false})]}
@@ -132,6 +138,7 @@ describe('ServerTable', () => {
         expect(await screen.findByText('Active')).toBeInTheDocument();
 
         // Rolled back after the rejection.
+        rejectToggle(new Error('boom'));
         expect(await screen.findByText('Disabled')).toBeInTheDocument();
     });
 

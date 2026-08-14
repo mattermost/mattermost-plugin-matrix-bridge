@@ -95,6 +95,32 @@ describe('EditServerModal', () => {
         expect(outerSubmit).not.toHaveBeenCalled();
     });
 
+    it('re-opens the advanced section if it was collapsed again when the confirm checkbox blocks save', async () => {
+        const server = buildServer();
+        mockedClient.updateServer.mockResolvedValue({server, warnings: []});
+
+        render(
+            <EditServerModal
+                server={server}
+                onClose={jest.fn()}
+                onUpdated={jest.fn()}
+            />,
+        );
+
+        fireEvent.click(screen.getByRole('button', {name: 'Show advanced'}));
+        fireEvent.change(screen.getByLabelText('Server name'), {target: {value: 'renamed.example.com'}});
+        fireEvent.click(screen.getByRole('button', {name: 'Hide advanced'}));
+
+        // The confirm checkbox is now hidden with the rest of "advanced" - saving
+        // must bring it back into view rather than pointing at an invisible control.
+        expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', {name: 'Save'}));
+
+        expect(mockedClient.updateServer).not.toHaveBeenCalled();
+        expect(screen.getByRole('checkbox')).toBeInTheDocument();
+    });
+
     it('blocks the server_name change until the confirm checkbox is checked', async () => {
         const server = buildServer();
         mockedClient.updateServer.mockResolvedValue({server, warnings: []});

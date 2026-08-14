@@ -42,6 +42,11 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
     // below for why this section can't use a real <form> element.
     const handleSubmit = async () => {
         if (serverNameChanged && !confirmNameChange) {
+            // The confirmation checkbox lives inside the "advanced" section, which
+            // may have been collapsed again after the admin typed a new name - open
+            // it back up so the "below" in this error message actually points at
+            // something visible.
+            setShowAdvanced(true);
             setError('Check the confirmation box below before saving a server name change.');
             return;
         }

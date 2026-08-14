@@ -57,10 +57,13 @@ const footerStyle: React.CSSProperties = {
     gap: '8px',
 };
 
-// Elements a Tab-trap and initial-focus need to consider "focusable". Matches the
-// common minimal set (no [disabled] filtering - disabled controls simply aren't
-// selectable via keyboard already, so this stays a plain selector).
-const FOCUSABLE_SELECTOR = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+// Elements a Tab-trap and initial-focus need to consider "focusable". Disabled
+// controls are excluded: they still match a plain selector and can never
+// actually become document.activeElement, which would silently break both the
+// initial-focus pick (landing on a disabled control that can't take focus,
+// leaving focus nowhere) and the Tab-wrap comparisons against "first"/"last"
+// (which would then never match the real first/last focusable element).
+const FOCUSABLE_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 // ModalShell is a minimal, dependency-free modal frame shared by every dialog in
 // this section - this plugin's webapp does not pull in a design-system modal
