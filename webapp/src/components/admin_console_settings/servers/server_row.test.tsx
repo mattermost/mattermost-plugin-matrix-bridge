@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {render, screen} from '@testing-library/react';
+import {render, screen, fireEvent} from '@testing-library/react';
 import React from 'react';
 
 import ServerRow from './server_row';
@@ -28,12 +28,12 @@ const server: ServerView = {
     mapped_channel_count: 0,
 };
 
-function renderRow(expanded: boolean) {
+function renderRow(expanded: boolean, onToggleExpand: () => void = jest.fn()) {
     return render(
         <ServerRow
             server={server}
             expanded={expanded}
-            onToggleExpand={jest.fn()}
+            onToggleExpand={onToggleExpand}
             onToggleEnabled={jest.fn().mockResolvedValue(undefined)}
             onEdit={jest.fn()}
             onRemove={jest.fn()}
@@ -54,5 +54,36 @@ describe('ServerRow mappings panel', () => {
         renderRow(true);
         await screen.findByText(/No channels are bridged/);
         expect(mockedClient.getServerMappings).toHaveBeenCalledWith('s1', 0, 50);
+    });
+});
+
+describe('ServerRow channels-shared toggle', () => {
+    it('clicking the "channels shared" cell toggles the row, not just a kebab-menu item', () => {
+        const onToggleExpand = jest.fn();
+        renderRow(false, onToggleExpand);
+
+        fireEvent.click(screen.getByRole('button', {name: 'Show bridged channels for a.example.com'}));
+
+        expect(onToggleExpand).toHaveBeenCalledTimes(1);
+    });
+
+    it('reflects the expanded state in its label and aria-expanded', async () => {
+        mockedClient.getServerMappings.mockResolvedValue({total_count: 0, mappings: []});
+        renderRow(true);
+
+        const toggle = await screen.findByRole('button', {name: 'Hide bridged channels for a.example.com'});
+        expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+        // Let the row's own mappings fetch settle before the test ends, so its
+        // resolution doesn't land outside act() after this test has moved on.
+        await screen.findByText(/No channels are bridged/);
+    });
+
+    it('no longer offers a redundant "bridged channels" entry in the kebab menu', () => {
+        renderRow(false);
+
+        fireEvent.click(screen.getByRole('button', {name: 'Actions for a.example.com'}));
+
+        expect(screen.queryByRole('menuitem', {name: /bridged channels/i})).not.toBeInTheDocument();
     });
 });

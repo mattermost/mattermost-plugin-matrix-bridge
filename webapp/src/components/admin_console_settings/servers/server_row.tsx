@@ -152,7 +152,28 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
                         <div style={migratedTagStyle}>{'Migrated from legacy configuration'}</div>
                     )}
                 </div>
-                <div style={{...cellStyle, ...mutedCellTextStyle}}>{channelsSharedText(server.mapped_channel_count)}</div>
+                <button
+                    type='button'
+                    className='style--none'
+                    style={{
+                        ...cellStyle,
+                        ...mutedCellTextStyle,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        background: 'none',
+                        border: 'none',
+                        padding: 0,
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                    }}
+                    aria-expanded={expanded}
+                    aria-label={`${expanded ? 'Hide' : 'Show'} bridged channels for ${server.server_name}`}
+                    onClick={onToggleExpand}
+                >
+                    <i className={`icon ${expanded ? 'icon-chevron-down' : 'icon-chevron-right'}`}/>
+                    {channelsSharedText(server.mapped_channel_count)}
+                </button>
                 <div style={{...cellStyle, ...mutedCellTextStyle}}>{server.server_url}</div>
                 <div style={metaStyle}>
                     <span
@@ -209,15 +230,6 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
                                 >
                                     <i className='icon icon-key-variant'/>
                                     {'View registration'}
-                                </button>
-                                <button
-                                    type='button'
-                                    role='menuitem'
-                                    style={menuItemStyle({})}
-                                    onClick={() => runAndClose(onToggleExpand)}
-                                >
-                                    <i className='icon icon-format-list-bulleted'/>
-                                    {expanded ? 'Hide bridged channels' : 'Show bridged channels'}
                                 </button>
                                 <button
                                     type='button'
