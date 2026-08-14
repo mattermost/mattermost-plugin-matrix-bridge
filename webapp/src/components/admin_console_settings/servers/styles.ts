@@ -228,8 +228,45 @@ export const formGroupStyle: CSSProperties = {
 };
 
 export const mappingsWrapperStyle: CSSProperties = {
-    padding: '0 24px 16px',
+    padding: '16px 24px',
     borderBottom: `1px solid ${colors.borderFaint}`,
+};
+
+// The mappings list nested inside an expanded server row - same row/cell/muted-
+// text language as the top-level server list (rowStyle/cellStyle/mutedCellTextStyle
+// above), just lighter: it's a sub-list, not its own panel, so no border/background
+// of its own and less vertical padding per row.
+export const mappingsHeaderRowStyle: CSSProperties = {
+    display: 'flex',
+    gap: '24px',
+    padding: '0 0 8px',
+    borderBottom: `1px solid ${colors.borderFaint}`,
+    fontSize: '12px',
+    fontWeight: 600,
+    color: colors.textFaint,
+    textTransform: 'uppercase',
+    letterSpacing: '0.02em',
+};
+
+export const mappingsRowStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '24px',
+    padding: '10px 0',
+    borderBottom: `1px solid ${colors.borderFaint}`,
+};
+
+export const mappingsRoomIDStyle: CSSProperties = {
+    fontFamily: 'monospace',
+    fontSize: '12px',
+    color: colors.textMuted,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+};
+
+export const mappingsEmptyStyle: CSSProperties = {
+    padding: '16px 0',
 };
 
 export const warningBannerStyle: CSSProperties = {

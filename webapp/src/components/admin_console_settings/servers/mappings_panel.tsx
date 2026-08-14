@@ -3,6 +3,16 @@
 
 import React, {useCallback, useEffect, useState} from 'react';
 
+import {
+    cellStyle,
+    colors,
+    mappingsEmptyStyle,
+    mappingsHeaderRowStyle,
+    mappingsRoomIDStyle,
+    mappingsRowStyle,
+    mutedCellTextStyle,
+} from './styles';
+
 import * as client from '@/client';
 import type {MappingView} from '@/types/matrix';
 
@@ -26,6 +36,10 @@ interface Props {
 // by design, since it also uninvites the plugin from the shared channel and
 // clears Matrix room state, which deserves the slash command's explicit
 // confirmation rather than a stray click in a list.
+//
+// Uses the same row/cell/muted-text styling as the top-level server list
+// (styles.ts) rather than a native <table>, so this nested list reads as part of
+// the same design instead of a plain browser table dropped into it.
 const MappingsPanel: React.FC<Props> = ({serverId}) => {
     const [mappings, setMappings] = useState<MappingView[]>([]);
     const [totalCount, setTotalCount] = useState(0);
@@ -54,14 +68,21 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
     }, [serverId]);
 
     if (loading) {
-        return <p className='help-text'>{'Loading bridged channels…'}</p>;
+        return (
+            <p
+                className='help-text'
+                style={mappingsEmptyStyle}
+            >
+                {'Loading bridged channels…'}
+            </p>
+        );
     }
 
     if (error) {
         return (
             <p
                 className='help-text'
-                style={{color: '#a94442'}}
+                style={{...mappingsEmptyStyle, color: colors.red}}
             >
                 {error}
             </p>
@@ -71,38 +92,42 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
     const totalPages = Math.max(1, Math.ceil(totalCount / PER_PAGE));
 
     return (
-        <div style={{padding: '8px 0'}}>
+        <div>
             {mappings.length === 0 ? (
-                <p className='help-text'>{'No channels are bridged to this server yet. Use '}<code>{'/matrix map'}</code>{' from inside a channel to bridge it.'}</p>
+                <p
+                    className='help-text'
+                    style={mappingsEmptyStyle}
+                >
+                    {'No channels are bridged to this server yet. Use '}<code>{'/matrix map'}</code>{' from inside a channel to bridge it.'}
+                </p>
             ) : (
-                <table className='table'>
-                    <thead>
-                        <tr>
-                            <th>{'Channel'}</th>
-                            <th>{'Team'}</th>
-                            <th>{'Matrix room'}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {mappings.map((mapping) => (
-                            <tr key={mapping.channel_id}>
-                                <td>
-                                    {mapping.channel_missing ? (
-                                        <span style={{color: '#a94442'}}>{'Channel deleted'}</span>
-                                    ) : (
-                                        mapping.channel_name
-                                    )}
-                                </td>
-                                <td>{mapping.team_name || 'Direct message'}</td>
-                                <td style={{fontFamily: 'monospace'}}>{mapping.room_id}</td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
+                <div>
+                    <div style={mappingsHeaderRowStyle}>
+                        <div style={cellStyle}>{'Channel'}</div>
+                        <div style={cellStyle}>{'Team'}</div>
+                        <div style={cellStyle}>{'Matrix room'}</div>
+                    </div>
+                    {mappings.map((mapping) => (
+                        <div
+                            key={mapping.channel_id}
+                            style={mappingsRowStyle}
+                        >
+                            <div style={cellStyle}>
+                                {mapping.channel_missing ? (
+                                    <span style={{color: colors.red}}>{'Channel deleted'}</span>
+                                ) : (
+                                    mapping.channel_name
+                                )}
+                            </div>
+                            <div style={{...cellStyle, ...mutedCellTextStyle}}>{mapping.team_name || 'Direct message'}</div>
+                            <div style={{...cellStyle, ...mappingsRoomIDStyle}}>{mapping.room_id}</div>
+                        </div>
+                    ))}
+                </div>
             )}
 
             {totalCount > PER_PAGE && (
-                <div style={{display: 'flex', gap: '8px', alignItems: 'center'}}>
+                <div style={{display: 'flex', gap: '8px', alignItems: 'center', paddingTop: '12px'}}>
                     <button
                         type='button'
                         className='btn btn-tertiary btn-sm'
@@ -111,7 +136,12 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
                     >
                         {'Previous'}
                     </button>
-                    <span>{`Page ${page + 1} of ${totalPages}`}</span>
+                    <span
+                        className='help-text'
+                        style={{margin: 0}}
+                    >
+                        {`Page ${page + 1} of ${totalPages}`}
+                    </span>
                     <button
                         type='button'
                         className='btn btn-tertiary btn-sm'
