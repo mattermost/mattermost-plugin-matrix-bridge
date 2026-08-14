@@ -38,8 +38,9 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
 
     const serverNameChanged = serverName.trim() !== server.server_name;
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
+    // Not a form onSubmit handler: see the note above the <div onKeyDown={...}>
+    // below for why this section can't use a real <form> element.
+    const handleSubmit = async () => {
         if (serverNameChanged && !confirmNameChange) {
             setError('Check the confirmation box below before saving a server name change.');
             return;
@@ -88,10 +89,10 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                             {'Cancel'}
                         </button>
                         <button
-                            type='submit'
-                            form='edit-matrix-server-form'
+                            type='button'
                             className='btn btn-primary'
                             disabled={submitting}
+                            onClick={handleSubmit}
                         >
                             {submitting ? 'Saving…' : 'Save'}
                         </button>
@@ -112,9 +113,25 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                     ))}
                 </div>
             ) : (
-                <form
-                    id='edit-matrix-server-form'
-                    onSubmit={handleSubmit}
+
+                // Deliberately a <div>, not a <form>: ModalShell renders inline rather
+                // than through a portal, and the System Console's own settings page
+                // already wraps everything in a Bootstrap <form className=
+                // "form-horizontal"> (see styles.ts). A <form> here would be nested
+                // inside that one - invalid HTML whose submit-target resolution is
+                // browser-dependent - and in practice a submit button tied to this
+                // form via the `form` attribute can resolve to the OUTER form instead,
+                // which has no onSubmit of its own and so falls through to the
+                // browser's native default: a full-page GET reload, with this handler
+                // never running at all. The Enter key is wired up by hand below to
+                // keep the one native <form> behaviour worth keeping.
+                <div
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && e.target instanceof HTMLInputElement) {
+                            e.preventDefault();
+                            handleSubmit();
+                        }
+                    }}
                 >
                     <div
                         className='form-group'
@@ -241,7 +258,7 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                     )}
 
                     {error && <p style={{color: '#a94442'}}>{error}</p>}
-                </form>
+                </div>
             )}
         </ModalShell>
     );

@@ -73,6 +73,28 @@ describe('EditServerModal', () => {
         expect(body.as_token).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     });
 
+    it('submits via its own button click, not a native nested-form submit, when rendered inside the System Console\'s outer <form> (regression: this section renders inline, not through a portal, so it always sits inside the admin console\'s own settings <form> - see styles.ts - and a nested <form> here previously let some browsers route the submit to that outer form instead, reloading the page and never calling updateServer at all)', async () => {
+        const server = buildServer();
+        mockedClient.updateServer.mockResolvedValue({server, warnings: []});
+
+        const outerSubmit = jest.fn((e: React.FormEvent) => e.preventDefault());
+
+        render(
+            <form onSubmit={outerSubmit}>
+                <EditServerModal
+                    server={server}
+                    onClose={jest.fn()}
+                    onUpdated={jest.fn()}
+                />
+            </form>,
+        );
+
+        fireEvent.click(screen.getByRole('button', {name: 'Save'}));
+
+        await waitFor(() => expect(mockedClient.updateServer).toHaveBeenCalled());
+        expect(outerSubmit).not.toHaveBeenCalled();
+    });
+
     it('blocks the server_name change until the confirm checkbox is checked', async () => {
         const server = buildServer();
         mockedClient.updateServer.mockResolvedValue({server, warnings: []});
