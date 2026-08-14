@@ -53,6 +53,26 @@ describe('EditServerModal', () => {
         expect(body.hs_token).toBeUndefined();
     });
 
+    it('sends a regenerated v4 UUID token in the PATCH body', async () => {
+        const server = buildServer();
+        mockedClient.updateServer.mockResolvedValue({server, warnings: []});
+
+        render(
+            <EditServerModal
+                server={server}
+                onClose={jest.fn()}
+                onUpdated={jest.fn()}
+            />,
+        );
+
+        fireEvent.click(screen.getAllByRole('button', {name: 'Regenerate'})[0]);
+        fireEvent.click(screen.getByRole('button', {name: 'Save'}));
+
+        await waitFor(() => expect(mockedClient.updateServer).toHaveBeenCalled());
+        const [, body] = mockedClient.updateServer.mock.calls[0];
+        expect(body.as_token).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    });
+
     it('blocks the server_name change until the confirm checkbox is checked', async () => {
         const server = buildServer();
         mockedClient.updateServer.mockResolvedValue({server, warnings: []});

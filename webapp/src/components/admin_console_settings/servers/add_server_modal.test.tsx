@@ -57,6 +57,29 @@ describe('AddServerModal', () => {
         });
     });
 
+    it('regenerates a token as a v4 UUID when Regenerate is clicked', async () => {
+        render(
+            <AddServerModal
+                onClose={jest.fn()}
+                onAdded={jest.fn()}
+                onViewRegistration={jest.fn()}
+            />,
+        );
+
+        const asTokenInput = screen.getByLabelText('Application Service token') as HTMLInputElement;
+        const hsTokenInput = screen.getByLabelText('Homeserver token') as HTMLInputElement;
+        expect(asTokenInput.value).toBe('');
+        expect(hsTokenInput.value).toBe('');
+
+        fireEvent.click(screen.getAllByRole('button', {name: 'Regenerate'})[0]);
+        fireEvent.click(screen.getAllByRole('button', {name: 'Regenerate'})[1]);
+
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+        expect(asTokenInput.value).toMatch(uuidRegex);
+        expect(hsTokenInput.value).toMatch(uuidRegex);
+        expect(asTokenInput.value).not.toBe(hsTokenInput.value);
+    });
+
     it('surfaces a 409 message verbatim', async () => {
         mockedClient.addServer.mockRejectedValue(new Error('a server is already registered at this endpoint (server_id: s1)'));
 

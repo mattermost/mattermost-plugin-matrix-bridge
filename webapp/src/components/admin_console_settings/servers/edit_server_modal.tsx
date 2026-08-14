@@ -8,6 +8,7 @@ import {formGroupStyle} from './styles';
 
 import * as client from '@/client';
 import type {ServerView} from '@/types/matrix';
+import {generateToken} from '@/utils/generate_token';
 
 function messageFrom(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
@@ -134,30 +135,50 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                         style={formGroupStyle}
                     >
                         <label htmlFor='matrix-edit-as-token'>{'Application Service token'}</label>
-                        <input
-                            id='matrix-edit-as-token'
-                            className='form-control'
-                            type='password'
-                            autoComplete='off'
-                            placeholder={server.has_as_token ? 'configured — leave blank to keep' : 'not configured'}
-                            value={asToken}
-                            onChange={(e) => setASToken(e.target.value)}
-                        />
+                        <div style={{display: 'flex', gap: '6px'}}>
+                            <input
+                                id='matrix-edit-as-token'
+                                className='form-control'
+                                type='password'
+                                autoComplete='off'
+                                style={{flex: 1}}
+                                placeholder={server.has_as_token ? 'configured — leave blank to keep' : 'not configured'}
+                                value={asToken}
+                                onChange={(e) => setASToken(e.target.value)}
+                            />
+                            <button
+                                type='button'
+                                className='btn btn-tertiary btn-sm'
+                                onClick={() => setASToken(generateToken())}
+                            >
+                                {'Regenerate'}
+                            </button>
+                        </div>
                     </div>
                     <div
                         className='form-group'
                         style={formGroupStyle}
                     >
                         <label htmlFor='matrix-edit-hs-token'>{'Homeserver token'}</label>
-                        <input
-                            id='matrix-edit-hs-token'
-                            className='form-control'
-                            type='password'
-                            autoComplete='off'
-                            placeholder={server.has_hs_token ? 'configured — leave blank to keep' : 'not configured'}
-                            value={hsToken}
-                            onChange={(e) => setHSToken(e.target.value)}
-                        />
+                        <div style={{display: 'flex', gap: '6px'}}>
+                            <input
+                                id='matrix-edit-hs-token'
+                                className='form-control'
+                                type='password'
+                                autoComplete='off'
+                                style={{flex: 1}}
+                                placeholder={server.has_hs_token ? 'configured — leave blank to keep' : 'not configured'}
+                                value={hsToken}
+                                onChange={(e) => setHSToken(e.target.value)}
+                            />
+                            <button
+                                type='button'
+                                className='btn btn-tertiary btn-sm'
+                                onClick={() => setHSToken(generateToken())}
+                            >
+                                {'Regenerate'}
+                            </button>
+                        </div>
                     </div>
                     <div
                         className='form-group'
