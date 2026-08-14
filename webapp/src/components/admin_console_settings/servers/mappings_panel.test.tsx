@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {render, screen, fireEvent, waitFor, within} from '@testing-library/react';
+import {render, screen, fireEvent, waitFor} from '@testing-library/react';
 import React from 'react';
 
 import MappingsPanel from './mappings_panel';
@@ -29,22 +29,16 @@ describe('MappingsPanel', () => {
         await waitFor(() => expect(mockedClient.getServerMappings).toHaveBeenCalledWith('s1', 1, 50));
     });
 
-    it('labels a channel_missing row as deleted and still allows unmapping it', async () => {
+    it('labels a channel_missing row as deleted, with no unmap action - this list is read-only', async () => {
         mockedClient.getServerMappings.mockResolvedValue({
             total_count: 1,
             mappings: [{channel_id: 'gone', channel_name: '', team_name: '', room_id: '!room:example.com', channel_missing: true}],
         });
-        mockedClient.unmapServerChannel.mockResolvedValue(undefined);
 
         render(<MappingsPanel serverId='s1'/>);
 
         await screen.findByText('Channel deleted');
 
-        fireEvent.click(screen.getByRole('button', {name: 'Unmap'}));
-
-        const dialog = screen.getByRole('dialog');
-        fireEvent.click(within(dialog).getByRole('button', {name: 'Unmap'}));
-
-        await waitFor(() => expect(mockedClient.unmapServerChannel).toHaveBeenCalledWith('s1', 'gone'));
+        expect(screen.queryByRole('button', {name: 'Unmap'})).not.toBeInTheDocument();
     });
 });

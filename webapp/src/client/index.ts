@@ -103,7 +103,3 @@ export function getServerRegistration(serverId: string): Promise<RegistrationRes
 export function getServerMappings(serverId: string, page = 0, perPage = 50): Promise<MappingsResponse> {
     return request<MappingsResponse>(`/servers/${encodeURIComponent(serverId)}/mappings?page=${page}&per_page=${perPage}`);
 }
-
-export function unmapServerChannel(serverId: string, channelId: string): Promise<void> {
-    return request<void>(`/servers/${encodeURIComponent(serverId)}/mappings/${encodeURIComponent(channelId)}`, {method: 'DELETE'});
-}

@@ -3,8 +3,6 @@
 
 import React, {useCallback, useEffect, useState} from 'react';
 
-import ModalShell from './modal_shell';
-
 import * as client from '@/client';
 import type {MappingView} from '@/types/matrix';
 
@@ -22,15 +20,18 @@ interface Props {
 // which is what makes this "lazy-loaded on open" - it fetches on mount, never as
 // part of the server list render. Every fetch here is a full keyspace scan
 // server-side, so it must never be triggered automatically or on an interval.
+//
+// Read-only: unmapping a channel is done via `/matrix unmap`/`/matrix server
+// unmap` (System Admin only) - there is no System Console action or API for it,
+// by design, since it also uninvites the plugin from the shared channel and
+// clears Matrix room state, which deserves the slash command's explicit
+// confirmation rather than a stray click in a list.
 const MappingsPanel: React.FC<Props> = ({serverId}) => {
     const [mappings, setMappings] = useState<MappingView[]>([]);
     const [totalCount, setTotalCount] = useState(0);
     const [page, setPage] = useState(0);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [confirmUnmap, setConfirmUnmap] = useState<MappingView | null>(null);
-    const [unmapping, setUnmapping] = useState(false);
-    const [unmapError, setUnmapError] = useState<string | null>(null);
 
     const load = useCallback(async (targetPage: number) => {
         setLoading(true);
@@ -51,23 +52,6 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
         load(0);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverId]);
-
-    const handleUnmap = async () => {
-        if (!confirmUnmap) {
-            return;
-        }
-        setUnmapping(true);
-        try {
-            await client.unmapServerChannel(serverId, confirmUnmap.channel_id);
-            setConfirmUnmap(null);
-            setUnmapError(null);
-            await load(page);
-        } catch (e) {
-            setUnmapError(messageFrom(e));
-        } finally {
-            setUnmapping(false);
-        }
-    };
 
     if (loading) {
         return <p className='help-text'>{'Loading bridged channels…'}</p>;
@@ -97,7 +81,6 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
                             <th>{'Channel'}</th>
                             <th>{'Team'}</th>
                             <th>{'Matrix room'}</th>
-                            <th>{'Actions'}</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -112,18 +95,6 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
                                 </td>
                                 <td>{mapping.team_name || 'Direct message'}</td>
                                 <td style={{fontFamily: 'monospace'}}>{mapping.room_id}</td>
-                                <td>
-                                    <button
-                                        type='button'
-                                        className='btn btn-tertiary btn-sm'
-                                        onClick={() => {
-                                            setUnmapError(null);
-                                            setConfirmUnmap(mapping);
-                                        }}
-                                    >
-                                        {'Unmap'}
-                                    </button>
-                                </td>
                             </tr>
                         ))}
                     </tbody>
@@ -150,42 +121,6 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
                         {'Next'}
                     </button>
                 </div>
-            )}
-
-            {confirmUnmap && (
-                <ModalShell
-                    title='Unmap channel'
-                    onClose={() => setConfirmUnmap(null)}
-                    footer={
-                        <>
-                            <button
-                                type='button'
-                                className='btn btn-tertiary'
-                                disabled={unmapping}
-                                onClick={() => setConfirmUnmap(null)}
-                            >
-                                {'Cancel'}
-                            </button>
-                            <button
-                                type='button'
-                                className='btn btn-danger'
-                                disabled={unmapping}
-                                onClick={handleUnmap}
-                            >
-                                {unmapping ? 'Unmapping…' : 'Unmap'}
-                            </button>
-                        </>
-                    }
-                >
-                    <p>
-                        {'Unmap '}
-                        <strong>{confirmUnmap.channel_missing ? 'this deleted channel' : confirmUnmap.channel_name}</strong>
-                        {' from Matrix room '}
-                        <code>{confirmUnmap.room_id}</code>
-                        {'?'}
-                    </p>
-                    {unmapError && <p style={{color: '#a94442'}}>{unmapError}</p>}
-                </ModalShell>
             )}
         </div>
     );

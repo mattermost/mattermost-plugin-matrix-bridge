@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
@@ -31,7 +30,6 @@ func (p *Plugin) registerServersRoutes(router *mux.Router) {
 	router.HandleFunc("/servers/{server_id}/test", p.handleTestServer).Methods(http.MethodPost)
 	router.HandleFunc("/servers/{server_id}/registration", p.handleServerRegistration).Methods(http.MethodGet)
 	router.HandleFunc("/servers/{server_id}/mappings", p.handleServerMappings).Methods(http.MethodGet)
-	router.HandleFunc("/servers/{server_id}/mappings/{channel_id}", p.handleUnmapServerChannel).Methods(http.MethodDelete)
 }
 
 // apiErrorBody is the one error shape every handler in this file uses:
@@ -479,40 +477,4 @@ func (p *Plugin) handleServerMappings(w http.ResponseWriter, r *http.Request) {
 		"total_count": totalCount,
 		"mappings":    views[start:end],
 	})
-}
-
-// handleUnmapServerChannel implements
-// `DELETE /servers/{server_id}/mappings/{channel_id}`. Delegates to
-// UnmapChannelFromServer, which clears Matrix room state first and aborts if
-// that fails - so a failure here genuinely means nothing was changed.
-func (p *Plugin) handleUnmapServerChannel(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	serverID := vars["server_id"]
-	channelID := vars["channel_id"]
-
-	// Check registration before the client: an unregistered server_id must 404
-	// like every other endpoint, not 503 - 503 means "registered, but this node
-	// has no client for it," which getMatrixClient alone can't distinguish.
-	if _, err := p.servers.Get(serverID); err != nil {
-		p.writeServersError(w, "unmap channel", err)
-		return
-	}
-
-	if p.getMatrixClient(serverID) == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "no Matrix client configured for this server on this node")
-		return
-	}
-
-	if err := p.UnmapChannelFromServer(serverID, channelID); err != nil {
-		if strings.Contains(err.Error(), "is not mapped to server") {
-			writeJSONError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		p.logger.LogError("Matrix server management API error", "action", "unmap channel", "server_id", serverID, "channel_id", channelID, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	p.logger.LogInfo("Channel unmapped from Matrix server via System Console", "server_id", serverID, "channel_id", channelID, "user_id", actingUserID(r))
-	writeJSON(w, http.StatusOK, map[string]any{})
 }
