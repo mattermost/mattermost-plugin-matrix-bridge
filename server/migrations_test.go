@@ -204,6 +204,77 @@ func TestMigrateUserMappings(t *testing.T) {
 			assert.Equal(t, expectedMatrixUserID, string(valueBytes))
 		}
 	})
+
+	t.Run("SkipsAlreadyNamespacedV3Keys", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.logger = &testLogger{t: t}
+
+		// Register one server, as if the v3 migration has already run.
+		serversData, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "server1theserveridxxxxxxxx", ServerName: "server1.example.com", Enabled: true},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, serversData))
+
+		// A valid v3-namespaced forward mapping and its correct reverse mapping,
+		// exactly as they'd look right after a completed v3 migration.
+		require.NoError(t, plugin.kvstore.Set("matrix_user_server1theserveridxxxxxxxx_@alice:matrix.org", []byte("user123")))
+		require.NoError(t, plugin.kvstore.Set("mattermost_user_server1theserveridxxxxxxxx_user123", []byte("@alice:matrix.org")))
+
+		// A legacy (pre-v3) key should still be migrated normally alongside the
+		// namespaced one, proving the skip is targeted rather than blanket.
+		require.NoError(t, plugin.kvstore.Set("matrix_user_@bob:matrix.org", []byte("user456")))
+
+		// Simulate /matrix migrate re-running the v1 migration against this
+		// already-v3 store (executeMigrateCommand resets the version marker to 0).
+		_, err = plugin.migrateUserMappingsWithResults()
+		require.NoError(t, err)
+
+		// The namespaced key must not be mistaken for a legacy one: no corrupted
+		// legacy reverse mapping should be created from it...
+		legacyReverse, err := plugin.kvstore.Get("mattermost_user_user123")
+		require.NoError(t, err)
+		assert.Empty(t, legacyReverse, "must not create a legacy reverse mapping from an already-namespaced key")
+
+		// ...and the correct existing v3 reverse mapping must be untouched.
+		v3Reverse, err := plugin.kvstore.Get("mattermost_user_server1theserveridxxxxxxxx_user123")
+		require.NoError(t, err)
+		assert.Equal(t, "@alice:matrix.org", string(v3Reverse))
+
+		// The legacy key is still migrated normally.
+		bobReverse, err := plugin.kvstore.Get("mattermost_user_user456")
+		require.NoError(t, err)
+		assert.Equal(t, "@bob:matrix.org", string(bobReverse))
+	})
+
+	t.Run("SkipsNamespacedKeysOfARemovedServer", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.logger = &testLogger{t: t}
+
+		// No servers registered at all - as if the server that owns these
+		// namespaced keys was removed via RemoveServer, which intentionally leaves
+		// its namespaced KV records in place for later re-adoption via AddServer.
+		// /matrix migrate only refuses to reset the version marker while 2+ servers
+		// are *currently* registered, so this is reachable with the registry empty.
+		require.NoError(t, plugin.kvstore.Set("matrix_user_removedserveridxxxxxxxxxxx_@alice:matrix.org", []byte("user123")))
+		require.NoError(t, plugin.kvstore.Set("mattermost_user_removedserveridxxxxxxxxxxx_user123", []byte("@alice:matrix.org")))
+
+		_, err := plugin.migrateUserMappingsWithResults()
+		require.NoError(t, err)
+
+		// The removed server's namespaced key must still be recognized as v3-shaped
+		// from its structure alone - a registry-based check would miss it here,
+		// since the registry no longer lists that server.
+		legacyReverse, err := plugin.kvstore.Get("mattermost_user_user123")
+		require.NoError(t, err)
+		assert.Empty(t, legacyReverse, "must not create a legacy reverse mapping from a removed server's namespaced key")
+
+		v3Reverse, err := plugin.kvstore.Get("mattermost_user_removedserveridxxxxxxxxxxx_user123")
+		require.NoError(t, err)
+		assert.Equal(t, "@alice:matrix.org", string(v3Reverse))
+	})
 }
 
 func TestMigrateChannelMappings(t *testing.T) {
@@ -369,6 +440,34 @@ func TestMigrateChannelMappings(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, channelID, string(valueBytes))
 		}
+	})
+
+	t.Run("SkipsAlreadyV3ShapedValues", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.logger = &testLogger{t: t}
+
+		// A channel_mapping_ value already converted to the v3 []ChannelServerMapping
+		// JSON shape, as it would look right after a completed v3 migration.
+		v3Value, err := kvstore.BuildSingleChannelMapping("server1", "!room:example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set("channel_mapping_channel456", v3Value))
+
+		// Simulate /matrix migrate re-running the v1 migration against this
+		// already-v3 store (executeMigrateCommand resets the version marker to 0).
+		_, err = plugin.migrateChannelMappingsWithResults()
+		require.NoError(t, err)
+
+		// The v3 value must not be mistaken for a legacy bare room identifier: no
+		// reverse mapping built from the raw JSON text should have been created.
+		bogusReverse, err := plugin.kvstore.Get("room_mapping_" + string(v3Value))
+		require.NoError(t, err)
+		assert.Empty(t, bogusReverse, "must not create a reverse mapping from a v3 JSON channel mapping value")
+
+		// The original v3 value is left untouched.
+		unchanged, err := plugin.kvstore.Get("channel_mapping_channel456")
+		require.NoError(t, err)
+		assert.Equal(t, v3Value, unchanged)
 	})
 }
 
