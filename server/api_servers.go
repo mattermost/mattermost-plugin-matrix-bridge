@@ -56,7 +56,7 @@ func statusForServersError(err error) int {
 	switch {
 	case errors.Is(err, servers.ErrNotRegistered):
 		return http.StatusNotFound
-	case errors.Is(err, servers.ErrEndpointTaken), errors.Is(err, servers.ErrNameTaken), errors.Is(err, servers.ErrIDTaken):
+	case errors.Is(err, servers.ErrEndpointTaken), errors.Is(err, servers.ErrNameTaken), errors.Is(err, servers.ErrIDTaken), errors.Is(err, servers.ErrHSTokenTaken):
 		return http.StatusConflict
 	case errors.Is(err, servers.ErrMigratedImmutable):
 		return http.StatusConflict

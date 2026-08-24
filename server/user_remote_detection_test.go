@@ -360,12 +360,15 @@ func TestDefaultUsernamePrefix(t *testing.T) {
 	// A registry read failure must be surfaced as an error, never silently treated as
 	// "no prefix configured" - see matrixUsernamePrefix's doc comment. This is the
 	// entire reason matrixUsernamePrefix/generateMattermostUsername return (string,
-	// error) instead of just a string.
+	// error) instead of just a string. Reaching that read at all requires emptying the
+	// serverConfigs snapshot: serverConfig goes through serverConfigForRouting, which
+	// answers from the cache and only falls back to KV when the server isn't in it.
 	plugin.kvstore = &erroringKVStore{
 		KVStore:     plugin.kvstore,
 		errOnGetKey: kvstore.KeyServersConfig,
 	}
 	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+	plugin.serverConfigs = nil
 	m2mxErr, mx2mErr := plugin.testBridges(t, serverID)
 
 	_, err = m2mxErr.matrixUsernamePrefix()

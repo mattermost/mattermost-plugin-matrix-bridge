@@ -442,6 +442,13 @@ live.
   registry), respond **503 with `Retry-After`** and do **not** record the transaction as
   processed — the AS spec has the homeserver retry the same `txnId`, so the events survive
   and a retry can land on an up-to-date node.
+- The transaction is recorded in the processed-transaction dedupe map **only after every
+  event in it has been processed successfully**. If `processMatrixEvent` returns an error
+  for any event, stop iterating immediately and respond **503 with `Retry-After`**, the same
+  as the missing-client path, instead of recording the transaction and returning 200. Marking
+  it processed up front (or continuing past a failed event and still returning 200) would
+  make the failure invisible to the homeserver — it would never retry, and if it did, the
+  txnId would already be in the dedupe map and get dropped as a duplicate.
 - The processed-transaction dedupe map must be keyed by `struct{serverID, txnID string}`:
   Matrix transaction IDs are only unique per homeserver.
 - Thread `serverID` through `processMatrixEvent`, `getChannelIDFromMatrixRoom`,
@@ -475,25 +482,43 @@ and does no fan-out:
 
 ```go
 // server/plugin.go
-func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (string, bool)
+func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (serverID string, shouldSync bool, err error)
 ```
 
-1. `rc == nil || rc.RemoteId == ""` → log and skip (defensive; should not happen in production).
-2. `serverIDForRemoteID(rc.RemoteId)` → unknown remote → log and skip.
-3. The resolved server has `Enabled == false` → skip (§3.11). This replaces the global
+The `error` return distinguishes an intentional no-op from an operational failure (KV read/parse
+failure, registry read failure, `GetChannel` failure). Both outbound hooks must propagate a
+non-nil `err` rather than fold it into `shouldSync == false`: Mattermost only retains the
+shared-channels sync cursor and retries the batch when the hook returns an error, so a swallowed
+operational failure silently and permanently drops the posts/reactions/files in that batch. The
+inbound webhook path (§3.5) applies the same principle with its 503/`Retry-After` response for
+the analogous node-cache-lag case.
+
+1. `rc == nil || rc.RemoteId == ""` → log and skip (defensive; should not happen in production);
+   not an error.
+2. `serverIDForRemoteID(rc.RemoteId)` unresolved → this node's `remoteToServerID` cache may lag a
+   registry mutation made on another node that hasn't reached this node's cluster event handler
+   yet, so refresh the client caches once (`initMatrixClients`) and retry the lookup before giving
+   up. A refresh failure is an operational failure. Still unresolved after the refresh → log and
+   skip (genuinely not one of our remotes); not an error.
+3. `serverConfigForRouting(serverID)` failure → operational failure (registry read failure).
+4. The resolved server has `Enabled == false` → skip (§3.11). This replaces the global
    `EnableSync` gate the hooks used to check, and is the only thing stopping outbound traffic
    for a disabled server — its remote stays registered and invited, so the hooks keep firing.
-4. Read `channel_mapping_<channelID>` and check `rc`'s server against the list — **membership,
-   not identity**, so this keeps working unchanged when a channel may hold N entries:
+5. Read `channel_mapping_<channelID>` and check `rc`'s server against the list — **membership,
+   not identity**, so this keeps working unchanged when a channel may hold N entries. A KV
+   read/parse failure here is an operational failure. Otherwise:
     - `RoomIDForServer(mappings, serverID) != ""` → return `serverID`;
     - the list is non-empty but has no entry for `serverID` → skip (the remote is still
       invited but its server is no longer mapped — do not relay its traffic elsewhere);
-    - list empty **and** the channel is a DM → return `rc`'s server so the DM room can be
-      auto-created on it;
-    - list empty, non-DM → skip.
+    - list empty → `isChannelDirect(channelID)` failure is an operational failure; otherwise
+      the channel is a DM → return `rc`'s server so the DM room can be auto-created on it;
+      not a DM → skip.
 
 Apply in `server/hooks.go`:
 
+- `OnSharedChannelsSyncMsg` / `OnSharedChannelsAttachmentSyncMsg` both check `err` from
+  `serverIDForSyncMsg` first and return it immediately (log-and-return, same as every other
+  error path in these hooks) before checking `shouldSync`.
 - `OnSharedChannelsSyncMsg` — one bridge, no loop over servers. Loop prevention uses
   `isOwnRemoteID(post/reaction.GetRemoteID())` across all our remotes. Matrix-originated
   users are only re-invited when `serverIDForRemoteID(user.GetRemoteID()) == serverID`.
@@ -672,7 +697,7 @@ command out in full. Set it for tidiness, but never rely on it for authorization
 
 | Command                                                                                                           | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `server list`                                                                                                     | All entries: display name, `server_id`, URL, username prefix, mapped-channel count, enabled state. Never print tokens.                                                                                                                                                                                                                                                                                                          |
+| `server list`                                                                                                     | All entries: display name, `server_id`, URL, username prefix, enabled state. Never print tokens. No mapped-channel count (§3.10).                                                                                                                                                                                                                                                                                                          |
 | `server add <server_url> <as_token> <hs_token> [username_prefix] [--server-id <prior_id>] [--server-name <name>]` | Validate + normalize the URL, reject an endpoint that is live in the registry, resolve `ServerName` via `resolveServerName` and reject the add if it duplicates another entry's (§3.1.2), resolve `EventDomain` from the endpoint (§3.6), mint `model.NewId()` (or re-adopt `--server-id`, §3.1.1), register the shared-channels remote, `refreshServersAndBroadcast`. Report the `server_id` and the discovered `server_name`. |
 | `server remove <server_id>`                                                                                       | Remove the entry, `UnregisterPluginRemoteForSharedChannels`, `refreshServersAndBroadcast`. The server's KV records are **kept** (§3.1.1); the response must print the `server_id` as the recovery key for re-adopting them. **Refuses** an entry with `SiteURL == ""` (the migrated server — it cannot be re-created; use `server disable`).                                                                                    |
 | `server map [server_id] <room_alias\|room_id>`                                                                    | Map the current channel — refuses if already mapped to another server.                                                                                                                                                                                                                                                                                                                                                          |
@@ -739,7 +764,7 @@ Typing a `ServerName` or URL host by hand still works — the list is a convenie
 
 - `/matrix status` — admin-gated like every other subcommand (it exposes server names, URLs
   and health), and never prints tokens. Lists **every** configured server with
-  enabled state, live connection health and mapped-channel count. Probe connections
+  enabled state and live connection health. Probe connections
   **concurrently under a single deadline** (~8s, in a `var` so tests can shorten it): the
   Matrix HTTP client allows 30s per request, so sequential probes would outlast
   Mattermost's slash-command timeout. Servers whose probe misses the deadline render as
@@ -748,8 +773,11 @@ Typing a `ServerName` or URL host by hand still works — the list is a convenie
   registered server; with zero or several, return an ephemeral error pointing at
   `/matrix server`.
 - `/matrix list` — show `channel → room (server)`.
-- Count mapped channels per server with **one** keyspace scan shared by `list` and
-  `status`, and report "unavailable" (not `0`) when the scan fails.
+- No command other than `/matrix list` reports a mapped-channel count. Counting requires
+  paging the whole KV keyspace (pluginapi's prefix filter is client-side) plus one `Get`
+  per mapping — hundreds of round trips inside a slash command on a large install. `list`
+  pays that cost because enumerating the mappings *is* its output; `status`,
+  `server list` and `server status` do not.
 
 `unmap` sequencing matters: clear the Matrix room state first (`RemoveMattermostChannelID`
 — if this fails, abort, or sync messages keep flowing), then delete the mapping key
@@ -923,7 +951,9 @@ finish with a commit following the conventional commits notation.
 - **Inbound auth** — token matches the right server; empty `HSToken` entries never match;
   unknown token → 401; disabled server → 503; `serverID` reaches the handler; missing
   client → 503 + `Retry-After` and the txn is **not** marked processed; identical `txnId`
-  from two different servers is processed twice.
+  from two different servers is processed twice; a `processMatrixEvent` failure partway
+  through a transaction → 503 + `Retry-After`, the txn is **not** marked processed, and a
+  retry of the same `txnId` is processed (not deduped).
 - **Outbound routing** — `serverIDForSyncMsg` for: mapped-to-`rc`'s-server, mapped-to-
   another-server, unmapped DM, unmapped non-DM, nil `rc`, unknown remote, **disabled server**.
   Assert the hooks call the bridge **exactly once** and never for a non-matching server.

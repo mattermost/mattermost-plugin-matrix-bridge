@@ -342,8 +342,7 @@ func (p *Plugin) remoteIDForServer(serverID string) string {
 }
 
 // doRegisterPluginForSharedChannels performs the actual RegisterPluginForSharedChannels
-// API call for one siteURL. Extracted so both registerForSharedChannels (all entries)
-// and registerServerForSharedChannels (one entry, from AddServer) share it.
+// API call for one siteURL.
 func (p *Plugin) doRegisterPluginForSharedChannels(siteURL string) (string, error) {
 	botUser, err := p.API.GetUserByUsername("mattermost-bridge")
 	var creatorID string
@@ -413,23 +412,6 @@ func (p *Plugin) registerForSharedChannels() error {
 	return p.servers.MergeRemoteIDs(remoteIDs)
 }
 
-// registerServerForSharedChannels registers a shared-channels remote for a single,
-// already-persisted server entry. Used by AddServer so a newly added server gets a
-// working remote immediately, without waiting for the next activation.
-func (p *Plugin) registerServerForSharedChannels(serverID string) error {
-	server, err := p.servers.Get(serverID)
-	if err != nil {
-		return err
-	}
-
-	remoteID, err := p.doRegisterPluginForSharedChannels(server.SiteURL)
-	if err != nil {
-		return err
-	}
-
-	return p.servers.SetRemoteID(serverID, remoteID)
-}
-
 // bridgeUtilsForServer builds the shared BridgeUtils for one server, on demand. Returns
 // an error (never a BridgeUtils with a nil MatrixClient) when this node has no client
 // for serverID.
@@ -449,7 +431,7 @@ func (p *Plugin) bridgeUtilsForServer(serverID string) (*BridgeUtils, error) {
 		MaxProfileImageSize: p.maxProfileImageSize,
 		MaxFileSize:         p.maxFileSize,
 		ChannelMapper:       p,
-		ServerGetter:        p.servers,
+		ServerGetter:        routingServerGetter{p},
 	}), nil
 }
 
@@ -561,65 +543,83 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 // invokes the outbound hooks once per invited remote, so this never fans out - it
 // resolves exactly one server from rc and the caller acts on that server alone.
 //
+// The returned error distinguishes an intentional no-op from an operational failure.
+// Both outbound hooks (server/hooks.go) must propagate a non-nil error rather than
+// swallow it: Mattermost only retains the shared-channels sync cursor and retries the
+// batch when the hook returns an error (the inbound webhook path applies the same
+// principle with its 503/Retry-After response for the analogous cache-lag case). Turning
+// an operational failure into a quiet (_, false, nil) would advance the cursor past
+// posts, reactions and files that were never actually delivered.
+//
 // Resolution:
-//  1. rc == nil || rc.RemoteId == "" -> (defensive; should not happen in production).
-//  2. rc.RemoteId doesn't match one of our remotes -> unknown remote.
-//  3. The resolved server is disabled -> skip. This is the only thing stopping outbound
+//  1. rc == nil || rc.RemoteId == "" -> (defensive; should not happen in production) no-op.
+//  2. rc.RemoteId doesn't match one of our remotes -> refresh the client caches once, in
+//     case this node's remoteToServerID lags a registry mutation made on another node
+//     that hasn't reached this node's cluster event handler yet; a refresh failure is an
+//     operational failure. Still unresolved after the refresh -> genuinely not one of our
+//     remotes, no-op.
+//  3. serverConfigForRouting fails -> operational failure (registry read failure).
+//  4. The resolved server is disabled -> skip. This is the only thing stopping outbound
 //     traffic for a disabled server (§3.11) - its remote stays registered and invited,
 //     so the hooks keep firing, and this check is what makes that a no-op.
-//  4. Membership (not equality) against channelID's mappings: mapped to this server ->
+//  5. getChannelServerMappings fails -> operational failure (KV read/parse failure).
+//  6. Membership (not equality) against channelID's mappings: mapped to this server ->
 //     use it; mapped but not to this server -> skip (the remote is still invited but
-//     its server is no longer mapped, do not relay its traffic elsewhere); unmapped and
-//     the channel is a DM -> use this server anyway, so the DM room can be
-//     auto-created on it; unmapped and not a DM -> skip.
-func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (string, bool) {
+//     its server is no longer mapped, do not relay its traffic elsewhere); unmapped ->
+//     isChannelDirect fails -> operational failure; unmapped and the channel is a DM ->
+//     use this server anyway, so the DM room can be auto-created on it; unmapped and not
+//     a DM -> skip.
+func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (serverID string, shouldSync bool, err error) {
 	if rc == nil || rc.RemoteId == "" {
 		p.logger.LogWarn("SyncMsg received without a usable RemoteCluster; skipping")
-		return "", false
+		return "", false, nil
 	}
 
 	serverID, ok := p.serverIDForRemoteID(rc.RemoteId)
 	if !ok {
-		p.logger.LogWarn("SyncMsg received for an unrecognized remote; skipping", "remote_id", rc.RemoteId)
-		return "", false
+		if refreshErr := p.initMatrixClients(); refreshErr != nil {
+			return "", false, errors.Wrap(refreshErr, "refresh Matrix client cache")
+		}
+		serverID, ok = p.serverIDForRemoteID(rc.RemoteId)
+		if !ok {
+			p.logger.LogWarn("SyncMsg received for an unrecognized remote; skipping", "remote_id", rc.RemoteId)
+			return "", false, nil
+		}
 	}
 
 	server, err := p.serverConfigForRouting(serverID)
 	if err != nil {
-		p.logger.LogWarn("SyncMsg resolved to a server no longer in the registry; skipping", "server_id", serverID, "error", err)
-		return "", false
+		return "", false, errors.Wrap(err, "get server configuration for routing")
 	}
 	if !server.Enabled {
 		p.logger.LogDebug("SyncMsg resolved to a disabled server; skipping", "server_id", serverID)
-		return "", false
+		return "", false, nil
 	}
 
 	mappings, err := p.getChannelServerMappings(channelID)
 	if err != nil {
-		p.logger.LogWarn("Failed to read channel server mappings for SyncMsg; skipping", "channel_id", channelID, "error", err)
-		return "", false
+		return "", false, errors.Wrap(err, "get channel server mappings")
 	}
 
 	if kvstore.RoomIDForServer(mappings, serverID) != "" {
-		return serverID, true
+		return serverID, true, nil
 	}
 
 	if len(mappings) > 0 {
 		// Mapped, but to a different server - the remote is still invited, but its
 		// server no longer owns this channel's traffic.
-		return "", false
+		return "", false, nil
 	}
 
 	isDM, err := p.isChannelDirect(channelID)
 	if err != nil {
-		p.logger.LogWarn("Failed to determine channel type for SyncMsg; skipping", "channel_id", channelID, "error", err)
-		return "", false
+		return "", false, errors.Wrap(err, "get channel type")
 	}
 	if isDM {
-		return serverID, true
+		return serverID, true, nil
 	}
 
-	return "", false
+	return "", false, nil
 }
 
 // isChannelDirect reports whether channelID is a direct or group-direct channel.

@@ -160,6 +160,36 @@ func (c *casConflictKVStore) SetAtomicWithRetries(key string, valueFunc func([]b
 	}
 }
 
+// writeCountingKVStore counts the writes that actually reach the backing store, so
+// tests can assert that an operation which fails validation costs no registry write at
+// all - a mutator that returns the unchanged slice instead of an error still persists
+// it, and only a write count can tell the two apart.
+type writeCountingKVStore struct {
+	*memoryKVStore
+	writes int
+}
+
+func (w *writeCountingKVStore) Set(key string, value []byte) error {
+	w.writes++
+	return w.memoryKVStore.Set(key, value)
+}
+
+// SetAtomicWithRetries reimplements the embedded store's single-shot
+// read-compute-write rather than delegating to it: the promoted method would write
+// through the inner store's own Set, bypassing this wrapper's counter and leaving
+// every atomic write uncounted.
+func (w *writeCountingKVStore) SetAtomicWithRetries(key string, valueFunc func([]byte) ([]byte, error)) error {
+	old, err := w.Get(key)
+	if err != nil {
+		return err
+	}
+	newValue, err := valueFunc(old)
+	if err != nil {
+		return err
+	}
+	return w.Set(key, newValue)
+}
+
 // erroringKVStore fails Get for one specific key.
 type erroringKVStore struct {
 	kvstore.KVStore
@@ -190,6 +220,10 @@ type fakeHost struct {
 	siteURL       string
 	pluginID      string
 
+	// remoteID, when set, is what RegisterRemoteForSiteURL hands back, for tests that
+	// need to assert on a specific remote ID rather than the derived default.
+	remoteID string
+
 	registerErr   error
 	unregisterErr error
 	refreshErr    error
@@ -219,9 +253,15 @@ func (h *fakeHost) MatrixClient(serverID string) *matrix.Client {
 	return h.matrixClients[serverID]
 }
 
-func (h *fakeHost) RegisterRemote(serverID string) error {
-	h.record("RegisterRemote:" + serverID)
-	return h.registerErr
+func (h *fakeHost) RegisterRemoteForSiteURL(siteURL string) (string, error) {
+	h.record("RegisterRemoteForSiteURL:" + siteURL)
+	if h.registerErr != nil {
+		return "", h.registerErr
+	}
+	if h.remoteID != "" {
+		return h.remoteID, nil
+	}
+	return "remote-for-" + siteURL, nil
 }
 
 func (h *fakeHost) UnregisterRemote(remoteID string) error {
@@ -242,11 +282,13 @@ func (h *fakeHost) PluginID() string { return h.pluginID }
 type panicHost struct{}
 
 func (panicHost) MatrixClient(string) *matrix.Client { panic("MatrixClient called") }
-func (panicHost) RegisterRemote(string) error        { panic("RegisterRemote called") }
-func (panicHost) UnregisterRemote(string) error      { panic("UnregisterRemote called") }
-func (panicHost) RefreshAndBroadcast(string) error   { panic("RefreshAndBroadcast called") }
-func (panicHost) SiteURL() string                    { panic("SiteURL called") }
-func (panicHost) PluginID() string                   { panic("PluginID called") }
+func (panicHost) RegisterRemoteForSiteURL(string) (string, error) {
+	panic("RegisterRemoteForSiteURL called")
+}
+func (panicHost) UnregisterRemote(string) error    { panic("UnregisterRemote called") }
+func (panicHost) RefreshAndBroadcast(string) error { panic("RefreshAndBroadcast called") }
+func (panicHost) SiteURL() string                  { panic("SiteURL called") }
+func (panicHost) PluginID() string                 { panic("PluginID called") }
 
 func newTestService(t *testing.T) (*Service, *fakeHost, *memoryKVStore) {
 	t.Helper()
@@ -401,23 +443,79 @@ func TestAdd(t *testing.T) {
 		assert.ErrorIs(t, err, ErrInvalidInput)
 	})
 
-	t.Run("Host is honoured in order: RegisterRemote then RefreshAndBroadcast", func(t *testing.T) {
+	t.Run("rejects a duplicate non-empty hs_token and leaves the registry unchanged", func(t *testing.T) {
+		svc, _, _ := newTestService(t)
+		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "shared-hs-token", ServerName: "a.example.com"})
+		require.NoError(t, err)
+
+		_, err = svc.Add(AddRequest{ServerURL: "https://b.example.com", ASToken: "as2", HSToken: "shared-hs-token", ServerName: "b.example.com"})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrHSTokenTaken)
+
+		list, err := svc.List()
+		require.NoError(t, err)
+		require.Len(t, list, 1, "the rejected registration must not be persisted")
+	})
+
+	t.Run("an empty hs_token is not treated as a duplicate", func(t *testing.T) {
+		svc, _, _ := newTestService(t)
+		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", ServerName: "a.example.com"})
+		require.NoError(t, err)
+
+		_, err = svc.Add(AddRequest{ServerURL: "https://b.example.com", ASToken: "as2", ServerName: "b.example.com"})
+		require.NoError(t, err, "two servers with no hs_token yet must both be registrable")
+	})
+
+	t.Run("Host is honoured in order: RegisterRemoteForSiteURL then RefreshAndBroadcast", func(t *testing.T) {
 		svc, host, _ := newTestService(t)
 		created, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerName: "a.example.com"})
 		require.NoError(t, err)
 
 		calls := host.Calls()
 		require.Len(t, calls, 2)
-		assert.Equal(t, "RegisterRemote:"+created.ServerID, calls[0])
+		assert.Equal(t, "RegisterRemoteForSiteURL:"+created.SiteURL, calls[0])
 		assert.Equal(t, "RefreshAndBroadcast:server_added", calls[1])
+		assert.Equal(t, "remote-for-"+created.SiteURL, created.RemoteID, "the entry must carry the remote it was registered with")
 	})
 
-	t.Run("a Host error is non-fatal", func(t *testing.T) {
-		svc, host, _ := newTestService(t)
+	t.Run("fails without ever writing to the registry when remote registration fails", func(t *testing.T) {
+		svc, host, kv := newTestService(t)
 		host.registerErr = errors.New("boom")
-		host.refreshErr = errors.New("boom too")
+
 		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerName: "a.example.com"})
-		require.NoError(t, err, "a Host failure during Add must not fail the registry write")
+		require.Error(t, err, "a server whose remote could not be created must not be registered")
+		assert.Contains(t, err.Error(), "failed to register server for shared channels")
+
+		raw, err := kv.Get(kvstore.KeyServersConfig)
+		require.NoError(t, err)
+		assert.Empty(t, raw, "the registry key must not have been written at all")
+		assert.NotContains(t, strings.Join(host.Calls(), ","), "RefreshAndBroadcast")
+	})
+
+	t.Run("unregisters the orphan remote when the registry write is rejected", func(t *testing.T) {
+		svc, host, _ := newTestService(t)
+		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerName: "a.example.com"})
+		require.NoError(t, err)
+
+		// Registration now happens before the conflict check, so this add gets as far as
+		// obtaining a remote and is only then rejected - that remote belongs to no entry
+		// and must not be left registered.
+		host.remoteID = "remote-orphan"
+		_, err = svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as2", HSToken: "hs2", ServerName: "second.example.com"})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrEndpointTaken)
+		assert.Contains(t, host.Calls(), "UnregisterRemote:remote-orphan")
+
+		list, err := svc.List()
+		require.NoError(t, err)
+		require.Len(t, list, 1, "the rejected add must not add a second entry")
+	})
+
+	t.Run("a RefreshAndBroadcast error is non-fatal", func(t *testing.T) {
+		svc, host, _ := newTestService(t)
+		host.refreshErr = errors.New("boom")
+		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerName: "a.example.com"})
+		require.NoError(t, err, "a cache-refresh failure must not fail a registry write that already landed")
 	})
 
 	t.Run("EventDomain is derived from the endpoint and stays distinct across ports", func(t *testing.T) {
@@ -543,6 +641,68 @@ func TestSetEnabled(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrNotRegistered)
 	})
+
+	// The mutate callback may run several times and only the invocation that wins the
+	// CAS decides the outcome, so "did I find the server?" must come out of that
+	// invocation. A captured flag set on an earlier, discarded invocation would report
+	// success for a server that no longer exists by the time the write lands.
+	t.Run("not-found is decided by the winning attempt, not an earlier one", func(t *testing.T) {
+		host := &fakeHost{}
+		store := newCASConflictKVStore()
+		svc := New(store, testLogger{}, host)
+
+		seed := []kvstore.ServerConfig{
+			{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
+			{ServerID: "serverB", ServerName: "b.example.com", Enabled: true},
+		}
+		data, err := kvstore.MarshalServersConfig(seed)
+		require.NoError(t, err)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
+
+		// A concurrent Remove deletes serverA between this call's read and write, so the
+		// first callback invocation sees it and the retried one does not.
+		store.onFirstRead = func(kv kvstore.KVStore) {
+			remaining, marshalErr := kvstore.MarshalServersConfig(seed[1:])
+			require.NoError(t, marshalErr)
+			require.NoError(t, kv.Set(kvstore.KeyServersConfig, remaining))
+		}
+
+		err = svc.SetEnabled("serverA", false)
+		require.Error(t, err, "a server removed before the winning retry must not be reported as successfully updated")
+		assert.ErrorIs(t, err, ErrNotRegistered)
+		assert.Empty(t, host.Calls(), "a failed update must not broadcast a cache refresh")
+
+		final, err := svc.List()
+		require.NoError(t, err)
+		require.Len(t, final, 1, "the concurrent removal must stand")
+		assert.Equal(t, "serverB", final[0].ServerID)
+		assert.True(t, final[0].Enabled, "the untouched server must keep its flag")
+	})
+
+	// The other half of the same design: signalling not-found as a callback error aborts
+	// the atomic update, so a typo'd server ID never rewrites the whole registry on its
+	// way to returning an error.
+	t.Run("an unknown ID writes nothing", func(t *testing.T) {
+		store := &writeCountingKVStore{memoryKVStore: newMemoryKVStore()}
+		svc := New(store, testLogger{}, &fakeHost{})
+
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
+		})
+		require.NoError(t, err)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
+		store.writes = 0
+
+		err = svc.SetEnabled("nosuchserver", true)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNotRegistered)
+		assert.Zero(t, store.writes, "an unknown server ID must not trigger a registry write")
+
+		final, err := svc.List()
+		require.NoError(t, err)
+		require.Len(t, final, 1)
+		assert.True(t, final[0].Enabled)
+	})
 }
 
 // --- Update ---
@@ -641,6 +801,30 @@ func TestUpdate(t *testing.T) {
 		_, _, err := svc.Update("s1", Update{HSToken: new("")})
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrInvalidInput)
+	})
+
+	t.Run("an hs_token colliding with another entry is rejected", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{
+			baseEntry(),
+			{ServerID: "s2", ServerURL: "https://b.example.com", Endpoint: "b.example.com:443", ServerName: "b.example.com", HSToken: "hs2"},
+		})))
+
+		_, _, err := svc.Update("s1", Update{HSToken: new("hs2")})
+		require.Error(t, err, "the edit path must enforce hs_token uniqueness exactly as Add does")
+		assert.ErrorIs(t, err, ErrHSTokenTaken)
+	})
+
+	t.Run("re-submitting the entry's own hs_token succeeds", func(t *testing.T) {
+		svc, _, kv := newTestService(t)
+		require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{
+			baseEntry(),
+			{ServerID: "s2", ServerURL: "https://b.example.com", Endpoint: "b.example.com:443", ServerName: "b.example.com", HSToken: "hs2"},
+		})))
+
+		updated, _, err := svc.Update("s1", Update{HSToken: new("hs1")})
+		require.NoError(t, err)
+		assert.Equal(t, "hs1", updated.HSToken)
 	})
 
 	t.Run("empty UsernamePrefix resets to the default", func(t *testing.T) {

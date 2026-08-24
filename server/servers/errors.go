@@ -24,6 +24,12 @@ var (
 	// with a live entry.
 	ErrIDTaken = errors.New("server ID is already registered")
 
+	// ErrHSTokenTaken is returned when a server being added or edited would share its
+	// hs_token with a different entry. Inbound webhook authorization matches a bearer
+	// token against every registered server (MatrixAuthorizationRequired), so a shared
+	// hs_token makes which server an inbound transaction is attributed to arbitrary.
+	ErrHSTokenTaken = errors.New("hs_token conflicts with an existing server")
+
 	// ErrMigratedImmutable is returned by Remove for an entry migrated from the
 	// legacy single-server configuration (SiteURL == ""), which cannot be
 	// re-registered with the same shared-channels remote identity.

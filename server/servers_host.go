@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // pluginHost adapts *Plugin to servers.Host without adding those methods to
@@ -14,10 +15,11 @@ func (h pluginHost) MatrixClient(serverID string) *matrix.Client {
 	return h.p.getMatrixClient(serverID)
 }
 
-// RegisterRemote registers a shared-channels remote for a single, already-persisted
-// server entry, so a newly added server gets a working remote immediately.
-func (h pluginHost) RegisterRemote(serverID string) error {
-	return h.p.registerServerForSharedChannels(serverID)
+// RegisterRemoteForSiteURL creates the shared-channels remote for a server that is not
+// persisted yet and returns its remote ID, so Service.Add can register the remote before
+// writing the registry entry and never leave a registered server without one.
+func (h pluginHost) RegisterRemoteForSiteURL(siteURL string) (string, error) {
+	return h.p.doRegisterPluginForSharedChannels(siteURL)
 }
 
 // UnregisterRemote must convert explicitly: UnregisterPluginRemoteForSharedChannels
@@ -71,4 +73,16 @@ func (l pluginLogger) LogWarn(message string, keyValuePairs ...any) {
 
 func (l pluginLogger) LogError(message string, keyValuePairs ...any) {
 	l.p.logger.LogError(message, keyValuePairs...)
+}
+
+// routingServerGetter adapts *Plugin to BridgeUtils' ServerGetter so registry reads on
+// the sync hot paths go through serverConfigForRouting - the per-node snapshot, with a
+// KV read only as a fallback - instead of servers.Service.Get, which unmarshals the whole
+// registry every call. Separate from pluginHost because the servers package must not be
+// able to reach back into Plugin's routing cache: that cache is rebuilt *from* the
+// registry the service owns.
+type routingServerGetter struct{ p *Plugin }
+
+func (g routingServerGetter) Get(serverID string) (kvstore.ServerConfig, error) {
+	return g.p.serverConfigForRouting(serverID)
 }

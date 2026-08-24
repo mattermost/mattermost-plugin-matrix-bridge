@@ -8,6 +8,19 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
+// serverDomainForID returns the ServerName (Matrix ID domain) for a registered server,
+// resolved through serverConfigForRouting rather than servers.Service.Domain: isGhostUser
+// calls this once per inbound Matrix event, and Service.Domain would unmarshal the whole
+// registry out of KV every time. The snapshot is refreshed by every registry mutation, so
+// this is never staler than a direct registry read would have been.
+func (p *Plugin) serverDomainForID(serverID string) (string, error) {
+	server, err := p.serverConfigForRouting(serverID)
+	if err != nil {
+		return "", err
+	}
+	return server.ServerName, nil
+}
+
 // legacyServerConfig mirrors the pre-v3 flat System Console fields. It intentionally
 // keeps the old JSON tags so LoadPluginConfiguration can still populate it from the
 // persisted plugin configuration after those keys are removed from settings_schema -

@@ -38,9 +38,9 @@ func newTestPluginForServers(t *testing.T) *Plugin {
 
 const unreachableURL = "http://127.0.0.1:1"
 
-// newTestPluginForAddServer additionally mocks the best-effort registerServerForSharedChannels
-// / refreshServersAndBroadcast side effects Servers().Add triggers, so tests can focus on
-// registry semantics without those calls panicking on an unmocked expectation.
+// newTestPluginForAddServer additionally mocks the shared-channels remote registration
+// and refreshServersAndBroadcast side effects Servers().Add triggers, so tests can focus
+// on registry semantics without those calls panicking on an unmocked expectation.
 func newTestPluginForAddServer(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := newTestPluginForServers(t)
@@ -300,7 +300,7 @@ func TestInitMatrixClientsConcurrentRebuildMatchesFinalRegistry(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := addTestServer(plugin, fmt.Sprintf("https://server%d.example.com", i), "as", "hs", "", "", fmt.Sprintf("server%d.example.com", i))
+			_, err := addTestServer(plugin, fmt.Sprintf("https://server%d.example.com", i), "as", fmt.Sprintf("hs%d", i), "", "", fmt.Sprintf("server%d.example.com", i))
 			assert.NoError(t, err)
 		}(i)
 	}
@@ -318,4 +318,40 @@ func TestInitMatrixClientsConcurrentRebuildMatchesFinalRegistry(t *testing.T) {
 	cacheSize := len(plugin.matrixClients)
 	plugin.matrixClientsLock.RUnlock()
 	assert.Equal(t, len(servers), cacheSize, "client cache must exactly match the final registry")
+}
+
+// TestServerDomainForIDUsesCachedSnapshot pins serverDomainForID to the serverConfigs
+// snapshot. Its one caller, isGhostUser, runs one to three times per inbound Matrix
+// event, so a full registry read per call would sit on the hottest inbound path there is.
+func TestServerDomainForIDUsesCachedSnapshot(t *testing.T) {
+	const ghostOnServer = "@_mattermost_abc123:matrix.example.com"
+
+	plugin := setupPluginForTest()
+	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", nil)
+
+	// Failing every read of the registry key is what makes this a real assertion: a KV
+	// round trip left on this path would surface below as an error, not a domain.
+	plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.KeyServersConfig}
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+
+	domain, err := plugin.serverDomainForID(serverID)
+	require.NoError(t, err)
+	assert.Equal(t, "matrix.example.com", domain)
+
+	isGhost, err := plugin.isGhostUser(serverID, ghostOnServer)
+	require.NoError(t, err)
+	assert.True(t, isGhost)
+
+	// The direct-KV fallback still applies when the snapshot holds no entry for the
+	// server, and a failure there must surface as an error - never as "not a ghost user",
+	// which would let the bridge re-import its own ghost events (see isGhostUser).
+	plugin.serverConfigs = nil
+
+	_, err = plugin.serverDomainForID(serverID)
+	require.Error(t, err)
+
+	_, err = plugin.isGhostUser(serverID, ghostOnServer)
+	require.Error(t, err)
 }

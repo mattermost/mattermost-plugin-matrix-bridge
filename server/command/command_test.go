@@ -30,11 +30,17 @@ type fakeHost struct {
 }
 
 func (h *fakeHost) MatrixClient(serverID string) *matrix.Client { return h.matrixClients[serverID] }
-func (h *fakeHost) RegisterRemote(_ string) error               { return h.registerErr }
 func (h *fakeHost) UnregisterRemote(_ string) error             { return h.unregisterErr }
 func (h *fakeHost) RefreshAndBroadcast(_ string) error          { return h.refreshErr }
-func (h *fakeHost) SiteURL() string                             { return h.siteURL }
-func (h *fakeHost) PluginID() string                            { return h.pluginID }
+
+func (h *fakeHost) RegisterRemoteForSiteURL(siteURL string) (string, error) {
+	if h.registerErr != nil {
+		return "", h.registerErr
+	}
+	return "remote-for-" + siteURL, nil
+}
+func (h *fakeHost) SiteURL() string  { return h.siteURL }
+func (h *fakeHost) PluginID() string { return h.pluginID }
 
 // mockPlugin implements PluginAccessor for testing. The server registry itself is a
 // real *servers.Service backed by an in-memory KV store and fakeHost - only the
@@ -89,22 +95,48 @@ func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 }
 
 // memoryKVStore is a minimal in-memory kvstore.KVStore for command tests that touch
-// keyspace scans (e.g. countMappedChannelsPerServer).
+// keyspace scans (e.g. executeListMappingsCommand).
 type memoryKVStore struct {
 	data map[string][]byte
+
+	// getErr/setErr inject a failure for one specific key, so tests can exercise
+	// KV failure paths without failing every unrelated read or write.
+	getErr  map[string]error
+	setErr  map[string]error
+	setKeys []string
+
+	// onGet, when set, runs just after a Get has been served, so a test can mutate the
+	// store between two reads the handler under test makes back to back - the first read
+	// still sees the seeded value.
+	onGet func(key string)
 }
 
-func newMemoryKVStore() kvstore.KVStore {
-	return &memoryKVStore{data: make(map[string][]byte)}
+func newMemoryKVStore() *memoryKVStore {
+	return &memoryKVStore{
+		data:   make(map[string][]byte),
+		getErr: make(map[string]error),
+		setErr: make(map[string]error),
+	}
 }
 
 func (m *memoryKVStore) GetTemplateData(_ string) (string, error) { return "", nil }
 
 func (m *memoryKVStore) Get(key string) ([]byte, error) {
-	return m.data[key], nil
+	if err := m.getErr[key]; err != nil {
+		return nil, err
+	}
+	value := m.data[key]
+	if m.onGet != nil {
+		m.onGet(key)
+	}
+	return value, nil
 }
 
 func (m *memoryKVStore) Set(key string, value []byte) error {
+	m.setKeys = append(m.setKeys, key)
+	if err := m.setErr[key]; err != nil {
+		return err
+	}
 	m.data[key] = value
 	return nil
 }
@@ -303,10 +335,32 @@ func TestExecuteServerGroupAddRemoveList(t *testing.T) {
 		assert.Contains(t, resp.Text, "Usage")
 	})
 
-	t.Run("remove of unknown server reports not found", func(t *testing.T) {
+	t.Run("remove of an unknown identifier reports no match", func(t *testing.T) {
 		h3, _, api3 := newTestHandler(t)
 		api3.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		resp := h3.executeServerGroup(args, []string{"remove", "nonexistent"})
+		assert.Contains(t, resp.Text, "no registered Matrix server matches")
+	})
+
+	t.Run("remove reports not found when the server vanishes after resolution", func(t *testing.T) {
+		seeded := kvstore.ServerConfig{ServerID: "server-gone-test", ServerName: "gone.example.com", ServerURL: "https://gone.example.com", Enabled: true, SiteURL: "https://gone.example.com"}
+		h3, mp3, api3 := newTestHandler(t, seeded)
+		api3.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+		// Resolving the name and removing the entry are two separate registry reads, so
+		// a concurrent removal in between is reachable in production. Empty the registry
+		// once the first read - the one ResolveIdentifier does - has been served, so
+		// Remove's own read finds nothing and reports not-found instead of claiming a
+		// removal.
+		store := mp3.kvstore.(*memoryKVStore)
+		store.onGet = func(key string) {
+			if key == kvstore.KeyServersConfig {
+				store.onGet = nil
+				delete(store.data, key)
+			}
+		}
+
+		resp := h3.executeServerGroup(args, []string{"remove", "gone.example.com"})
 		assert.Contains(t, resp.Text, "No server found")
 	})
 
@@ -339,6 +393,98 @@ func TestExecuteServerGroupEnableDisable(t *testing.T) {
 	assert.Contains(t, resp.Text, "Usage")
 }
 
+// The subcommands taking a required server identifier must accept every form
+// Servers().ResolveIdentifier advertises - the server ID, the server name, and the URL
+// host - not just the canonical 26-character ID the registry itself keys entries by.
+func TestExecuteServerGroupResolvesServerIdentifierForms(t *testing.T) {
+	// Name and URL host deliberately differ from the ID and from each other, so a test
+	// passing for one form cannot be passing by accident for another.
+	const (
+		serverID   = "serveridentifier1"
+		serverName = "friendly-name"
+		urlHost    = "host.example.com"
+	)
+	seeded := func() kvstore.ServerConfig {
+		return kvstore.ServerConfig{
+			ServerID:   serverID,
+			ServerName: serverName,
+			ServerURL:  "https://" + urlHost,
+			Endpoint:   urlHost + ":443",
+			SiteURL:    "https://" + urlHost + ":443",
+			Enabled:    false,
+		}
+	}
+
+	// listServers reads back through the same service the handler mutates, so these
+	// assertions check what was actually persisted rather than a mock's bookkeeping.
+	listServers := func(t *testing.T, mp *mockPlugin) []kvstore.ServerConfig {
+		t.Helper()
+		list, err := mp.serverSvc.List()
+		require.NoError(t, err)
+		return list
+	}
+
+	userID := model.NewId()
+	args := &model.CommandArgs{UserId: userID}
+
+	identifiers := []struct {
+		name string
+		arg  string
+	}{
+		{"server ID", serverID},
+		{"server name", serverName},
+		{"URL host", urlHost},
+	}
+
+	for _, id := range identifiers {
+		t.Run("remove by "+id.name, func(t *testing.T) {
+			h, mp, api := newTestHandler(t, seeded())
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, []string{"remove", id.arg})
+			assert.Contains(t, resp.Text, "Server removed")
+			assert.Empty(t, listServers(t, mp))
+		})
+
+		t.Run("enable by "+id.name, func(t *testing.T) {
+			h, mp, api := newTestHandler(t, seeded())
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, []string{"enable", id.arg})
+			assert.Contains(t, resp.Text, "enabled")
+			list := listServers(t, mp)
+			require.Len(t, list, 1)
+			assert.True(t, list[0].Enabled)
+		})
+
+		t.Run("disable by "+id.name, func(t *testing.T) {
+			server := seeded()
+			server.Enabled = true
+			h, mp, api := newTestHandler(t, server)
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, []string{"disable", id.arg})
+			assert.Contains(t, resp.Text, "disabled")
+			list := listServers(t, mp)
+			require.Len(t, list, 1)
+			assert.False(t, list[0].Enabled)
+		})
+	}
+
+	for _, sub := range []string{"remove", "enable", "disable"} {
+		t.Run(sub+" of an unknown identifier errors", func(t *testing.T) {
+			h, mp, api := newTestHandler(t, seeded())
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, []string{sub, "nonexistent"})
+			assert.Contains(t, resp.Text, "no registered Matrix server matches")
+			list := listServers(t, mp)
+			require.Len(t, list, 1)
+			assert.False(t, list[0].Enabled)
+		})
+	}
+}
+
 func TestExecuteServerGroupUnknownSubcommand(t *testing.T) {
 	h, _, api := newTestHandler(t)
 	userID := model.NewId()
@@ -348,13 +494,78 @@ func TestExecuteServerGroupUnknownSubcommand(t *testing.T) {
 	assert.Contains(t, resp.Text, "Usage")
 }
 
-func TestExecuteMigrateCommandRefusesWithMultipleServers(t *testing.T) {
+// TestExecuteMigrateCommand covers the guards that run before the version marker is
+// reset. Each must fail closed: resetting kv_store_version to "0" and then not
+// completing a migration leaves the marker at 0, and the next activation re-runs
+// v1/v2/v3 unattended against an already-namespaced store.
+func TestExecuteMigrateCommand(t *testing.T) {
 	serverA := kvstore.ServerConfig{ServerID: "serverA"}
 	serverB := kvstore.ServerConfig{ServerID: "serverB"}
-	h, _, _ := newTestHandler(t, serverA, serverB)
 
-	resp := h.executeMigrateCommand(&model.CommandArgs{})
-	assert.Contains(t, resp.Text, "refuses to run")
+	t.Run("refuses with multiple servers", func(t *testing.T) {
+		h, _, _ := newTestHandler(t, serverA, serverB)
+		store := h.kvstore.(*memoryKVStore)
+		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
+		store.setKeys = nil
+
+		resp := h.executeMigrateCommand(&model.CommandArgs{})
+
+		assert.Contains(t, resp.Text, "refuses to run")
+		assert.Empty(t, store.setKeys, "must not write the version marker after refusing")
+		assert.Equal(t, []byte("3"), store.data[kvstore.KeyStoreVersion])
+	})
+
+	t.Run("fails closed when the server list cannot be read", func(t *testing.T) {
+		h, _, _ := newTestHandler(t)
+		store := h.kvstore.(*memoryKVStore)
+		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
+		store.getErr[kvstore.KeyServersConfig] = assert.AnError
+		store.setKeys = nil
+
+		resp := h.executeMigrateCommand(&model.CommandArgs{})
+
+		assert.Contains(t, resp.Text, "Failed to load Matrix servers")
+		assert.Empty(t, store.setKeys, "a KV failure must not skip the multi-server check and reset the marker")
+		assert.Equal(t, []byte("3"), store.data[kvstore.KeyStoreVersion])
+	})
+
+	t.Run("fails closed when the version marker cannot be read", func(t *testing.T) {
+		h, _, _ := newTestHandler(t, serverA)
+		store := h.kvstore.(*memoryKVStore)
+		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
+		store.setKeys = nil
+		store.getErr[kvstore.KeyStoreVersion] = assert.AnError
+
+		resp := h.executeMigrateCommand(&model.CommandArgs{})
+
+		assert.Contains(t, resp.Text, "Failed to read migration version")
+		assert.Empty(t, store.setKeys, "must not reset a marker it could not read")
+	})
+
+	t.Run("reports migration failure after the reset", func(t *testing.T) {
+		h, mp, _ := newTestHandler(t, serverA)
+		mp.migrationErr = assert.AnError
+		store := h.kvstore.(*memoryKVStore)
+		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
+
+		resp := h.executeMigrateCommand(&model.CommandArgs{})
+
+		assert.Contains(t, resp.Text, "Migration failed")
+		assert.Equal(t, []byte("0"), store.data[kvstore.KeyStoreVersion])
+	})
+
+	t.Run("runs and reports the previous version on success", func(t *testing.T) {
+		h, mp, _ := newTestHandler(t, serverA)
+		mp.migrationResult = &MigrationResult{UserMappingsCreated: 2}
+		store := h.kvstore.(*memoryKVStore)
+		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("2")))
+
+		resp := h.executeMigrateCommand(&model.CommandArgs{})
+
+		assert.Contains(t, resp.Text, "Migration completed successfully")
+		assert.Contains(t, resp.Text, "Reset version: 2")
+		assert.Contains(t, resp.Text, "User reverse mappings created/updated: 2")
+	})
 }
 
 // TestExecuteMatrixCommandAdminGate exercises the dispatcher-level admin gate in

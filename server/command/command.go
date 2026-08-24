@@ -3,7 +3,6 @@ package command
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -674,7 +673,7 @@ func renderDiagnostics(diag servers.Diagnostics) string {
 }
 
 func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.CommandResponse {
-	keys, err := kvstore.ListAllKeysWithPrefix(c.kvstore, kvstore.KeyPrefixChannelMapping, 1000)
+	keys, err := kvstore.ListAllKeysWithPrefix(c.kvstore, kvstore.KeyPrefixChannelMapping, kvstore.DefaultListKeysBatchSize)
 	if err != nil {
 		return ephemeral(fmt.Sprintf("❌ Failed to retrieve mappings: %v", err))
 	}
@@ -738,9 +737,10 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	return ephemeral(b.String())
 }
 
-// executeStatusCommand implements /matrix status: every server's enabled state, live
-// connection health (probed concurrently under statusProbeDeadline) and mapped-channel
-// count. No admin gate, no secrets.
+// executeStatusCommand implements /matrix status: every server's enabled state and live
+// connection health (probed concurrently by Servers().ProbeHealth under a single
+// deadline). Like every other subcommand it is System Admin only (gated in
+// executeMatrixCommand), and the output carries no secrets.
 func (c *Handler) executeStatusCommand() *model.CommandResponse {
 	servers, err := c.plugin.Servers().List()
 	if err != nil {
@@ -750,7 +750,6 @@ func (c *Handler) executeStatusCommand() *model.CommandResponse {
 		return ephemeral("No Matrix servers are registered. Use `/matrix server add` to add one.")
 	}
 
-	counts, countsErr := c.plugin.Servers().CountMappedChannels()
 	health := c.plugin.Servers().ProbeHealth(servers)
 
 	var b strings.Builder
@@ -760,11 +759,7 @@ func (c *Handler) executeStatusCommand() *model.CommandResponse {
 		if s.Enabled {
 			state = "enabled"
 		}
-		countStr := "unavailable"
-		if countsErr == nil {
-			countStr = strconv.Itoa(counts[s.ServerID])
-		}
-		fmt.Fprintf(&b, "• **%s** (`%s`) - %s, health: %s, mapped channels: %s\n", s.ServerName, s.ServerID, state, health[s.ServerID], countStr)
+		fmt.Fprintf(&b, "• **%s** (`%s`) - %s, health: %s\n", s.ServerName, s.ServerID, state, health[s.ServerID])
 	}
 
 	return ephemeral(b.String())
@@ -775,13 +770,21 @@ func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResp
 	// one server's records into another's namespace). Check before resetting the
 	// version marker, so a refusal here doesn't leave it reset with no migration having
 	// actually run to fix it back up.
-	if servers, err := c.plugin.Servers().List(); err == nil && len(servers) >= 2 {
+
+	servers, err := c.plugin.Servers().List()
+	if err != nil {
+		return ephemeral(fmt.Sprintf("❌ Failed to load Matrix servers: %v", err))
+	}
+	if len(servers) >= 2 {
 		return ephemeral("❌ `/matrix migrate` refuses to run while 2 or more Matrix servers are registered - it would rekey one server's records into another's namespace.")
 	}
 
 	// Get current version before reset
 	kvstorage := c.plugin.GetKVStore()
-	versionBytes, _ := kvstorage.Get(kvstore.KeyStoreVersion)
+	versionBytes, err := kvstorage.Get(kvstore.KeyStoreVersion)
+	if err != nil {
+		return ephemeral(fmt.Sprintf("❌ Failed to read migration version: %v", err))
+	}
 	currentVersion := "0"
 	if len(versionBytes) > 0 {
 		currentVersion = string(versionBytes)
@@ -946,8 +949,6 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 		return ephemeral("No Matrix servers are registered. Use `/matrix server add` to add one.")
 	}
 
-	counts, countsErr := c.plugin.Servers().CountMappedChannels()
-
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Matrix Servers (%d):**\n\n", len(servers))
 	for _, s := range servers {
@@ -955,16 +956,12 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 		if s.Enabled {
 			state = "enabled"
 		}
-		countStr := "unavailable"
-		if countsErr == nil {
-			countStr = strconv.Itoa(counts[s.ServerID])
-		}
 		usernamePrefix := s.UsernamePrefix
 		if usernamePrefix == "" {
 			usernamePrefix = "matrix"
 		}
-		fmt.Fprintf(&b, "• **%s** (`%s`)\n   URL: %s\n   Username prefix: `%s`\n   Mapped channels: %s\n   State: %s\n\n",
-			s.ServerName, s.ServerID, s.ServerURL, usernamePrefix, countStr, state)
+		fmt.Fprintf(&b, "• **%s** (`%s`)\n   URL: %s\n   Username prefix: `%s`\n   State: %s\n\n",
+			s.ServerName, s.ServerID, s.ServerURL, usernamePrefix, state)
 	}
 
 	return ephemeral(b.String())
@@ -1025,19 +1022,14 @@ func (c *Handler) executeServerStatusCommand(serverIDArg string) *model.CommandR
 	}
 
 	health := c.plugin.Servers().ProbeHealth([]kvstore.ServerConfig{*server})
-	counts, countsErr := c.plugin.Servers().CountMappedChannels()
-	countStr := "unavailable"
-	if countsErr == nil {
-		countStr = strconv.Itoa(counts[server.ServerID])
-	}
 
 	state := "disabled"
 	if server.Enabled {
 		state = "enabled"
 	}
 
-	return ephemeral(fmt.Sprintf("**Matrix Server Status**\n\n**Name:** %s\n**ID:** `%s`\n**URL:** %s\n**State:** %s\n**Health:** %s\n**Mapped channels:** %s",
-		server.ServerName, server.ServerID, server.ServerURL, state, health[server.ServerID], countStr))
+	return ephemeral(fmt.Sprintf("**Matrix Server Status**\n\n**Name:** %s\n**ID:** `%s`\n**URL:** %s\n**State:** %s\n**Health:** %s",
+		server.ServerName, server.ServerID, server.ServerURL, state, health[server.ServerID]))
 }
 
 func (c *Handler) executeServerEnableCommand(serverID string, enabled bool) *model.CommandResponse {
@@ -1075,7 +1067,11 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server remove <server_id>"); resp != nil {
 			return resp
 		}
-		return c.executeServerRemoveCommand(rest[0])
+		serverID, err := c.plugin.Servers().ResolveIdentifier(rest[0])
+		if err != nil {
+			return ephemeral("❌ " + err.Error())
+		}
+		return c.executeServerRemoveCommand(serverID)
 	case "map":
 		return c.executeServerMapDispatch(args, rest)
 	case "unmap":
@@ -1110,16 +1106,15 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 			return ephemeral("❌ " + err.Error())
 		}
 		return c.testServerConnection(serverID)
-	case "enable":
-		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server enable <server_id>"); resp != nil {
+	case "enable", "disable":
+		if resp := requireArgs(rest, 1, 1, fmt.Sprintf("Usage: /matrix server %s <server_id>", sub)); resp != nil {
 			return resp
 		}
-		return c.executeServerEnableCommand(rest[0], true)
-	case "disable":
-		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server disable <server_id>"); resp != nil {
-			return resp
+		serverID, err := c.plugin.Servers().ResolveIdentifier(rest[0])
+		if err != nil {
+			return ephemeral("❌ " + err.Error())
 		}
-		return c.executeServerEnableCommand(rest[0], false)
+		return c.executeServerEnableCommand(serverID, sub == "enable")
 	default:
 		return ephemeral(serverCommandUsage)
 	}

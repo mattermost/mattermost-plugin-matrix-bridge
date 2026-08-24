@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 func TestHandleMatrixMemberDM_EarlyExits(t *testing.T) {
@@ -283,5 +284,42 @@ func TestHandleMatrixTransaction(t *testing.T) {
 		transactionsMutex.RUnlock()
 		assert.True(t, existsA, "server A's transaction must be recorded as processed")
 		assert.False(t, existsB, "server B's malformed retry must not be recorded as processed (it 400'd before reaching that point)")
+	})
+
+	t.Run("a per-event processing failure responds 503, does not mark the txn processed, and a retry succeeds", func(t *testing.T) {
+		plugin := newTestPluginForTransaction(t)
+		client := createMatrixClientWithTestLogger(t, "https://a.example.com", "as", "")
+		serverID, _ := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", client)
+
+		roomID := "!room:a.example.com"
+		roomMappingKey := kvstore.BuildRoomMappingKey(serverID, roomID)
+
+		// Force the room-mapping lookup inside processMatrixEvent to fail, simulating a
+		// transient KV read error rather than "no mapping found".
+		realStore := plugin.kvstore
+		plugin.kvstore = &erroringKVStore{KVStore: realStore, errOnGetKey: roomMappingKey}
+
+		body := `{"events":[{"type":"m.room.message","event_id":"$evt1","sender":"@alice:a.example.com","room_id":"` + roomID + `"}]}`
+
+		txnID := "txn-" + model.NewId()
+		w := httptest.NewRecorder()
+		plugin.handleMatrixTransaction(w, transactionRequest(serverID, txnID, body))
+
+		resp := w.Result()
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "a per-event processing error must surface as a transaction-level failure")
+		assert.Equal(t, "5", resp.Header.Get("Retry-After"))
+
+		transactionsMutex.RLock()
+		_, exists := processedTransactions[transactionKey{serverID: serverID, txnID: txnID}]
+		transactionsMutex.RUnlock()
+		assert.False(t, exists, "a transaction with a failed event must not be recorded as processed")
+
+		// Restore the dependency and resubmit the same transaction: it must now succeed,
+		// proving the failed attempt didn't get wrongly deduped.
+		plugin.kvstore = realStore
+
+		w2 := httptest.NewRecorder()
+		plugin.handleMatrixTransaction(w2, transactionRequest(serverID, txnID, body))
+		assert.Equal(t, http.StatusOK, w2.Result().StatusCode, "the retried transaction must be processed, not dropped as a duplicate")
 	})
 }

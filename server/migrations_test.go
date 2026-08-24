@@ -16,6 +16,30 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
+// mockLegacyServerConfig overrides the default "no legacy configuration" plugintest
+// stub from setupPluginForTest so materializeServerFromLegacyConfig (and therefore
+// resolveMigrationServerID) resolves a real server ID instead of "", giving pre-v3
+// legacy KV records an owner to namespace under.
+func mockLegacyServerConfig(t *testing.T, plugin *Plugin) {
+	t.Helper()
+	api := plugin.API.(*plugintest.API)
+	clearMockExpectations(api)
+	api.On("LogDebug", mock.Anything, mock.Anything).Maybe()
+	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
+	api.On("LogWarn", mock.Anything).Maybe()
+	api.On("LogWarn", mock.Anything, mock.Anything).Maybe()
+	api.On("LoadPluginConfiguration", mock.Anything).Run(func(args mock.Arguments) {
+		dest := args.Get(0).(*legacyServerConfig)
+		// A loopback address on a port nothing listens on: any alias-resolution
+		// attempt during migration fails immediately with "connection refused"
+		// rather than depending on real DNS resolution behavior.
+		dest.MatrixServerURL = "http://127.0.0.1:1"
+		dest.MatrixServerName = "legacy.example.com" // avoids a live federation-probe HTTP call in resolveServerName
+		dest.MatrixASToken = "legacy-as-token"
+	}).Return(nil)
+}
+
 func TestRunKVStoreMigrations(t *testing.T) {
 	t.Run("NoMigrationNeeded", func(t *testing.T) {
 		plugin := setupPluginForTest()
@@ -45,6 +69,11 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
+		// The v3 step needs a resolvable owning server for the pre-v3 records seeded
+		// below - without this, resolveMigrationServerID would error (see
+		// TestRunKVStoreMigrations/LegacyNamespacedKeyWithoutResolvableOwnerErrors).
+		mockLegacyServerConfig(t, plugin)
+
 		// No version key exists (version 0)
 		versionData, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
 		assert.NoError(t, err)
@@ -67,12 +96,19 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 
-		// Reverse mappings should be created
-		userReverseBytes, err := plugin.kvstore.Get("mattermost_user_user123")
+		// The legacy config is materialized into a registered server, which becomes
+		// the owner namespacing the pre-v3 records below.
+		servers, err := plugin.servers.List()
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		serverID := servers[0].ServerID
+
+		// Reverse mappings should be created, namespaced to the materialized server
+		userReverseBytes, err := plugin.kvstore.Get(kvstore.BuildMattermostUserKey(serverID, "user123"))
 		assert.NoError(t, err)
 		assert.Equal(t, "@alice:matrix.org", string(userReverseBytes))
 
-		channelReverseBytes, err := plugin.kvstore.Get("room_mapping_!room789:matrix.org")
+		channelReverseBytes, err := plugin.kvstore.Get(kvstore.BuildRoomMappingKey(serverID, "!room789:matrix.org"))
 		assert.NoError(t, err)
 		assert.Equal(t, "channel456", string(channelReverseBytes))
 	})
@@ -97,6 +133,134 @@ func TestRunKVStoreMigrations(t *testing.T) {
 		version, err := strconv.Atoi(string(versionBytes))
 		assert.NoError(t, err)
 		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
+	})
+
+	t.Run("LegacyNamespacedKeyWithoutResolvableOwnerErrors", func(t *testing.T) {
+		plugin := setupPluginForTest() // default mock: no legacy config, 0 servers
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("2")))
+		require.NoError(t, plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123")))
+
+		err := plugin.runKVStoreMigrations()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no Matrix server could be resolved")
+
+		// Version marker must not advance, and the legacy key must be left untouched.
+		versionBytes, _ := plugin.kvstore.Get(kvstore.KeyStoreVersion)
+		assert.Equal(t, "2", string(versionBytes))
+		val, _ := plugin.kvstore.Get("matrix_user_@alice:matrix.org")
+		assert.Equal(t, "user123", string(val))
+	})
+
+	t.Run("LegacyChannelMappingValueWithoutResolvableOwnerErrors", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("2")))
+		require.NoError(t, plugin.kvstore.Set("channel_mapping_channel456", []byte("!room789:matrix.org")))
+
+		err := plugin.runKVStoreMigrations()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no Matrix server could be resolved")
+
+		versionBytes, _ := plugin.kvstore.Get(kvstore.KeyStoreVersion)
+		assert.Equal(t, "2", string(versionBytes))
+		val, _ := plugin.kvstore.Get("channel_mapping_channel456")
+		assert.Equal(t, "!room789:matrix.org", string(val)) // still the legacy bare-string shape, untouched
+	})
+
+	t.Run("GarbageChannelMappingValueDoesNotBlockNoOp", func(t *testing.T) {
+		// A value that is neither valid v3 JSON nor a plausible room identifier - the
+		// real conversion logs a warning and skips it rather than treating it as
+		// legacy, so the detection check must agree (regression test for the
+		// needsV3ChannelMappingConversion / IsPlausibleRoomIdentifier mirroring - a
+		// plain ParseChannelServerMappings-failure check would misfire here).
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("2")))
+		require.NoError(t, plugin.kvstore.Set("channel_mapping_channel456", []byte("not-json-and-not-a-room-id")))
+
+		err := plugin.runKVStoreMigrations()
+		require.NoError(t, err)
+	})
+
+	t.Run("NoLegacyRecordsNoOpsSuccessfully", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("2")))
+		// no legacy keys seeded at all - genuinely nothing pre-v3 remains
+
+		err := plugin.runKVStoreMigrations()
+		require.NoError(t, err)
+
+		versionBytes, _ := plugin.kvstore.Get(kvstore.KeyStoreVersion)
+		version, _ := strconv.Atoi(string(versionBytes))
+		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
+	})
+
+	t.Run("AlreadyNamespacedKeyFromRemovedServerDoesNotBlockNoOp", func(t *testing.T) {
+		// Locks in the "removed server" carve-out isNamespacedKey's doc comment
+		// already relies on: RemoveServer intentionally leaves a removed server's
+		// namespaced KV records in place, addressed by a ServerID no longer in the
+		// registry.
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("2")))
+		require.NoError(t, plugin.kvstore.Set("matrix_user_aaaaaaaaaaaaaaaaaaaaaaaaaa_@carol:matrix.org", []byte("user789")))
+
+		err := plugin.runKVStoreMigrations()
+		require.NoError(t, err) // must not be misclassified as legacy
+	})
+
+	t.Run("LegacyGhostRoomKeyWithoutResolvableOwnerErrors", func(t *testing.T) {
+		// Regression test for the isNamespacedGhostRoomKey fix: a legacy ghost_room_
+		// key's first segment (mattermostUserID) is a 26-char alphanumeric ID, exactly
+		// like a ServerID, so the generic isNamespacedKey check alone would
+		// misclassify this as already-namespaced and miss it.
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("2")))
+		require.NoError(t, plugin.kvstore.Set("ghost_room_aaaaaaaaaaaaaaaaaaaaaaaaaa_!room:matrix.org", []byte("joined")))
+
+		err := plugin.runKVStoreMigrations()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no Matrix server could be resolved")
+	})
+
+	t.Run("NamespacedGhostRoomKeyFromRemovedServerDoesNotBlockNoOp", func(t *testing.T) {
+		// The v3-shaped counterpart to the previous test: a genuine namespaced
+		// ghost_room_<serverID>_<mattermostUserID>_<roomID> key (as left behind by
+		// RemoveServer) must not be misclassified as legacy just because its first
+		// segment also happens to look like a bare mattermostUserID.
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("2")))
+		require.NoError(t, plugin.kvstore.Set(
+			"ghost_room_aaaaaaaaaaaaaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbb_!room:matrix.org",
+			[]byte("joined")))
+
+		err := plugin.runKVStoreMigrations()
+		require.NoError(t, err) // must not be misclassified as legacy
 	})
 }
 
@@ -210,6 +374,79 @@ func TestMigrateUserMappings(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, expectedMatrixUserID, string(valueBytes))
 		}
+	})
+
+	t.Run("SkipsAlreadyNamespacedV3Keys", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		// Register one server, as if the v3 migration has already run.
+		serversData, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "server1theserveridxxxxxxxx", ServerName: "server1.example.com", Enabled: true},
+		})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, serversData))
+
+		// A valid v3-namespaced forward mapping and its correct reverse mapping,
+		// exactly as they'd look right after a completed v3 migration.
+		require.NoError(t, plugin.kvstore.Set("matrix_user_server1theserveridxxxxxxxx_@alice:matrix.org", []byte("user123")))
+		require.NoError(t, plugin.kvstore.Set("mattermost_user_server1theserveridxxxxxxxx_user123", []byte("@alice:matrix.org")))
+
+		// A legacy (pre-v3) key should still be migrated normally alongside the
+		// namespaced one, proving the skip is targeted rather than blanket.
+		require.NoError(t, plugin.kvstore.Set("matrix_user_@bob:matrix.org", []byte("user456")))
+
+		// Simulate /matrix migrate re-running the v1 migration against this
+		// already-v3 store (executeMigrateCommand resets the version marker to 0).
+		_, err = plugin.migrateUserMappingsWithResults()
+		require.NoError(t, err)
+
+		// The namespaced key must not be mistaken for a legacy one: no corrupted
+		// legacy reverse mapping should be created from it...
+		legacyReverse, err := plugin.kvstore.Get("mattermost_user_user123")
+		require.NoError(t, err)
+		assert.Empty(t, legacyReverse, "must not create a legacy reverse mapping from an already-namespaced key")
+
+		// ...and the correct existing v3 reverse mapping must be untouched.
+		v3Reverse, err := plugin.kvstore.Get("mattermost_user_server1theserveridxxxxxxxx_user123")
+		require.NoError(t, err)
+		assert.Equal(t, "@alice:matrix.org", string(v3Reverse))
+
+		// The legacy key is still migrated normally.
+		bobReverse, err := plugin.kvstore.Get("mattermost_user_user456")
+		require.NoError(t, err)
+		assert.Equal(t, "@bob:matrix.org", string(bobReverse))
+	})
+
+	t.Run("SkipsNamespacedKeysOfARemovedServer", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		// No servers registered at all - as if the server that owns these
+		// namespaced keys was removed via RemoveServer, which intentionally leaves
+		// its namespaced KV records in place for later re-adoption via AddServer.
+		// /matrix migrate only refuses to reset the version marker while 2+ servers
+		// are *currently* registered, so this is reachable with the registry empty.
+		require.NoError(t, plugin.kvstore.Set("matrix_user_removedserveridxxxxxxxxxxx_@alice:matrix.org", []byte("user123")))
+		require.NoError(t, plugin.kvstore.Set("mattermost_user_removedserveridxxxxxxxxxxx_user123", []byte("@alice:matrix.org")))
+
+		_, err := plugin.migrateUserMappingsWithResults()
+		require.NoError(t, err)
+
+		// The removed server's namespaced key must still be recognized as v3-shaped
+		// from its structure alone - a registry-based check would miss it here,
+		// since the registry no longer lists that server.
+		legacyReverse, err := plugin.kvstore.Get("mattermost_user_user123")
+		require.NoError(t, err)
+		assert.Empty(t, legacyReverse, "must not create a legacy reverse mapping from a removed server's namespaced key")
+
+		v3Reverse, err := plugin.kvstore.Get("mattermost_user_removedserveridxxxxxxxxxxx_user123")
+		require.NoError(t, err)
+		assert.Equal(t, "@alice:matrix.org", string(v3Reverse))
 	})
 }
 
@@ -382,6 +619,35 @@ func TestMigrateChannelMappings(t *testing.T) {
 			assert.Equal(t, channelID, string(valueBytes))
 		}
 	})
+
+	t.Run("SkipsAlreadyV3ShapedValues", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.logger = &testLogger{t: t}
+
+		// A channel_mapping_ value already converted to the v3 []ChannelServerMapping
+		// JSON shape, as it would look right after a completed v3 migration.
+		v3Value, err := kvstore.BuildSingleChannelMapping("server1", "!room:example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set("channel_mapping_channel456", v3Value))
+
+		// Simulate /matrix migrate re-running the v1 migration against this
+		// already-v3 store (executeMigrateCommand resets the version marker to 0).
+		_, err = plugin.migrateChannelMappingsWithResults()
+		require.NoError(t, err)
+
+		// The v3 value must not be mistaken for a legacy bare room identifier: no
+		// reverse mapping built from the raw JSON text should have been created.
+		bogusReverse, err := plugin.kvstore.Get("room_mapping_" + string(v3Value))
+		require.NoError(t, err)
+		assert.Empty(t, bogusReverse, "must not create a reverse mapping from a v3 JSON channel mapping value")
+
+		// The original v3 value is left untouched.
+		unchanged, err := plugin.kvstore.Get("channel_mapping_channel456")
+		require.NoError(t, err)
+		assert.Equal(t, v3Value, unchanged)
+	})
 }
 
 func TestMigrationIntegration(t *testing.T) {
@@ -390,6 +656,11 @@ func TestMigrationIntegration(t *testing.T) {
 		plugin.kvstore = NewMemoryKVStore()
 		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
+
+		// The v3 step needs a resolvable owning server for the pre-v3 records seeded
+		// below - without this, resolveMigrationServerID would error (see
+		// TestRunKVStoreMigrations/LegacyNamespacedKeyWithoutResolvableOwnerErrors).
+		mockLegacyServerConfig(t, plugin)
 
 		// Setup a complete scenario with users, channels, and other keys
 		testData := map[string]string{
@@ -401,9 +672,12 @@ func TestMigrationIntegration(t *testing.T) {
 			"channel_mapping_channel789": "!room012:matrix.org",
 			"channel_mapping_channel345": "#public:matrix.org",
 
-			// Other keys (should be ignored)
+			// A pre-existing ghost user cache entry, namespaced per server like the
+			// other six namespaced prefixes.
 			"ghost_user_user123": "@_mattermost_user123:matrix.org",
-			"some_other_key":     "some_value",
+
+			// Not one of the recognized prefixes - untouched by every migration step.
+			"some_other_key": "some_value",
 		}
 
 		// DM mappings (will be migrated by version 2 migration)
@@ -437,43 +711,84 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
 
-		// Check user reverse mappings
-		userReverse1, err := plugin.kvstore.Get("mattermost_user_user123")
+		// The legacy config is materialized into a registered server, which owns
+		// every v3-namespaced destination checked below.
+		servers, err := plugin.servers.List()
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		serverID := servers[0].ServerID
+
+		// Check user reverse mappings, namespaced to the materialized server
+		userReverse1, err := plugin.kvstore.Get(kvstore.BuildMattermostUserKey(serverID, "user123"))
 		assert.NoError(t, err)
 		assert.Equal(t, "@alice:matrix.org", string(userReverse1))
 
-		userReverse2, err := plugin.kvstore.Get("mattermost_user_user456")
+		userReverse2, err := plugin.kvstore.Get(kvstore.BuildMattermostUserKey(serverID, "user456"))
 		assert.NoError(t, err)
 		assert.Equal(t, "@bob:matrix.org", string(userReverse2))
 
-		// Check channel reverse mappings
-		channelReverse1, err := plugin.kvstore.Get("room_mapping_!room012:matrix.org")
+		// Check channel reverse mappings, namespaced to the materialized server
+		channelReverse1, err := plugin.kvstore.Get(kvstore.BuildRoomMappingKey(serverID, "!room012:matrix.org"))
 		assert.NoError(t, err)
 		assert.Equal(t, "channel789", string(channelReverse1))
 
-		channelReverse2, err := plugin.kvstore.Get("room_mapping_#public:matrix.org")
+		channelReverse2, err := plugin.kvstore.Get(kvstore.BuildRoomMappingKey(serverID, "#public:matrix.org"))
 		assert.NoError(t, err)
 		assert.Equal(t, "channel345", string(channelReverse2))
 
-		// Verify original data is unchanged
-		for key, expectedValue := range testData {
-			valueBytes, err := plugin.kvstore.Get(key)
+		// Forward mappings under the seven namespaced prefixes are rekeyed to their
+		// v3 <prefix><serverID>_<id> shape - the legacy un-namespaced key no longer
+		// exists.
+		for _, legacyKey := range []string{
+			"matrix_user_@alice:matrix.org",
+			"matrix_user_@bob:matrix.org",
+			"ghost_user_user123",
+		} {
+			oldValue, err := plugin.kvstore.Get(legacyKey)
 			assert.NoError(t, err)
-			assert.Equal(t, expectedValue, string(valueBytes))
+			assert.Empty(t, oldValue, "legacy key %q should have been rekeyed away", legacyKey)
 		}
 
-		// Verify DM mappings were migrated to unified prefix
+		newMatrixUser1, err := plugin.kvstore.Get(kvstore.BuildMatrixUserKey(serverID, "@alice:matrix.org"))
+		assert.NoError(t, err)
+		assert.Equal(t, "user123", string(newMatrixUser1))
+
+		newMatrixUser2, err := plugin.kvstore.Get(kvstore.BuildMatrixUserKey(serverID, "@bob:matrix.org"))
+		assert.NoError(t, err)
+		assert.Equal(t, "user456", string(newMatrixUser2))
+
+		newGhostUser, err := plugin.kvstore.Get(kvstore.BuildGhostUserKey(serverID, "user123"))
+		assert.NoError(t, err)
+		assert.Equal(t, "@_mattermost_user123:matrix.org", string(newGhostUser))
+
+		// channel_mapping_ keys are NOT rekeyed - only their value's shape changes to
+		// the v3 []ChannelServerMapping JSON array.
+		for channelKey, expectedRoomID := range map[string]string{
+			"channel_mapping_channel789": "!room012:matrix.org",
+			"channel_mapping_channel345": "#public:matrix.org",
+		} {
+			valueBytes, err := plugin.kvstore.Get(channelKey)
+			assert.NoError(t, err)
+			mappings, err := kvstore.ParseChannelServerMappings(valueBytes)
+			assert.NoError(t, err)
+			assert.Equal(t, expectedRoomID, kvstore.RoomIDForServer(mappings, serverID))
+		}
+
+		// Verify DM mappings were migrated to the unified prefix, then converted to
+		// the v3 JSON shape
 		dmUnifiedBytes, err := plugin.kvstore.Get("channel_mapping_dm123")
 		assert.NoError(t, err)
-		assert.Equal(t, "!dmroom456:matrix.org", string(dmUnifiedBytes))
+		dmMappings, err := kvstore.ParseChannelServerMappings(dmUnifiedBytes)
+		assert.NoError(t, err)
+		assert.Equal(t, "!dmroom456:matrix.org", kvstore.RoomIDForServer(dmMappings, serverID))
 
 		// Verify old DM mapping was deleted
 		oldDMMapping, err := plugin.kvstore.Get("dm_mapping_dm123")
 		assert.NoError(t, err)
 		assert.Empty(t, oldDMMapping) // Should be deleted
 
-		// Verify reverse DM mapping was created
-		dmReverseBytes, err := plugin.kvstore.Get("room_mapping_!dmroom456:matrix.org")
+		// Verify reverse DM mapping was created, namespaced to the materialized server
+		dmReverseBytes, err := plugin.kvstore.Get(kvstore.BuildRoomMappingKey(serverID, "!dmroom456:matrix.org"))
 		assert.NoError(t, err)
 		assert.Equal(t, "dm123", string(dmReverseBytes))
 
@@ -488,6 +803,11 @@ func TestMigrationIntegration(t *testing.T) {
 		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		plugin.logger = &testLogger{t: t}
 
+		// The v3 step needs a resolvable owning server for the pre-v3 records seeded
+		// below - without this, resolveMigrationServerID would error (see
+		// TestRunKVStoreMigrations/LegacyNamespacedKeyWithoutResolvableOwnerErrors).
+		mockLegacyServerConfig(t, plugin)
+
 		// Add test data
 		err := plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123"))
 		assert.NoError(t, err)
@@ -498,12 +818,17 @@ func TestMigrationIntegration(t *testing.T) {
 		err = plugin.runKVStoreMigrations()
 		assert.NoError(t, err)
 
-		// Verify reverse mappings exist
-		userReverse, err := plugin.kvstore.Get("mattermost_user_user123")
+		servers, err := plugin.servers.List()
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		serverID := servers[0].ServerID
+
+		// Verify reverse mappings exist, namespaced to the materialized server
+		userReverse, err := plugin.kvstore.Get(kvstore.BuildMattermostUserKey(serverID, "user123"))
 		assert.NoError(t, err)
 		assert.Equal(t, "@alice:matrix.org", string(userReverse))
 
-		channelReverse, err := plugin.kvstore.Get("room_mapping_!room789:matrix.org")
+		channelReverse, err := plugin.kvstore.Get(kvstore.BuildRoomMappingKey(serverID, "!room789:matrix.org"))
 		assert.NoError(t, err)
 		assert.Equal(t, "channel456", string(channelReverse))
 
@@ -512,11 +837,11 @@ func TestMigrationIntegration(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Verify data is unchanged
-		userReverse2, err := plugin.kvstore.Get("mattermost_user_user123")
+		userReverse2, err := plugin.kvstore.Get(kvstore.BuildMattermostUserKey(serverID, "user123"))
 		assert.NoError(t, err)
 		assert.Equal(t, "@alice:matrix.org", string(userReverse2))
 
-		channelReverse2, err := plugin.kvstore.Get("room_mapping_!room789:matrix.org")
+		channelReverse2, err := plugin.kvstore.Get(kvstore.BuildRoomMappingKey(serverID, "!room789:matrix.org"))
 		assert.NoError(t, err)
 		assert.Equal(t, "channel456", string(channelReverse2))
 

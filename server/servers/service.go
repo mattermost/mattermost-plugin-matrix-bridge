@@ -25,11 +25,6 @@ import (
 // used whenever a caller of Add or Update leaves UsernamePrefix empty.
 const DefaultUsernamePrefix = "matrix"
 
-// listAllKeysBatchSize is the raw-keyspace page size used when scanning for
-// namespaced records. A var (not const) so tests can shrink it to exercise
-// multi-page paging without needing thousands of fixture keys.
-var listAllKeysBatchSize = 1000
-
 // statusProbeDeadline bounds how long ProbeHealth waits for all server health probes
 // together. A var so tests can shorten it.
 var statusProbeDeadline = 8 * time.Second
@@ -40,7 +35,7 @@ var statusProbeDeadline = 8 * time.Second
 // it with a thin adapter (servers_host.go); tests use a fake.
 type Host interface {
 	MatrixClient(serverID string) *matrix.Client
-	RegisterRemote(serverID string) error
+	RegisterRemoteForSiteURL(siteURL string) (remoteID string, err error)
 	UnregisterRemote(remoteID string) error
 	RefreshAndBroadcast(reason string) error
 	SiteURL() string
@@ -309,6 +304,16 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 	}
 
 	eventDomain := eventDomainFromEndpoint(endpoint)
+	siteURL := "https://" + endpoint
+
+	// Register the shared-channels remote BEFORE the registry write, so its ID can go
+	// into the entry itself. Registering afterwards would persist a server with an empty
+	// RemoteID whenever the call failed - a registered server that silently syncs
+	// nothing until the next activation happens to retry it.
+	remoteID, err := s.host.RegisterRemoteForSiteURL(siteURL)
+	if err != nil {
+		return kvstore.ServerConfig{}, errors.Wrap(err, "failed to register server for shared channels")
+	}
 
 	var created kvstore.ServerConfig
 	err = s.mutate(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
@@ -321,6 +326,9 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 			}
 			if req.ServerID != "" && existing.ServerID == req.ServerID {
 				return nil, wrapf(ErrIDTaken, "server ID %s is already registered", req.ServerID)
+			}
+			if req.HSToken != "" && existing.HSToken == req.HSToken {
+				return nil, wrapf(ErrHSTokenTaken, "hs_token conflicts with existing server %s; hs_token must be unique across registered servers", existing.ServerID)
 			}
 		}
 
@@ -339,7 +347,8 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 			HSToken:        req.HSToken,
 			UsernamePrefix: usernamePrefix,
 			Enabled:        true,
-			SiteURL:        "https://" + endpoint,
+			SiteURL:        siteURL,
+			RemoteID:       remoteID,
 		}
 
 		result := make([]kvstore.ServerConfig, len(current), len(current)+1)
@@ -347,6 +356,11 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 		return append(result, created), nil
 	})
 	if err != nil {
+		// The registry rejected this add (a conflict, or a CAS failure) after the remote
+		// was already created - it belongs to no entry, so it must not be left registered.
+		if unregErr := s.host.UnregisterRemote(remoteID); unregErr != nil {
+			s.logger.LogWarn("Failed to unregister shared-channels remote after a rejected add", "remote_id", remoteID, "error", unregErr)
+		}
 		return kvstore.ServerConfig{}, err
 	}
 
@@ -354,20 +368,8 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 		s.warnIfEventDomainMismatch(req.ServerID, eventDomain)
 	}
 
-	// Register the shared-channels remote immediately so the new server is usable
-	// without waiting for a restart. Failure is non-fatal - the next activation
-	// retries.
-	if err := s.host.RegisterRemote(created.ServerID); err != nil {
-		s.logger.LogWarn("Failed to register new server for shared channels; will retry on next activation", "server_id", created.ServerID, "error", err)
-	}
-
 	if err := s.host.RefreshAndBroadcast("server_added"); err != nil {
 		s.logger.LogWarn("Failed to refresh Matrix clients after adding server", "server_id", created.ServerID, "error", err)
-	}
-
-	// Re-read so the returned view reflects RegisterRemote's RemoteID write, if any.
-	if refreshed, err := s.Get(created.ServerID); err == nil {
-		created = refreshed
 	}
 
 	return created, nil
@@ -382,7 +384,7 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 // property.
 func (s *Service) warnIfEventDomainMismatch(serverID, newEventDomain string) {
 	prefix := kvstore.KeyPrefixMatrixEventPost + serverID + "_"
-	keys, err := kvstore.ListAllKeysWithPrefix(s.kv, prefix, listAllKeysBatchSize)
+	keys, err := kvstore.ListAllKeysWithPrefix(s.kv, prefix, kvstore.DefaultListKeysBatchSize)
 	if err != nil {
 		s.logger.LogWarn("Failed to check for surviving event-post records during server re-adoption", "server_id", serverID, "error", err)
 		return
@@ -456,24 +458,30 @@ func (s *Service) Remove(serverID string) (bool, error) {
 // is a pure flag flip - no re-registration, no re-invites, no cursor reset. The
 // shared-channels remote stays registered and the channel invitations stay in
 // place; routing alone consults Enabled.
+// Reports "not registered" from inside the mutator rather than from a captured flag:
+// SetAtomicWithRetries may run the callback several times, so a flag set by a losing
+// attempt would decide the outcome of the winning one. Returning the error also means a
+// missing server writes nothing at all, instead of persisting the unchanged slice.
 func (s *Service) SetEnabled(serverID string, enabled bool) error {
-	found := false
 	err := s.mutate(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		updated := make([]kvstore.ServerConfig, len(current))
-		copy(updated, current)
-		for i := range updated {
-			if updated[i].ServerID == serverID {
-				updated[i].Enabled = enabled
-				found = true
+		idx := -1
+		for i := range current {
+			if current[i].ServerID == serverID {
+				idx = i
+				break
 			}
 		}
+		if idx == -1 {
+			return nil, wrapf(ErrNotRegistered, "server %s is not registered", serverID)
+		}
+
+		updated := make([]kvstore.ServerConfig, len(current))
+		copy(updated, current)
+		updated[idx].Enabled = enabled
 		return updated, nil
 	})
 	if err != nil {
 		return err
-	}
-	if !found {
-		return wrapf(ErrNotRegistered, "server %s is not registered", serverID)
 	}
 
 	return s.host.RefreshAndBroadcast("server_enabled_changed")
@@ -532,6 +540,7 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 	if u.HSToken != nil && *u.HSToken == "" {
 		return kvstore.ServerConfig{}, nil, wrapf(ErrInvalidInput, "hs_token cannot be empty")
 	}
+	hsTokenChanged := u.HSToken != nil && *u.HSToken != current.HSToken
 
 	newUsernamePrefix := current.UsernamePrefix
 	usernamePrefixChanged := false
@@ -574,6 +583,9 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 			}
 			if serverNameChanged && entry.ServerName == newServerName {
 				return nil, wrapf(ErrNameTaken, "server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", newServerName, entry.ServerID)
+			}
+			if hsTokenChanged && entry.HSToken == *u.HSToken {
+				return nil, wrapf(ErrHSTokenTaken, "hs_token conflicts with existing server %s; hs_token must be unique across registered servers", entry.ServerID)
 			}
 		}
 		if idx == -1 {
@@ -647,26 +659,6 @@ func (s *Service) Seed(entry kvstore.ServerConfig) (string, error) {
 	return resultID, nil
 }
 
-// SetRemoteID persists remoteID as serverID's shared-channels remote. Used by
-// main's registerServerForSharedChannels, which discovers remoteID via a platform
-// RegisterPluginForSharedChannels call this package must not make itself (that is
-// Host's job) but must still be able to persist. No-ops (not an error) if serverID
-// was concurrently removed.
-func (s *Service) SetRemoteID(serverID, remoteID string) error {
-	return s.mutate(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		updated := make([]kvstore.ServerConfig, len(current))
-		copy(updated, current)
-		for i := range updated {
-			if updated[i].ServerID == serverID {
-				updated[i].RemoteID = remoteID
-				return updated, nil
-			}
-		}
-		// Server was concurrently removed; nothing to persist.
-		return current, nil
-	})
-}
-
 // MergeRemoteIDs persists a batch of discovered remote IDs (serverID -> remoteID)
 // in a single registry write, keeping every entry not present in the map
 // unchanged. Used by main's bulk registerForSharedChannels, whose network calls
@@ -690,7 +682,7 @@ func (s *Service) MergeRemoteIDs(remoteIDs map[string]string) error {
 // CountMappedChannels does a single keyspace scan shared by /matrix list, /matrix
 // status, /matrix server list, /matrix server status and GET /servers.
 func (s *Service) CountMappedChannels() (map[string]int, error) {
-	keys, err := kvstore.ListAllKeysWithPrefix(s.kv, kvstore.KeyPrefixChannelMapping, listAllKeysBatchSize)
+	keys, err := kvstore.ListAllKeysWithPrefix(s.kv, kvstore.KeyPrefixChannelMapping, kvstore.DefaultListKeysBatchSize)
 	if err != nil {
 		return nil, err
 	}
@@ -717,7 +709,7 @@ func (s *Service) CountMappedChannels() (map[string]int, error) {
 // entries whose ServerID matches serverID. Never indexes [0] - a channel's mapping
 // value is a list.
 func (s *Service) Mappings(serverID string) ([]ChannelMapping, error) {
-	keys, err := kvstore.ListAllKeysWithPrefix(s.kv, kvstore.KeyPrefixChannelMapping, listAllKeysBatchSize)
+	keys, err := kvstore.ListAllKeysWithPrefix(s.kv, kvstore.KeyPrefixChannelMapping, kvstore.DefaultListKeysBatchSize)
 	if err != nil {
 		return nil, err
 	}

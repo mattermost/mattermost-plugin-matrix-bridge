@@ -48,7 +48,9 @@ type BridgeUtilsConfig struct {
 	// channel_mapping.go). Always the Plugin itself in production.
 	ChannelMapper ChannelMapper
 	// ServerGetter reads this bridge's server's registry entry. Always
-	// *servers.Service in production.
+	// routingServerGetter in production (see server/servers_host.go), so the read is
+	// served from Plugin's snapshot cache rather than unmarshalling the whole registry
+	// out of KV on every call - serverConfig runs several times per synced post or event.
 	ServerGetter ServerGetter
 }
 
@@ -158,9 +160,11 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	return nil
 }
 
-// serverConfig returns this bridge's server's current registry entry, read live
-// through serverGetter (never cached), so a runtime change to e.g. UsernamePrefix
-// takes effect immediately.
+// serverConfig returns this bridge's server's current registry entry, read through
+// serverGetter rather than straight from KV: it is called several times per synced post
+// or event, so unmarshalling the whole registry each time is not affordable. A runtime
+// change to e.g. UsernamePrefix is still picked up immediately, since every registry
+// mutation refreshes the snapshot the getter reads (see initMatrixClients).
 func (s *BridgeUtils) serverConfig() (kvstore.ServerConfig, error) {
 	return s.serverGetter.Get(s.serverID)
 }
