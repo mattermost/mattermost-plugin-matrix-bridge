@@ -863,13 +863,21 @@ func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResp
 	// one server's records into another's namespace). Check before resetting the
 	// version marker, so a refusal here doesn't leave it reset with no migration having
 	// actually run to fix it back up.
-	if servers, err := c.plugin.GetManagedServers(); err == nil && len(servers) >= 2 {
+
+	servers, err := c.plugin.GetManagedServers()
+	if err != nil {
+		return ephemeral(fmt.Sprintf("❌ Failed to load Matrix servers: %v", err))
+	}
+	if len(servers) >= 2 {
 		return ephemeral("❌ `/matrix migrate` refuses to run while 2 or more Matrix servers are registered - it would rekey one server's records into another's namespace.")
 	}
 
 	// Get current version before reset
 	kvstorage := c.plugin.GetKVStore()
-	versionBytes, _ := kvstorage.Get(kvstore.KeyStoreVersion)
+	versionBytes, err := kvstorage.Get(kvstore.KeyStoreVersion)
+	if err != nil {
+		return ephemeral(fmt.Sprintf("❌ Failed to read migration version: %v", err))
+	}
 	currentVersion := "0"
 	if len(versionBytes) > 0 {
 		currentVersion = string(versionBytes)
