@@ -559,6 +559,72 @@ func TestMutateServersRetriesOnRealConflict(t *testing.T) {
 	assert.False(t, byID["serverB"].Enabled, "the concurrent writer's change must survive, not be clobbered by a stale retry")
 }
 
+// TestSetServerEnabledNotFoundIsDecidedByTheWinningAttempt covers the retry hazard in
+// mutateServers callbacks: the callback may run several times and only the invocation
+// that wins the CAS decides the outcome, so "did I find the server?" must come out of
+// that invocation. A captured flag set on an earlier, discarded invocation would report
+// success for a server that no longer exists by the time the write lands.
+func TestSetServerEnabledNotFoundIsDecidedByTheWinningAttempt(t *testing.T) {
+	plugin := newTestPluginForServers(t)
+	store := newCASConflictKVStore()
+	plugin.kvstore = store
+	// Mocked so that a regression - reporting success and carrying on to the broadcast -
+	// surfaces as this test's own failed assertion rather than an unmocked-call panic.
+	plugin.API.(*plugintest.API).On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	seed := []kvstore.ServerConfig{
+		{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
+		{ServerID: "serverB", ServerName: "b.example.com", Enabled: true},
+	}
+	data, err := kvstore.MarshalServersConfig(seed)
+	require.NoError(t, err)
+	require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
+
+	// A concurrent RemoveServer deletes serverA between this call's read and write, so
+	// the first callback invocation sees it and the retried one does not.
+	store.onFirstRead = func(kv kvstore.KVStore) {
+		remaining, marshalErr := kvstore.MarshalServersConfig(seed[1:])
+		require.NoError(t, marshalErr)
+		require.NoError(t, kv.Set(kvstore.KeyServersConfig, remaining))
+	}
+
+	err = plugin.SetServerEnabled("serverA", false)
+	require.Error(t, err, "a server removed before the winning retry must not be reported as successfully updated")
+	assert.Contains(t, err.Error(), "server serverA is not registered")
+
+	final, err := plugin.getServers()
+	require.NoError(t, err)
+	require.Len(t, final, 1, "the concurrent removal must stand")
+	assert.Equal(t, "serverB", final[0].ServerID)
+	assert.True(t, final[0].Enabled, "the untouched server must keep its flag")
+}
+
+// TestSetServerEnabledUnknownServerWritesNothing pins the other half of the same design:
+// signalling not-found as a callback error aborts the atomic update, so a typo'd server
+// ID never rewrites the whole registry on its way to returning an error.
+func TestSetServerEnabledUnknownServerWritesNothing(t *testing.T) {
+	plugin := newTestPluginForServers(t)
+	store := &writeCountingKVStore{KVStore: NewMemoryKVStore()}
+	plugin.kvstore = store
+
+	data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+		{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
+	store.writes = 0
+
+	err = plugin.SetServerEnabled("nosuchserver", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server nosuchserver is not registered")
+	assert.Zero(t, store.writes, "an unknown server ID must not trigger a registry write")
+
+	final, err := plugin.getServers()
+	require.NoError(t, err)
+	require.Len(t, final, 1)
+	assert.True(t, final[0].Enabled)
+}
+
 // TestRegisterForSharedChannelsFailureIsolation covers §5.1's shared-channels remote
 // registration requirement: one server's registration failing must not block the others,
 // and the overall call must still succeed.

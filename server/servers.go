@@ -26,10 +26,14 @@ func (p *Plugin) getServers() ([]kvstore.ServerConfig, error) {
 	return kvstore.ParseServersConfig(data)
 }
 
+// errServerNotRegistered is returned by a mutateServers callback whose target server is
+// absent from the slice it was handed.
+var errServerNotRegistered = errors.New("server is not registered")
+
 // mutateServers atomically reads-modifies-writes the server registry via compare-and-set.
 // mutator must be a pure function of the slice it is given: SetAtomicWithRetries may
 // invoke it more than once if a concurrent writer wins the race, so it must not perform
-// network or plugin-API calls.
+// network or plugin-API calls and must not leak state across invocations.
 func (p *Plugin) mutateServers(mutator func([]kvstore.ServerConfig) ([]kvstore.ServerConfig, error)) error {
 	return p.kvstore.SetAtomicWithRetries(kvstore.KeyServersConfig, func(oldValue []byte) ([]byte, error) {
 		servers, err := kvstore.ParseServersConfig(oldValue)

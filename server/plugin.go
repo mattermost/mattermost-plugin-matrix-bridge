@@ -524,23 +524,28 @@ func (p *Plugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermost
 // shared-channels remote stays registered and the channel invitations stay in place;
 // routing alone consults Enabled (§3.11).
 func (p *Plugin) SetServerEnabled(serverID string, enabled bool) error {
-	found := false
 	err := p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		updated := make([]kvstore.ServerConfig, len(servers))
-		copy(updated, servers)
-		for i := range updated {
-			if updated[i].ServerID == serverID {
-				updated[i].Enabled = enabled
-				found = true
+		idx := -1
+		for i := range servers {
+			if servers[i].ServerID == serverID {
+				idx = i
+				break
 			}
 		}
+		if idx == -1 {
+			return nil, errServerNotRegistered
+		}
+
+		updated := make([]kvstore.ServerConfig, len(servers))
+		copy(updated, servers)
+		updated[idx].Enabled = enabled
 		return updated, nil
 	})
 	if err != nil {
+		if errors.Is(err, errServerNotRegistered) {
+			return errors.Errorf("server %s is not registered", serverID)
+		}
 		return err
-	}
-	if !found {
-		return errors.Errorf("server %s is not registered", serverID)
 	}
 
 	return p.refreshServersAndBroadcast("server_enabled_changed")

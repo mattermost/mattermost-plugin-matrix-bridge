@@ -702,6 +702,37 @@ func (c *casConflictKVStore) SetAtomicWithRetries(key string, valueFunc func(old
 	}
 }
 
+// writeCountingKVStore wraps a KVStore and counts the writes that actually reach the
+// backing store, so tests can assert that an operation which fails validation costs no
+// registry write at all - a mutator that returns the unchanged slice instead of an error
+// still persists it, and only a write count can tell the two apart.
+type writeCountingKVStore struct {
+	kvstore.KVStore
+	writes int
+}
+
+func (w *writeCountingKVStore) Set(key string, value []byte) error {
+	w.writes++
+	return w.KVStore.Set(key, value)
+}
+
+// SetAtomicWithRetries reimplements the embedded store's single-shot read-compute-write
+// rather than delegating to it: the promoted method would write through the inner store's
+// own Set, bypassing this wrapper's counter and leaving every atomic write uncounted.
+func (w *writeCountingKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error {
+	oldValue, err := w.Get(key)
+	if err != nil {
+		return err
+	}
+
+	newValue, err := valueFunc(oldValue)
+	if err != nil {
+		return err
+	}
+
+	return w.Set(key, newValue)
+}
+
 // erroringKVStore wraps a KVStore and fails Get for one specific key, for tests that
 // need to simulate a registry-read failure (e.g. a corrupt or unreachable backing store)
 // without a full hand-written fake.
