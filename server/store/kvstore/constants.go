@@ -8,6 +8,10 @@ const (
 	// CurrentKVStoreVersion is the current version requiring migrations
 	CurrentKVStoreVersion = 3
 
+	// DefaultListKeysBatchSize is the raw-keyspace page size used by callers of
+	// ListAllKeysWithPrefix/ListAllKeysByPrefix that have no reason to page differently.
+	DefaultListKeysBatchSize = 1000
+
 	// KeyServersConfig is the key under which the JSON array of ServerConfig entries
 	// (the homeserver registry) is stored.
 	KeyServersConfig = "servers"

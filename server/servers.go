@@ -11,11 +11,6 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// listAllKeysBatchSize is the raw-keyspace page size used when scanning for namespaced
-// records. Kept as a var (not const) so tests can shrink it to exercise multi-page paging
-// without needing thousands of fixture keys.
-var listAllKeysBatchSize = 1000
-
 // getServers returns every registered server. A missing registry key is not an error -
 // it returns (nil, nil), meaning "no servers registered yet".
 func (p *Plugin) getServers() ([]kvstore.ServerConfig, error) {
@@ -238,7 +233,7 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 // every pre-existing post's Matrix event ID property.
 func (p *Plugin) warnIfEventDomainMismatch(serverID, newEventDomain string) {
 	prefix := kvstore.KeyPrefixMatrixEventPost + serverID + "_"
-	keys, err := kvstore.ListAllKeysWithPrefix(p.kvstore, prefix, listAllKeysBatchSize)
+	keys, err := kvstore.ListAllKeysWithPrefix(p.kvstore, prefix, kvstore.DefaultListKeysBatchSize)
 	if err != nil {
 		p.logger.LogWarn("Failed to check for surviving event-post records during server re-adoption", "server_id", serverID, "error", err)
 		return

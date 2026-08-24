@@ -767,7 +767,7 @@ func (c *Handler) testServerConnection(serverID string) *model.CommandResponse {
 }
 
 func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.CommandResponse {
-	keys, err := kvstore.ListAllKeysWithPrefix(c.kvstore, kvstore.KeyPrefixChannelMapping, 1000)
+	keys, err := kvstore.ListAllKeysWithPrefix(c.kvstore, kvstore.KeyPrefixChannelMapping, kvstore.DefaultListKeysBatchSize)
 	if err != nil {
 		return ephemeral(fmt.Sprintf("❌ Failed to retrieve mappings: %v", err))
 	}
