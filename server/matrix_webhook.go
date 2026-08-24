@@ -157,7 +157,21 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Mark transaction as processed
+	p.logger.LogDebug("Processing Matrix transaction", "server_id", serverID, "txn_id", txnID, "event_count", len(transaction.Events))
+
+	// Process each event in the transaction.
+	for _, event := range transaction.Events {
+		if err := p.processMatrixEvent(serverID, event); err != nil {
+			p.logger.LogError("Failed to process Matrix event", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "server_id", serverID, "txn_id", txnID)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "Transaction processing failed", http.StatusServiceUnavailable)
+			return
+		}
+	}
+
+	p.logger.LogDebug("Successfully processed Matrix transaction", "server_id", serverID, "txn_id", txnID, "event_count", len(transaction.Events))
+
+	// Mark transaction as processed only after all events succeeded.
 	transactionsMutex.Lock()
 	processedTransactions[key] = time.Now()
 	shouldCleanup := len(processedTransactions)%100 == 0
@@ -167,19 +181,6 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	if shouldCleanup {
 		go p.cleanupOldTransactions()
 	}
-
-	p.logger.LogDebug("Processing Matrix transaction", "server_id", serverID, "txn_id", txnID, "event_count", len(transaction.Events))
-
-	// Process each event in the transaction
-	for _, event := range transaction.Events {
-		if err := p.processMatrixEvent(serverID, event); err != nil {
-			p.logger.LogError("Failed to process Matrix event", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "server_id", serverID, "txn_id", txnID)
-			// Continue processing other events even if one fails
-			continue
-		}
-	}
-
-	p.logger.LogDebug("Successfully processed Matrix transaction", "server_id", serverID, "txn_id", txnID, "event_count", len(transaction.Events))
 
 	// Return success response
 	w.WriteHeader(http.StatusOK)

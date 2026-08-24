@@ -442,6 +442,13 @@ live.
   registry), respond **503 with `Retry-After`** and do **not** record the transaction as
   processed — the AS spec has the homeserver retry the same `txnId`, so the events survive
   and a retry can land on an up-to-date node.
+- The transaction is recorded in the processed-transaction dedupe map **only after every
+  event in it has been processed successfully**. If `processMatrixEvent` returns an error
+  for any event, stop iterating immediately and respond **503 with `Retry-After`**, the same
+  as the missing-client path, instead of recording the transaction and returning 200. Marking
+  it processed up front (or continuing past a failed event and still returning 200) would
+  make the failure invisible to the homeserver — it would never retry, and if it did, the
+  txnId would already be in the dedupe map and get dropped as a duplicate.
 - The processed-transaction dedupe map must be keyed by `struct{serverID, txnID string}`:
   Matrix transaction IDs are only unique per homeserver.
 - Thread `serverID` through `processMatrixEvent`, `getChannelIDFromMatrixRoom`,
@@ -941,7 +948,9 @@ finish with a commit following the conventional commits notation.
 - **Inbound auth** — token matches the right server; empty `HSToken` entries never match;
   unknown token → 401; disabled server → 503; `serverID` reaches the handler; missing
   client → 503 + `Retry-After` and the txn is **not** marked processed; identical `txnId`
-  from two different servers is processed twice.
+  from two different servers is processed twice; a `processMatrixEvent` failure partway
+  through a transaction → 503 + `Retry-After`, the txn is **not** marked processed, and a
+  retry of the same `txnId` is processed (not deduped).
 - **Outbound routing** — `serverIDForSyncMsg` for: mapped-to-`rc`'s-server, mapped-to-
   another-server, unmapped DM, unmapped non-DM, nil `rc`, unknown remote, **disabled server**.
   Assert the hooks call the bridge **exactly once** and never for a non-matching server.
