@@ -169,6 +169,10 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 			if serverID != "" && s.ServerID == serverID {
 				return nil, errors.Errorf("server ID %s is already registered", serverID)
 			}
+			// Reject duplicate hs_tokens
+			if hsToken != "" && s.HSToken == hsToken {
+				return nil, errors.Errorf("hs_token conflicts with existing server %s; hs_token must be unique across registered servers", s.ServerID)
+			}
 		}
 
 		id := serverID

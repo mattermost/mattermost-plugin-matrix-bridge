@@ -211,6 +211,21 @@ func TestAddServer(t *testing.T) {
 		assert.Contains(t, err.Error(), "conflicts")
 	})
 
+	t.Run("rejects a duplicate non-empty hs_token and leaves the registry unchanged", func(t *testing.T) {
+		plugin := newTestPluginForAddServer(t)
+
+		_, err := plugin.AddServer("https://a.example.com", "as1", "shared-hs-token", "", "", "a.example.com")
+		require.NoError(t, err)
+
+		_, err = plugin.AddServer("https://b.example.com", "as2", "shared-hs-token", "", "", "b.example.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "hs_token conflicts")
+
+		servers, err := plugin.getServers()
+		require.NoError(t, err)
+		require.Len(t, servers, 1, "the rejected registration must not be persisted")
+	})
+
 	t.Run("mints a fresh ID when none is supplied", func(t *testing.T) {
 		plugin := newTestPluginForAddServer(t)
 		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
@@ -673,7 +688,7 @@ func TestInitMatrixClientsConcurrentRebuildMatchesFinalRegistry(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := plugin.AddServer(fmt.Sprintf("https://server%d.example.com", i), "as", "hs", "", "", fmt.Sprintf("server%d.example.com", i))
+			_, err := plugin.AddServer(fmt.Sprintf("https://server%d.example.com", i), "as", fmt.Sprintf("hs%d", i), "", "", fmt.Sprintf("server%d.example.com", i))
 			assert.NoError(t, err)
 		}(i)
 	}
