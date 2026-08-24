@@ -31,24 +31,28 @@ func newTestPluginForHooks(t *testing.T) *Plugin {
 
 // TestServerIDForSyncMsg covers §5.1's outbound-routing requirements: every resolution
 // step of §3.6, including the disabled-server skip that is now the only thing stopping
-// outbound traffic for a disabled server.
+// outbound traffic for a disabled server, and the operational-failure/no-op distinction
+// that both outbound hooks rely on to avoid silently losing a sync batch.
 func TestServerIDForSyncMsg(t *testing.T) {
-	t.Run("nil rc is skipped", func(t *testing.T) {
+	t.Run("nil rc is a no-op, not an error", func(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
-		_, ok := plugin.serverIDForSyncMsg("channel1", nil)
-		assert.False(t, ok)
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", nil)
+		require.NoError(t, err)
+		assert.False(t, shouldSync)
 	})
 
-	t.Run("rc with empty RemoteId is skipped", func(t *testing.T) {
+	t.Run("rc with empty RemoteId is a no-op, not an error", func(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
-		_, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: ""})
-		assert.False(t, ok)
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: ""})
+		require.NoError(t, err)
+		assert.False(t, shouldSync)
 	})
 
-	t.Run("unknown remote is skipped", func(t *testing.T) {
+	t.Run("unknown remote is a no-op, not an error", func(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
-		_, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: "unknown-remote"})
-		assert.False(t, ok)
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: "unknown-remote"})
+		require.NoError(t, err)
+		assert.False(t, shouldSync)
 	})
 
 	t.Run("mapped to this server returns it", func(t *testing.T) {
@@ -59,8 +63,9 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
-		got, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
-		assert.True(t, ok)
+		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.True(t, shouldSync)
 		assert.Equal(t, serverID, got)
 	})
 
@@ -73,8 +78,9 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
-		_, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteIDA})
-		assert.False(t, ok)
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteIDA})
+		require.NoError(t, err)
+		assert.False(t, shouldSync)
 	})
 
 	t.Run("unmapped DM channel returns rc's server so the room can be auto-created", func(t *testing.T) {
@@ -83,8 +89,9 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		api := plugin.API.(*plugintest.API)
 		api.On("GetChannel", "channel1").Return(&model.Channel{Type: model.ChannelTypeDirect}, nil)
 
-		got, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
-		assert.True(t, ok)
+		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.True(t, shouldSync)
 		assert.Equal(t, serverID, got)
 	})
 
@@ -94,8 +101,9 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		api := plugin.API.(*plugintest.API)
 		api.On("GetChannel", "channel1").Return(&model.Channel{Type: model.ChannelTypeOpen}, nil)
 
-		_, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
-		assert.False(t, ok)
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.False(t, shouldSync)
 	})
 
 	t.Run("disabled server is skipped even when mapped to it", func(t *testing.T) {
@@ -108,8 +116,9 @@ func TestServerIDForSyncMsg(t *testing.T) {
 
 		require.NoError(t, plugin.SetServerEnabled(serverID, false))
 
-		_, ok := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
-		assert.False(t, ok, "a disabled server must be skipped - this is the only thing stopping its outbound traffic")
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.False(t, shouldSync, "a disabled server must be skipped - this is the only thing stopping its outbound traffic")
 	})
 
 	t.Run("per-server enablement: A enabled and mapped syncs, B disabled and mapped does not", func(t *testing.T) {
@@ -126,12 +135,75 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channelB"), mappingB))
 
-		gotA, okA := plugin.serverIDForSyncMsg("channelA", &model.RemoteCluster{RemoteId: remoteIDA})
-		assert.True(t, okA)
+		gotA, shouldSyncA, err := plugin.serverIDForSyncMsg("channelA", &model.RemoteCluster{RemoteId: remoteIDA})
+		require.NoError(t, err)
+		assert.True(t, shouldSyncA)
 		assert.Equal(t, serverIDA, gotA)
 
-		_, okB := plugin.serverIDForSyncMsg("channelB", &model.RemoteCluster{RemoteId: remoteIDB})
-		assert.False(t, okB, "server B is disabled; its channel must not sync")
+		_, shouldSyncB, err := plugin.serverIDForSyncMsg("channelB", &model.RemoteCluster{RemoteId: remoteIDB})
+		require.NoError(t, err)
+		assert.False(t, shouldSyncB, "server B is disabled; its channel must not sync")
+	})
+
+	t.Run("channel mapping KV read failure is an operational error, not a silent no-op", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.BuildChannelMappingKey("channel1")}
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.Error(t, err, "a KV read failure must surface as an error so Mattermost retries the batch instead of dropping it")
+		assert.False(t, shouldSync)
+	})
+
+	t.Run("corrupt channel mapping JSON is an operational error, not a silent no-op", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), []byte("not-json")))
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.Error(t, err)
+		assert.False(t, shouldSync)
+	})
+
+	t.Run("GetChannel failure for an unmapped channel is an operational error, not a silent no-op", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetChannel", "channel1").Return(nil, model.NewAppError("GetChannel", "id", nil, "boom", http.StatusInternalServerError))
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.Error(t, err)
+		assert.False(t, shouldSync)
+	})
+
+	t.Run("remote-ID cache miss resolves after a refresh catches up a lagging node", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+
+		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		// Simulate this node's remoteToServerID cache lagging a registry mutation made on
+		// another node: the registry (KV) already has the server, but this node's cache
+		// doesn't know about it yet.
+		delete(plugin.remoteToServerID, remoteID)
+
+		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.True(t, shouldSync, "a stale remote cache must be refreshed from the registry before giving up")
+		assert.Equal(t, serverID, got)
+	})
+
+	t.Run("a refresh failure on remote-ID cache miss is an operational error, not a silent no-op", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		delete(plugin.remoteToServerID, remoteID)
+		plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.KeyServersConfig}
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.Error(t, err, "a failed cache refresh must surface as an error, not be conflated with 'not one of our remotes'")
+		assert.False(t, shouldSync)
 	})
 }
 

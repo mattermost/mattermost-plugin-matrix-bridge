@@ -10,8 +10,12 @@ import (
 // invokes this once per invited remote, so it resolves exactly one target server from
 // rc and does no fan-out - see serverIDForSyncMsg.
 func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteCluster) (model.SyncResponse, error) {
-	serverID, ok := p.serverIDForSyncMsg(msg.ChannelId, rc)
-	if !ok {
+	serverID, shouldSync, err := p.serverIDForSyncMsg(msg.ChannelId, rc)
+	if err != nil {
+		p.logger.LogError("Failed to resolve server for SyncMsg; asking Mattermost to retry", "channel_id", msg.ChannelId, "error", err)
+		return model.SyncResponse{}, err
+	}
+	if !shouldSync {
 		return model.SyncResponse{}, nil
 	}
 
@@ -109,8 +113,12 @@ func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
 // Targets a single server, resolved the same way as OnSharedChannelsSyncMsg - a
 // mxc:// URI is only valid on the server it was uploaded to.
 func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *model.Post, rc *model.RemoteCluster) error {
-	serverID, ok := p.serverIDForSyncMsg(post.ChannelId, rc)
-	if !ok {
+	serverID, shouldSync, err := p.serverIDForSyncMsg(post.ChannelId, rc)
+	if err != nil {
+		p.logger.LogError("Failed to resolve server for attachment SyncMsg; asking Mattermost to retry", "channel_id", post.ChannelId, "file_id", fi.Id, "error", err)
+		return err
+	}
+	if !shouldSync {
 		return nil
 	}
 

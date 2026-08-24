@@ -475,25 +475,43 @@ and does no fan-out:
 
 ```go
 // server/plugin.go
-func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (string, bool)
+func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (serverID string, shouldSync bool, err error)
 ```
 
-1. `rc == nil || rc.RemoteId == ""` → log and skip (defensive; should not happen in production).
-2. `serverIDForRemoteID(rc.RemoteId)` → unknown remote → log and skip.
-3. The resolved server has `Enabled == false` → skip (§3.11). This replaces the global
+The `error` return distinguishes an intentional no-op from an operational failure (KV read/parse
+failure, registry read failure, `GetChannel` failure). Both outbound hooks must propagate a
+non-nil `err` rather than fold it into `shouldSync == false`: Mattermost only retains the
+shared-channels sync cursor and retries the batch when the hook returns an error, so a swallowed
+operational failure silently and permanently drops the posts/reactions/files in that batch. The
+inbound webhook path (§3.5) applies the same principle with its 503/`Retry-After` response for
+the analogous node-cache-lag case.
+
+1. `rc == nil || rc.RemoteId == ""` → log and skip (defensive; should not happen in production);
+   not an error.
+2. `serverIDForRemoteID(rc.RemoteId)` unresolved → this node's `remoteToServerID` cache may lag a
+   registry mutation made on another node that hasn't reached this node's cluster event handler
+   yet, so refresh the client caches once (`initMatrixClients`) and retry the lookup before giving
+   up. A refresh failure is an operational failure. Still unresolved after the refresh → log and
+   skip (genuinely not one of our remotes); not an error.
+3. `serverConfigForRouting(serverID)` failure → operational failure (registry read failure).
+4. The resolved server has `Enabled == false` → skip (§3.11). This replaces the global
    `EnableSync` gate the hooks used to check, and is the only thing stopping outbound traffic
    for a disabled server — its remote stays registered and invited, so the hooks keep firing.
-4. Read `channel_mapping_<channelID>` and check `rc`'s server against the list — **membership,
-   not identity**, so this keeps working unchanged when a channel may hold N entries:
+5. Read `channel_mapping_<channelID>` and check `rc`'s server against the list — **membership,
+   not identity**, so this keeps working unchanged when a channel may hold N entries. A KV
+   read/parse failure here is an operational failure. Otherwise:
     - `RoomIDForServer(mappings, serverID) != ""` → return `serverID`;
     - the list is non-empty but has no entry for `serverID` → skip (the remote is still
       invited but its server is no longer mapped — do not relay its traffic elsewhere);
-    - list empty **and** the channel is a DM → return `rc`'s server so the DM room can be
-      auto-created on it;
-    - list empty, non-DM → skip.
+    - list empty → `isChannelDirect(channelID)` failure is an operational failure; otherwise
+      the channel is a DM → return `rc`'s server so the DM room can be auto-created on it;
+      not a DM → skip.
 
 Apply in `server/hooks.go`:
 
+- `OnSharedChannelsSyncMsg` / `OnSharedChannelsAttachmentSyncMsg` both check `err` from
+  `serverIDForSyncMsg` first and return it immediately (log-and-return, same as every other
+  error path in these hooks) before checking `shouldSync`.
 - `OnSharedChannelsSyncMsg` — one bridge, no loop over servers. Loop prevention uses
   `isOwnRemoteID(post/reaction.GetRemoteID())` across all our remotes. Matrix-originated
   users are only re-invited when `serverIDForRemoteID(user.GetRemoteID()) == serverID`.
