@@ -4,7 +4,6 @@ package command
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -380,31 +379,6 @@ func (c *Handler) serverByID(serverID string) (*kvstore.ServerConfig, error) {
 		}
 	}
 	return nil, errors.Errorf("server %s is not registered", serverID)
-}
-
-// countMappedChannelsPerServer does a single keyspace scan shared by /matrix list,
-// /matrix status, /matrix server list and /matrix server status.
-func (c *Handler) countMappedChannelsPerServer() (map[string]int, error) {
-	keys, err := kvstore.ListAllKeysWithPrefix(c.kvstore, kvstore.KeyPrefixChannelMapping, 1000)
-	if err != nil {
-		return nil, err
-	}
-
-	counts := make(map[string]int)
-	for _, key := range keys {
-		data, err := c.kvstore.Get(key)
-		if err != nil {
-			continue
-		}
-		mappings, err := kvstore.ParseChannelServerMappings(data)
-		if err != nil {
-			continue
-		}
-		for _, m := range mappings {
-			counts[m.ServerID]++
-		}
-	}
-	return counts, nil
 }
 
 // probeServerHealth concurrently health-checks every server in servers under a single
@@ -869,7 +843,6 @@ func (c *Handler) executeStatusCommand() *model.CommandResponse {
 		return ephemeral("No Matrix servers are registered. Use `/matrix server add` to add one.")
 	}
 
-	counts, countsErr := c.countMappedChannelsPerServer()
 	health := c.probeServerHealth(servers)
 
 	var b strings.Builder
@@ -879,11 +852,7 @@ func (c *Handler) executeStatusCommand() *model.CommandResponse {
 		if s.Enabled {
 			state = "enabled"
 		}
-		countStr := "unavailable"
-		if countsErr == nil {
-			countStr = strconv.Itoa(counts[s.ServerID])
-		}
-		fmt.Fprintf(&b, "• **%s** (`%s`) - %s, health: %s, mapped channels: %s\n", s.ServerName, s.ServerID, state, health[s.ServerID], countStr)
+		fmt.Fprintf(&b, "• **%s** (`%s`) - %s, health: %s\n", s.ServerName, s.ServerID, state, health[s.ServerID])
 	}
 
 	return ephemeral(b.String())
@@ -1061,8 +1030,6 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 		return ephemeral("No Matrix servers are registered. Use `/matrix server add` to add one.")
 	}
 
-	counts, countsErr := c.countMappedChannelsPerServer()
-
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Matrix Servers (%d):**\n\n", len(servers))
 	for _, s := range servers {
@@ -1070,16 +1037,12 @@ func (c *Handler) executeServerListCommand() *model.CommandResponse {
 		if s.Enabled {
 			state = "enabled"
 		}
-		countStr := "unavailable"
-		if countsErr == nil {
-			countStr = strconv.Itoa(counts[s.ServerID])
-		}
 		usernamePrefix := s.UsernamePrefix
 		if usernamePrefix == "" {
 			usernamePrefix = "matrix"
 		}
-		fmt.Fprintf(&b, "• **%s** (`%s`)\n   URL: %s\n   Username prefix: `%s`\n   Mapped channels: %s\n   State: %s\n\n",
-			s.ServerName, s.ServerID, s.ServerURL, usernamePrefix, countStr, state)
+		fmt.Fprintf(&b, "• **%s** (`%s`)\n   URL: %s\n   Username prefix: `%s`\n   State: %s\n\n",
+			s.ServerName, s.ServerID, s.ServerURL, usernamePrefix, state)
 	}
 
 	return ephemeral(b.String())
@@ -1161,19 +1124,14 @@ func (c *Handler) executeServerStatusCommand(serverIDArg string) *model.CommandR
 	}
 
 	health := c.probeServerHealth([]kvstore.ServerConfig{*server})
-	counts, countsErr := c.countMappedChannelsPerServer()
-	countStr := "unavailable"
-	if countsErr == nil {
-		countStr = strconv.Itoa(counts[server.ServerID])
-	}
 
 	state := "disabled"
 	if server.Enabled {
 		state = "enabled"
 	}
 
-	return ephemeral(fmt.Sprintf("**Matrix Server Status**\n\n**Name:** %s\n**ID:** `%s`\n**URL:** %s\n**State:** %s\n**Health:** %s\n**Mapped channels:** %s",
-		server.ServerName, server.ServerID, server.ServerURL, state, health[server.ServerID], countStr))
+	return ephemeral(fmt.Sprintf("**Matrix Server Status**\n\n**Name:** %s\n**ID:** `%s`\n**URL:** %s\n**State:** %s\n**Health:** %s",
+		server.ServerName, server.ServerID, server.ServerURL, state, health[server.ServerID]))
 }
 
 func (c *Handler) executeServerEnableCommand(serverID string, enabled bool) *model.CommandResponse {

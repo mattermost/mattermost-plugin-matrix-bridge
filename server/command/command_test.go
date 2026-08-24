@@ -125,7 +125,7 @@ func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 }
 
 // memoryKVStore is a minimal in-memory kvstore.KVStore for command tests that touch
-// keyspace scans (e.g. countMappedChannelsPerServer).
+// keyspace scans (e.g. executeListMappingsCommand).
 type memoryKVStore struct {
 	data map[string][]byte
 }

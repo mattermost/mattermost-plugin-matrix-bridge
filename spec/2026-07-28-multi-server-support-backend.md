@@ -764,7 +764,7 @@ Typing a `ServerName` or URL host by hand still works — the list is a convenie
 
 - `/matrix status` — admin-gated like every other subcommand (it exposes server names, URLs
   and health), and never prints tokens. Lists **every** configured server with
-  enabled state, live connection health and mapped-channel count. Probe connections
+  enabled state and live connection health. Probe connections
   **concurrently under a single deadline** (~8s, in a `var` so tests can shorten it): the
   Matrix HTTP client allows 30s per request, so sequential probes would outlast
   Mattermost's slash-command timeout. Servers whose probe misses the deadline render as
@@ -773,8 +773,11 @@ Typing a `ServerName` or URL host by hand still works — the list is a convenie
   registered server; with zero or several, return an ephemeral error pointing at
   `/matrix server`.
 - `/matrix list` — show `channel → room (server)`.
-- Count mapped channels per server with **one** keyspace scan shared by `list` and
-  `status`, and report "unavailable" (not `0`) when the scan fails.
+- No command other than `/matrix list` reports a mapped-channel count. Counting requires
+  paging the whole KV keyspace (pluginapi's prefix filter is client-side) plus one `Get`
+  per mapping — hundreds of round trips inside a slash command on a large install. `list`
+  pays that cost because enumerating the mappings *is* its output; `status`,
+  `server list` and `server status` do not.
 
 `unmap` sequencing matters: clear the Matrix room state first (`RemoveMattermostChannelID`
 — if this fails, abort, or sync messages keep flowing), then delete the mapping key
