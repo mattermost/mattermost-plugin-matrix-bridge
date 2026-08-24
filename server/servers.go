@@ -156,6 +156,13 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 	}
 
 	eventDomain := eventDomainFromEndpoint(endpoint)
+	siteURL := "https://" + endpoint
+
+	// Register the remote into shared channels first to retrieve the RemoteID.
+	remoteID, err := p.doRegisterPluginForSharedChannels(siteURL)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to register server for shared channels")
+	}
 
 	var mintedID string
 	err = p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
@@ -191,7 +198,8 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 			HSToken:        hsToken,
 			UsernamePrefix: usernamePrefix,
 			Enabled:        true,
-			SiteURL:        "https://" + endpoint,
+			SiteURL:        siteURL,
+			RemoteID:       remoteID,
 		}
 
 		result := make([]kvstore.ServerConfig, len(servers), len(servers)+1)
@@ -199,17 +207,16 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 		return append(result, entry), nil
 	})
 	if err != nil {
+		// The registry rejected this add (a conflict, or a CAS failure) after the remote
+		// was already created - it belongs to no entry, so it must not be left registered.
+		if appErr := p.API.UnregisterPluginRemoteForSharedChannels(remoteID); appErr != nil {
+			p.logger.LogWarn("Failed to unregister shared-channels remote after a rejected AddServer", "remote_id", remoteID, "error", appErr)
+		}
 		return "", err
 	}
 
 	if serverID != "" {
 		p.warnIfEventDomainMismatch(serverID, eventDomain)
-	}
-
-	// Register the shared-channels remote immediately so the new server is usable
-	// without waiting for a restart. Failure is non-fatal - the next activation retries.
-	if err := p.registerServerForSharedChannels(mintedID); err != nil {
-		p.logger.LogWarn("Failed to register new server for shared channels; will retry on next activation", "server_id", mintedID, "error", err)
 	}
 
 	if err := p.refreshServersAndBroadcast("server_added"); err != nil {

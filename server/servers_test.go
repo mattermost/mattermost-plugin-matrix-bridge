@@ -270,6 +270,64 @@ func TestAddServer(t *testing.T) {
 		assert.NotNil(t, plugin.getMatrixClient(id), "refreshServersAndBroadcast must rebuild this node's client cache")
 	})
 
+	t.Run("fails without ever writing to the registry when shared-channels registration fails", func(t *testing.T) {
+		plugin := newTestPluginForServers(t)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
+		api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
+		api.On("RegisterPluginForSharedChannels", mock.Anything).Return("", &model.AppError{Message: "registration failed"}).Once()
+		mockAnyLogCalls(api)
+
+		explicitID := model.NewId()
+		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", explicitID, "a.example.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to register")
+		assert.Empty(t, id)
+
+		servers, err := plugin.getServers()
+		require.NoError(t, err)
+		assert.Empty(t, servers, "a server whose shared-channels remote could not be created must never reach the registry")
+		assert.Nil(t, plugin.getMatrixClient(explicitID), "a failed add must never publish a routable client for the server")
+		assert.Empty(t, plugin.remoteToServerID, "a failed add must never publish a remote routing entry for the server")
+
+		api.AssertNotCalled(t, "UnregisterPluginRemoteForSharedChannels", mock.Anything)
+		api.AssertNotCalled(t, "PublishPluginClusterEvent", mock.Anything, mock.Anything)
+		api.AssertExpectations(t)
+	})
+
+	t.Run("unregisters the remote when the registry write is rejected by a conflict", func(t *testing.T) {
+		plugin := newTestPluginForServers(t)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
+		api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
+		mockAnyLogCalls(api)
+
+		// Seed an existing entry directly so the second AddServer's endpoint conflict is
+		// deterministic: registration (below) now happens before the conflict check runs,
+		// so this add must still get as far as obtaining a remote before being rejected.
+		seed := []kvstore.ServerConfig{
+			{ServerID: "existing1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "existing.example.com", SiteURL: "https://a.example.com:443", RemoteID: "remote-existing"},
+		}
+		data, err := kvstore.MarshalServersConfig(seed)
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+		api.On("RegisterPluginForSharedChannels", mock.Anything).Return("remote-orphan", nil).Once()
+		api.On("UnregisterPluginRemoteForSharedChannels", "remote-orphan").Return(nil).Once()
+
+		id, err := plugin.AddServer("https://a.example.com", "as2", "hs2", "", "", "second.example.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already registered")
+		assert.Empty(t, id)
+
+		servers, err := plugin.getServers()
+		require.NoError(t, err)
+		require.Len(t, servers, 1, "the rejected add must not add a second entry")
+		assert.Equal(t, "existing1", servers[0].ServerID)
+
+		api.AssertExpectations(t)
+	})
+
 	t.Run("EventDomain is derived from the endpoint and stays distinct across ports", func(t *testing.T) {
 		plugin := newTestPluginForAddServer(t)
 		id1, err := plugin.AddServer("http://localhost:8008", "as1", "hs1", "", "", "localhost8008.example.com")

@@ -334,8 +334,7 @@ func (p *Plugin) remoteIDForServer(serverID string) string {
 }
 
 // doRegisterPluginForSharedChannels performs the actual RegisterPluginForSharedChannels
-// API call for one siteURL. Extracted so both registerForSharedChannels (all entries)
-// and registerServerForSharedChannels (one entry, from AddServer) share it.
+// API call for one siteURL.
 func (p *Plugin) doRegisterPluginForSharedChannels(siteURL string) (string, error) {
 	botUser, err := p.API.GetUserByUsername("mattermost-bridge")
 	var creatorID string
@@ -415,34 +414,6 @@ func (p *Plugin) registerForSharedChannels() error {
 			}
 		}
 		return updated, nil
-	})
-}
-
-// registerServerForSharedChannels registers a shared-channels remote for a single,
-// already-persisted server entry. Used by AddServer so a newly added server gets a
-// working remote immediately, without waiting for the next activation.
-func (p *Plugin) registerServerForSharedChannels(serverID string) error {
-	server, err := p.serverByID(serverID)
-	if err != nil {
-		return err
-	}
-
-	remoteID, err := p.doRegisterPluginForSharedChannels(server.SiteURL)
-	if err != nil {
-		return err
-	}
-
-	return p.mutateServers(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		updated := make([]kvstore.ServerConfig, len(current))
-		copy(updated, current)
-		for i := range updated {
-			if updated[i].ServerID == serverID {
-				updated[i].RemoteID = remoteID
-				return updated, nil
-			}
-		}
-		// Server was concurrently removed; nothing to persist.
-		return current, nil
 	})
 }
 
