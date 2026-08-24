@@ -1169,7 +1169,11 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server remove <server_id>"); resp != nil {
 			return resp
 		}
-		return c.executeServerRemoveCommand(rest[0])
+		serverID, err := c.resolveServerIDArg(rest[0])
+		if err != nil {
+			return ephemeral("❌ " + err.Error())
+		}
+		return c.executeServerRemoveCommand(serverID)
 	case "map":
 		return c.executeServerMapDispatch(args, rest)
 	case "unmap":
@@ -1204,16 +1208,15 @@ func (c *Handler) executeServerGroup(args *model.CommandArgs, fields []string) *
 			return ephemeral("❌ " + err.Error())
 		}
 		return c.testServerConnection(serverID)
-	case "enable":
-		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server enable <server_id>"); resp != nil {
+	case "enable", "disable":
+		if resp := requireArgs(rest, 1, 1, fmt.Sprintf("Usage: /matrix server %s <server_id>", sub)); resp != nil {
 			return resp
 		}
-		return c.executeServerEnableCommand(rest[0], true)
-	case "disable":
-		if resp := requireArgs(rest, 1, 1, "Usage: /matrix server disable <server_id>"); resp != nil {
-			return resp
+		serverID, err := c.resolveServerIDArg(rest[0])
+		if err != nil {
+			return ephemeral("❌ " + err.Error())
 		}
-		return c.executeServerEnableCommand(rest[0], false)
+		return c.executeServerEnableCommand(serverID, sub == "enable")
 	default:
 		return ephemeral(serverCommandUsage)
 	}

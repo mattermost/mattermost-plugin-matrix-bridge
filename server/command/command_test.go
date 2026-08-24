@@ -363,11 +363,19 @@ func TestExecuteServerGroupAddRemoveList(t *testing.T) {
 		assert.Contains(t, resp.Text, "Usage")
 	})
 
-	t.Run("remove of unknown server reports not found", func(t *testing.T) {
-		h3, mp3, api3 := newTestHandler(t)
+	t.Run("remove of an unknown identifier reports no match", func(t *testing.T) {
+		h3, _, api3 := newTestHandler(t)
+		api3.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+		resp := h3.executeServerGroup(args, []string{"remove", "nonexistent"})
+		assert.Contains(t, resp.Text, "no registered Matrix server matches")
+	})
+
+	t.Run("remove reports not found when the server vanishes after resolution", func(t *testing.T) {
+		seeded := kvstore.ServerConfig{ServerID: "server-gone-test", ServerName: "gone.example.com", ServerURL: "https://gone.example.com", Enabled: true}
+		h3, mp3, api3 := newTestHandler(t, seeded)
 		api3.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
 		mp3.removeServerOK = false
-		resp := h3.executeServerGroup(args, []string{"remove", "nonexistent"})
+		resp := h3.executeServerGroup(args, []string{"remove", "gone.example.com"})
 		assert.Contains(t, resp.Text, "No server found")
 	})
 
@@ -399,6 +407,86 @@ func TestExecuteServerGroupEnableDisable(t *testing.T) {
 
 	resp = h.executeServerGroup(args, []string{"enable"})
 	assert.Contains(t, resp.Text, "Usage")
+}
+
+// The subcommands taking a required server identifier must accept every form
+// resolveServerIDArg advertises - the server ID, the server name, and the URL host - not
+// just the canonical 26-character ID that the plugin methods underneath require.
+func TestExecuteServerGroupResolvesServerIdentifierForms(t *testing.T) {
+	// Name and URL host deliberately differ from the ID and from each other, so a test
+	// passing for one form cannot be passing by accident for another.
+	const (
+		serverID   = "serveridentifier1"
+		serverName = "friendly-name"
+		urlHost    = "host.example.com"
+	)
+	seeded := func() kvstore.ServerConfig {
+		return kvstore.ServerConfig{
+			ServerID:   serverID,
+			ServerName: serverName,
+			ServerURL:  "https://" + urlHost,
+			Enabled:    false,
+		}
+	}
+
+	userID := model.NewId()
+	args := &model.CommandArgs{UserId: userID}
+
+	identifiers := []struct {
+		name string
+		arg  string
+	}{
+		{"server ID", serverID},
+		{"server name", serverName},
+		{"URL host", urlHost},
+	}
+
+	for _, id := range identifiers {
+		t.Run("remove by "+id.name, func(t *testing.T) {
+			h, mp, api := newTestHandler(t, seeded())
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+			mp.removeServerOK = true
+
+			resp := h.executeServerGroup(args, []string{"remove", id.arg})
+			assert.Contains(t, resp.Text, "Server removed")
+			assert.Empty(t, mp.servers)
+		})
+
+		t.Run("enable by "+id.name, func(t *testing.T) {
+			h, mp, api := newTestHandler(t, seeded())
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, []string{"enable", id.arg})
+			assert.Contains(t, resp.Text, "enabled")
+			require.Len(t, mp.servers, 1)
+			assert.True(t, mp.servers[0].Enabled)
+		})
+
+		t.Run("disable by "+id.name, func(t *testing.T) {
+			server := seeded()
+			server.Enabled = true
+			h, mp, api := newTestHandler(t, server)
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+
+			resp := h.executeServerGroup(args, []string{"disable", id.arg})
+			assert.Contains(t, resp.Text, "disabled")
+			require.Len(t, mp.servers, 1)
+			assert.False(t, mp.servers[0].Enabled)
+		})
+	}
+
+	for _, sub := range []string{"remove", "enable", "disable"} {
+		t.Run(sub+" of an unknown identifier errors", func(t *testing.T) {
+			h, mp, api := newTestHandler(t, seeded())
+			api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(true)
+			mp.removeServerOK = true
+
+			resp := h.executeServerGroup(args, []string{sub, "nonexistent"})
+			assert.Contains(t, resp.Text, "no registered Matrix server matches")
+			require.Len(t, mp.servers, 1)
+			assert.False(t, mp.servers[0].Enabled)
+		})
+	}
 }
 
 func TestExecuteServerGroupUnknownSubcommand(t *testing.T) {
