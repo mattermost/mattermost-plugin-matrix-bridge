@@ -162,6 +162,11 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 	plugin.matrixClients = map[string]*matrix.Client{serverID: matrixContainer.Client}
 	plugin.remoteToServerID = map[string]string{remoteID: serverID}
 	plugin.ownRemoteIDs = map[string]struct{}{remoteID: {}}
+	// Populate the snapshot cache too, exactly as initMatrixClients would: bridge helpers
+	// read this rather than KV (see BridgeUtils.serverConfig), so leaving it empty would
+	// send every one of them down the direct-KV fallback path instead of the cached path
+	// production actually takes.
+	plugin.serverConfigs = map[string]kvstore.ServerConfig{serverID: serverConfig}
 
 	// Set up basic mocks
 	setupBasicMocks(api, testUserID)
@@ -246,10 +251,9 @@ func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName stri
 	return serverID, remoteID
 }
 
-// setTestServerUsernamePrefix overwrites serverID's UsernamePrefix in the registry, for
-// tests that verify per-server username prefix configurability. UsernamePrefix is read
-// live from KV (see BridgeUtils.serverConfig), never from the serverConfigs cache, so no
-// cache update is needed here.
+// setTestServerUsernamePrefix overwrites serverID's UsernamePrefix in both the registry
+// and the serverConfigs cache, for tests that verify per-server username prefix
+// configurability.
 func setTestServerUsernamePrefix(t *testing.T, plugin *Plugin, serverID, prefix string) {
 	t.Helper()
 
@@ -268,6 +272,8 @@ func setTestServerUsernamePrefix(t *testing.T, plugin *Plugin, serverID, prefix 
 	data, err := kvstore.MarshalServersConfig(servers)
 	require.NoError(t, err)
 	require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
+
+	syncTestServerConfigsCache(plugin, servers)
 }
 
 // syncTestServerConfigsCache copies servers into plugin.serverConfigs, keyed by
@@ -288,11 +294,11 @@ func syncTestServerConfigsCache(plugin *Plugin, servers []kvstore.ServerConfig) 
 }
 
 // setTestServerEnabled overwrites serverID's Enabled flag in both the registry and the
-// serverConfigs cache that serverConfigForRouting reads on hot paths (Enabled is cached,
-// unlike UsernamePrefix). Deliberately does not go through SetServerEnabled/
-// refreshServersAndBroadcast/initMatrixClients - that would rebuild matrixClients from
-// each entry's ASToken/ServerURL fields and silently replace any fake matrix.Client a
-// test wired up via registerTestServer with a non-functional one.
+// serverConfigs cache that serverConfigForRouting reads on hot paths. Deliberately does
+// not go through SetServerEnabled/refreshServersAndBroadcast/initMatrixClients - that
+// would rebuild matrixClients from each entry's ASToken/ServerURL fields and silently
+// replace any fake matrix.Client a test wired up via registerTestServer with a
+// non-functional one.
 func setTestServerEnabled(t *testing.T, plugin *Plugin, serverID string, enabled bool) {
 	t.Helper()
 

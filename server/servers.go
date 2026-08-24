@@ -325,7 +325,7 @@ func (p *Plugin) serverByID(serverID string) (kvstore.ServerConfig, error) {
 
 // serverDomainForID returns the ServerName (Matrix ID domain) for a registered server.
 func (p *Plugin) serverDomainForID(serverID string) (string, error) {
-	server, err := p.serverByID(serverID)
+	server, err := p.serverConfigForRouting(serverID)
 	if err != nil {
 		return "", err
 	}

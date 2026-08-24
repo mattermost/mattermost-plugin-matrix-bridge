@@ -39,6 +39,11 @@ type BridgeUtilsConfig struct {
 	// ChannelMapper is the one choke point for channel<->room mapping writes (see
 	// channel_mapping.go). Always the Plugin itself in production.
 	ChannelMapper ChannelMapper
+	// ServerConfigLookup resolves a registered server's current registry entry - a
+	// function value, not a Plugin reference, to keep BridgeUtils decoupled from the
+	// concrete Plugin type. Always Plugin.serverConfigForRouting in production. When nil,
+	// serverConfig reads straight from KV, for tests that build a BridgeUtils standalone.
+	ServerConfigLookup func(serverID string) (kvstore.ServerConfig, error)
 }
 
 // BridgeUtils contains common utilities used by both bridge types. There is one
@@ -54,6 +59,7 @@ type BridgeUtils struct {
 	maxProfileImageSize int64
 	maxFileSize         int64
 	channelMapper       ChannelMapper
+	serverConfigLookup  func(serverID string) (kvstore.ServerConfig, error)
 }
 
 // NewBridgeUtils creates a new BridgeUtils instance
@@ -68,6 +74,7 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 		maxProfileImageSize: config.MaxProfileImageSize,
 		maxFileSize:         config.MaxFileSize,
 		channelMapper:       config.ChannelMapper,
+		serverConfigLookup:  config.ServerConfigLookup,
 	}
 }
 
@@ -145,10 +152,21 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	return nil
 }
 
-// serverConfig returns this bridge's server's current registry entry, read live from
-// the KV store (never cached), so a runtime change to e.g. UsernamePrefix takes effect
-// immediately.
+// serverConfig returns this bridge's server's current registry entry, via the injected
+// ServerConfigLookup rather than a KV read: it is called several times per synced post or
+// event, so unmarshalling the whole registry each time is not affordable. A runtime
+// change to e.g. UsernamePrefix is still picked up immediately, since every registry
+// mutation refreshes the snapshot the lookup reads (see initMatrixClients).
 func (s *BridgeUtils) serverConfig() (kvstore.ServerConfig, error) {
+	if s.serverConfigLookup != nil {
+		return s.serverConfigLookup(s.serverID)
+	}
+	return s.serverConfigFromKV()
+}
+
+// serverConfigFromKV reads this bridge's server's registry entry straight from the KV
+// store. Only reached when no ServerConfigLookup was injected - see BridgeUtilsConfig.
+func (s *BridgeUtils) serverConfigFromKV() (kvstore.ServerConfig, error) {
 	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
 	if err != nil {
 		return kvstore.ServerConfig{}, errors.Wrap(err, "failed to read servers config")

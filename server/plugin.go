@@ -436,6 +436,7 @@ func (p *Plugin) bridgeUtilsForServer(serverID string) (*BridgeUtils, error) {
 		MaxProfileImageSize: p.maxProfileImageSize,
 		MaxFileSize:         p.maxFileSize,
 		ChannelMapper:       p,
+		ServerConfigLookup:  p.serverConfigForRouting,
 	}), nil
 }
 
