@@ -68,13 +68,6 @@ function pillFor(enabled: boolean, health?: string): Pill {
     return {label: 'Active', variant: 'active'};
 }
 
-function channelsSharedText(count: number | null): string {
-    if (count === null) {
-        return 'unavailable';
-    }
-    return `${count} channel${count === 1 ? '' : 's'} shared`;
-}
-
 const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, onToggleEnabled, onEdit, onRemove, onTest, onRegistration}) => {
     const [enabling, setEnabling] = useState(false);
     const [optimisticEnabled, setOptimisticEnabled] = useState<boolean | null>(null);
@@ -172,7 +165,7 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
                     onClick={onToggleExpand}
                 >
                     <i className={`icon ${expanded ? 'icon-chevron-down' : 'icon-chevron-right'}`}/>
-                    {channelsSharedText(server.mapped_channel_count)}
+                    {'Channels shared'}
                 </button>
                 <div style={{...cellStyle, ...mutedCellTextStyle}}>{server.server_url}</div>
                 <div style={metaStyle}>

@@ -21,7 +21,6 @@ function buildServer(overrides: Partial<ServerView> = {}): ServerView {
         is_migrated: false,
         has_as_token: true,
         has_hs_token: true,
-        mapped_channel_count: 3,
         ...overrides,
     };
 }
@@ -34,11 +33,10 @@ function openActionsMenu(serverName: string) {
 }
 
 describe('ServerTable', () => {
-    it('renders name, URL, status pill and mapped channel count', () => {
+    it('renders name, URL and status pill', () => {
         render(
             <ServerTable
                 servers={[buildServer()]}
-                countsUnavailable={false}
                 health={{server1: 'healthy'}}
                 loading={false}
                 expandedServerId={null}
@@ -54,35 +52,13 @@ describe('ServerTable', () => {
         expect(screen.getByText('matrix.example.com')).toBeInTheDocument();
         expect(screen.getByText('https://matrix.example.com')).toBeInTheDocument();
         expect(screen.getByText('Active')).toBeInTheDocument();
-        expect(screen.getByText('3 channels shared')).toBeInTheDocument();
-    });
-
-    it('renders "unavailable", not 0, when mapped_channel_count is null', () => {
-        render(
-            <ServerTable
-                servers={[buildServer({mapped_channel_count: null})]}
-                countsUnavailable={true}
-                health={{}}
-                loading={false}
-                expandedServerId={null}
-                onToggleExpand={noop}
-                onToggleEnabled={asyncNoop}
-                onEdit={noop}
-                onRemove={noop}
-                onTest={noop}
-                onRegistration={noop}
-            />,
-        );
-
-        expect(screen.getByText('unavailable')).toBeInTheDocument();
-        expect(screen.queryByText('0 channels shared')).not.toBeInTheDocument();
+        expect(screen.getByText('Channels shared')).toBeInTheDocument();
     });
 
     it('disables Remove with an explanation for a migrated server', async () => {
         render(
             <ServerTable
                 servers={[buildServer({is_migrated: true})]}
-                countsUnavailable={false}
                 health={{}}
                 loading={false}
                 expandedServerId={null}
@@ -116,7 +92,6 @@ describe('ServerTable', () => {
         render(
             <ServerTable
                 servers={[buildServer({enabled: false})]}
-                countsUnavailable={false}
                 health={{}}
                 loading={false}
                 expandedServerId={null}
@@ -149,7 +124,6 @@ describe('ServerTable', () => {
         render(
             <ServerTable
                 servers={[buildServer({enabled: false})]}
-                countsUnavailable={false}
                 health={{server1: 'healthy'}}
                 loading={false}
                 expandedServerId={null}
@@ -170,7 +144,6 @@ describe('ServerTable', () => {
         render(
             <ServerTable
                 servers={[]}
-                countsUnavailable={false}
                 health={{}}
                 loading={false}
                 expandedServerId={null}

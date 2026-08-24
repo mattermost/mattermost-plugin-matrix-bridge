@@ -27,7 +27,6 @@ describe('AddServerModal', () => {
                 is_migrated: false,
                 has_as_token: true,
                 has_hs_token: true,
-                mapped_channel_count: 0,
             },
             warnings: [],
         });
@@ -94,7 +93,6 @@ describe('AddServerModal', () => {
                 is_migrated: false,
                 has_as_token: true,
                 has_hs_token: true,
-                mapped_channel_count: 0,
             },
             warnings: [],
         });

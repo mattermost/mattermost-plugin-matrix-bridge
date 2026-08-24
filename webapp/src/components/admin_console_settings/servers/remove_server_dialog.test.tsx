@@ -21,7 +21,6 @@ function buildServer(overrides: Partial<ServerView> = {}): ServerView {
         is_migrated: false,
         has_as_token: true,
         has_hs_token: true,
-        mapped_channel_count: 0,
         ...overrides,
     };
 }

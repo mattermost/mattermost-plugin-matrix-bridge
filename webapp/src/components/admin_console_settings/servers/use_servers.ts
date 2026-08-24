@@ -12,7 +12,6 @@ function messageFrom(e: unknown): string {
 
 export interface UseServersResult {
     servers: ServerView[];
-    countsUnavailable: boolean;
     health: Record<string, string>;
     loading: boolean;
     error: string | null;
@@ -26,7 +25,6 @@ export interface UseServersResult {
 
 export default function useServers(): UseServersResult {
     const [servers, setServers] = useState<ServerView[]>([]);
-    const [countsUnavailable, setCountsUnavailable] = useState(false);
     const [health, setHealth] = useState<Record<string, string>>({});
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -45,7 +43,6 @@ export default function useServers(): UseServersResult {
                 return;
             }
             setServers(resp.servers);
-            setCountsUnavailable(Boolean(resp.counts_unavailable));
             setError(null);
         } catch (e) {
             if (requestID !== refreshRequestID.current) {
@@ -88,5 +85,5 @@ export default function useServers(): UseServersResult {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    return {servers, countsUnavailable, health, loading, error, refresh, refreshHealth};
+    return {servers, health, loading, error, refresh, refreshHealth};
 }

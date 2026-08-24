@@ -1048,8 +1048,6 @@ func TestServiceNeverReachesHostForReads(t *testing.T) {
 	require.NoError(t, err)
 	_, err = svc.Get("nope")
 	require.Error(t, err) // ErrNotRegistered, not a panic
-	_, err = svc.CountMappedChannels()
-	require.NoError(t, err)
 	_, err = svc.Mappings("nope")
 	require.NoError(t, err)
 	_, err = svc.ResolveIdentifier("nope")
@@ -1168,7 +1166,7 @@ func TestRegistrationYAML(t *testing.T) {
 	})
 }
 
-// --- Mappings / CountMappedChannels ---
+// --- Mappings ---
 
 func TestMappings(t *testing.T) {
 	svc, _, kv := newTestService(t)
@@ -1190,11 +1188,6 @@ func TestMappings(t *testing.T) {
 	require.Len(t, mappings, 1)
 	assert.Equal(t, "channel1", mappings[0].ChannelID)
 	assert.Equal(t, "!room1:example.com", mappings[0].RoomID)
-
-	counts, err := svc.CountMappedChannels()
-	require.NoError(t, err)
-	assert.Equal(t, 1, counts["server1"])
-	assert.Equal(t, 2, counts["other-server"])
 }
 
 // --- Diagnose ---

@@ -87,45 +87,42 @@ func (p *Plugin) writeServersError(w http.ResponseWriter, action string, err err
 // a token - has_as_token/has_hs_token let the edit form show "configured"
 // placeholders without leaking values.
 type ServerView struct {
-	ServerID           string `json:"server_id"`
-	ServerURL          string `json:"server_url"`
-	ServerName         string `json:"server_name"`
-	Endpoint           string `json:"endpoint"`
-	EventDomain        string `json:"event_domain"`
-	UsernamePrefix     string `json:"username_prefix"`
-	Enabled            bool   `json:"enabled"`
-	RemoteID           string `json:"remote_id"`
-	IsMigrated         bool   `json:"is_migrated"`
-	HasASToken         bool   `json:"has_as_token"`
-	HasHSToken         bool   `json:"has_hs_token"`
-	MappedChannelCount *int   `json:"mapped_channel_count"`
+	ServerID       string `json:"server_id"`
+	ServerURL      string `json:"server_url"`
+	ServerName     string `json:"server_name"`
+	Endpoint       string `json:"endpoint"`
+	EventDomain    string `json:"event_domain"`
+	UsernamePrefix string `json:"username_prefix"`
+	Enabled        bool   `json:"enabled"`
+	RemoteID       string `json:"remote_id"`
+	IsMigrated     bool   `json:"is_migrated"`
+	HasASToken     bool   `json:"has_as_token"`
+	HasHSToken     bool   `json:"has_hs_token"`
 }
 
-// newServerView builds a ServerView from a registry entry. mappedChannelCount is
-// nil when the keyspace scan that produces it failed - the UI must render
-// "unavailable", never 0, since 0 reads as "nothing is bridged" and invites an
-// admin to remove a live server.
-func newServerView(s kvstore.ServerConfig, mappedChannelCount *int) ServerView {
+// newServerView builds a ServerView from a registry entry. Deliberately carries no
+// mapped-channel count: producing one means paging the whole channel-mapping keyspace
+// plus a Get per mapping, which is not affordable on a list render. The per-server
+// mappings endpoint reports its own total_count, lazily, when a row is expanded.
+func newServerView(s kvstore.ServerConfig) ServerView {
 	return ServerView{
-		ServerID:           s.ServerID,
-		ServerURL:          s.ServerURL,
-		ServerName:         s.ServerName,
-		Endpoint:           s.Endpoint,
-		EventDomain:        s.EventDomain,
-		UsernamePrefix:     s.UsernamePrefix,
-		Enabled:            s.Enabled,
-		RemoteID:           s.RemoteID,
-		IsMigrated:         s.SiteURL == "",
-		HasASToken:         s.ASToken != "",
-		HasHSToken:         s.HSToken != "",
-		MappedChannelCount: mappedChannelCount,
+		ServerID:       s.ServerID,
+		ServerURL:      s.ServerURL,
+		ServerName:     s.ServerName,
+		Endpoint:       s.Endpoint,
+		EventDomain:    s.EventDomain,
+		UsernamePrefix: s.UsernamePrefix,
+		Enabled:        s.Enabled,
+		RemoteID:       s.RemoteID,
+		IsMigrated:     s.SiteURL == "",
+		HasASToken:     s.ASToken != "",
+		HasHSToken:     s.HSToken != "",
 	}
 }
 
 // listServersResponse is GET /servers's body.
 type listServersResponse struct {
-	Servers           []ServerView `json:"servers"`
-	CountsUnavailable bool         `json:"counts_unavailable,omitempty"`
+	Servers []ServerView `json:"servers"`
 }
 
 // handleListServers implements `GET /servers`. Reads a fresh KV snapshot via
@@ -138,19 +135,9 @@ func (p *Plugin) handleListServers(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	counts, countsErr := p.servers.CountMappedChannels()
-
 	resp := listServersResponse{Servers: make([]ServerView, 0, len(list))}
-	if countsErr != nil {
-		resp.CountsUnavailable = true
-	}
 	for _, s := range list {
-		var countPtr *int
-		if countsErr == nil {
-			count := counts[s.ServerID]
-			countPtr = &count
-		}
-		resp.Servers = append(resp.Servers, newServerView(s, countPtr))
+		resp.Servers = append(resp.Servers, newServerView(s))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -169,19 +156,6 @@ func (p *Plugin) handleServersHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]map[string]string{"health": p.servers.ProbeHealth(list)})
-}
-
-// serverViewWithCount builds a ServerView carrying s's current mapped-channel
-// count, for the mutating handlers' response bodies. A fresh scan on every
-// mutation is an acceptable cost here - unlike GET /servers, this never runs on a
-// list render or any other hot/repeated path.
-func (p *Plugin) serverViewWithCount(s kvstore.ServerConfig) ServerView {
-	counts, err := p.servers.CountMappedChannels()
-	if err != nil {
-		return newServerView(s, nil)
-	}
-	count := counts[s.ServerID]
-	return newServerView(s, &count)
 }
 
 // actingUserID reads the caller's Mattermost user ID for the structured log line
@@ -224,11 +198,8 @@ func (p *Plugin) handleAddServer(w http.ResponseWriter, r *http.Request) {
 
 	p.logger.LogInfo("Matrix server added via System Console", "server_id", created.ServerID, "user_id", actingUserID(r))
 
-	// A just-created server cannot yet have any channel mapped to it - no scan
-	// needed to know the count is 0.
-	zero := 0
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"server":   newServerView(created, &zero),
+		"server":   newServerView(created),
 		"warnings": []string{},
 	})
 }
@@ -273,7 +244,7 @@ func (p *Plugin) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
 		warnings = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"server":   p.serverViewWithCount(updated),
+		"server":   newServerView(updated),
 		"warnings": warnings,
 	})
 }
@@ -332,7 +303,7 @@ func (p *Plugin) handleSetServerEnabled(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"server": p.serverViewWithCount(updated)})
+	writeJSON(w, http.StatusOK, map[string]any{"server": newServerView(updated)})
 }
 
 // handleTestServer implements `POST /servers/{server_id}/test`. A POST, not a

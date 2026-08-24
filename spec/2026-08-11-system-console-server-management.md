@@ -78,7 +78,7 @@ caller of the same reads:
 | `p.SetServerEnabled` (`plugin.go:555`)                                         | **Move** → `Service.SetEnabled`.                                  |
 | `normalizeServerEndpoint`, `eventDomainFromEndpoint`, `p.resolveServerName`   | **Move**; `ResolveServerName` stays exported (the migration needs the same function — backend §3.8). |
 | `Handler.probeServerHealth` (`command.go:413`)                                | **Move** → `Service.ProbeHealth`.                                 |
-| `Handler.countMappedChannelsPerServer` (`command.go:387`)                      | **Move** → `Service.CountMappedChannels`.                         |
+| `Handler.countMappedChannelsPerServer` (`command.go:387`)                      | **Delete.** No surface reports a mapped-channel count any more — see §3.5. |
 | `Handler.resolveServerIDArg` (`command.go:318`)                                | **Move** → `Service.ResolveIdentifier`.                           |
 | `Handler.testServerConnection` (`command.go:748`)                              | **Move** its checks as structured data → `Service.Diagnose`.       |
 | Registration YAML in `executeServerRegistrationCommand` (`command.go:1133`)    | **Move** → `Service.RegistrationYAML`; must never be duplicated.  |
@@ -154,7 +154,6 @@ func (s *Service) Seed(entry kvstore.ServerConfig) (string, error) // migration 
 
 // Derived views
 func (s *Service) ProbeHealth(servers []kvstore.ServerConfig) map[string]string
-func (s *Service) CountMappedChannels() (map[string]int, error)
 func (s *Service) Mappings(serverID string) ([]ChannelMapping, error) // {ChannelID, RoomID} from KV
 func (s *Service) Diagnose(serverID string) Diagnostics
 func (s *Service) RegistrationYAML(serverID string) (filename, content string, err error)
@@ -265,7 +264,7 @@ the package and stay `var`s so tests can shorten them.
 Servers() *servers.Service
 ```
 
-`Handler`'s `probeServerHealth`, `countMappedChannelsPerServer`, `resolveServerIDArg`, the
+`Handler`'s `probeServerHealth`, `resolveServerIDArg`, the
 registration YAML literal and `testServerConnection`'s check sequence are deleted, replaced by
 calls through `c.plugin.Servers()`. The markdown formatting stays in `command` — the service
 returns data, the command renders it, the API marshals it. Regenerate `server/command/mocks`.
@@ -391,7 +390,7 @@ debug; note it in the client module's comment.
 
 | Method   | Path                                        | Body                | Success                                        |
 | -------- | ------------------------------------------- | ------------------- | ---------------------------------------------- |
-| `GET`    | `/servers`                                  | —                   | 200 `{servers: [ServerView], counts_unavailable?: bool}` |
+| `GET`    | `/servers`                                  | —                   | 200 `{servers: [ServerView]}`                  |
 | `POST`   | `/servers`                                  | `AddServerRequest`  | 201 `{server: ServerView, warnings: [string]}` |
 | `PATCH`  | `/servers/{server_id}`                      | `UpdateServerRequest` | 200 `{server: ServerView, warnings: [string]}` |
 | `DELETE` | `/servers/{server_id}`                      | —                   | 200 `{server_id, recovery_command}`            |
@@ -420,16 +419,16 @@ recovery command), so the UI renders them verbatim rather than substituting its 
     "remote_id": "xyz…",
     "is_migrated": false,
     "has_as_token": true,
-    "has_hs_token": true,
-    "mapped_channel_count": 3
+    "has_hs_token": true
 }
 ```
 
 - `is_migrated` is `SiteURL == ""`. The console uses it to disable Remove and explain why
   (backend §3.1.1). Do not serialize `SiteURL` itself.
-- `mapped_channel_count` is `null` and the response sets `counts_unavailable: true` when the
-  keyspace scan fails. The UI renders "unavailable", **never 0** — the same rule the commands
-  follow, because 0 reads as "nothing is bridged" and invites an admin to remove a live server.
+- **No mapped-channel count.** Producing one means paging the whole channel-mapping keyspace
+  plus a `Get` per mapping, on every list render — the same cost that got it removed from
+  `/matrix status`, `/matrix server list` and `/matrix server status`. The count is available
+  per server, lazily, as the mappings endpoint's `total_count` when a row is expanded.
 - Tokens are never serialized. `has_as_token` / `has_hs_token` let the edit form show
   "configured" placeholders without leaking values.
 
@@ -475,9 +474,8 @@ tokens** — log nothing from it, not even at debug level.
 - A mapping whose channel no longer exists sets `channel_missing: true` and is still listed —
   otherwise the admin cannot unmap a deleted channel's stale record.
 - This is a **full-keyspace scan per request**, so the UI fetches it only when the admin opens a
-  server's mappings panel, never as part of the list render. `mapped_channel_count` in
-  `GET /servers` costs the same scan once for all servers, which is why the list must not
-  auto-poll (§3.8).
+  server's mappings panel, never as part of the list render, and never on an interval (§3.8).
+  This is the only place a mapped-channel count is available at all, via `total_count`.
 
 `DELETE …/mappings/{channel_id}` delegates to `UnmapChannelFromServer`. Its "channel is not
 mapped to server X" maps to 404 and its missing-client error to 503. Note that this call clears
@@ -602,7 +600,8 @@ falls back to the status text — never to a silent success.
 
 **Views**
 
-1. **Table** — columns: Name (`server_name`), URL, State, Health, Mapped channels, actions
+1. **Table** — columns: Name (`server_name`), URL, State, Health, Channels shared (an expander,
+   not a count — see §3.5), actions
    (Test, Registration, Mappings, Edit, Remove) plus an enable/disable toggle. `server_id` is
    shown in a copyable monospace cell or on the row's detail, because it is the recovery key and
    the argument every slash command takes. Empty state explains how to add the first server and
@@ -705,7 +704,7 @@ following conventional commits.
   `*model.AppError` — the typed-nil trap, which would otherwise make every successful removal
   log a spurious warning.
 - **The service never reaches the platform directly** — a `Service` built with a `Host` whose
-  every method panics still satisfies `List`, `Get`, `CountMappedChannels`, `Mappings` and
+  every method panics still satisfies `List`, `Get`, `Mappings` and
   `ResolveIdentifier`. This is the structural guarantee that keeps the package a leaf.
 - **Registration YAML** — the `url:` line is exactly `<SiteURL>/plugins/<plugin_id>` with **no**
   `_matrix/app/v1` anywhere in the output, over both a plain `SiteURL` and one with a trailing
@@ -728,9 +727,9 @@ following conventional commits.
   route including autocomplete; an unauthenticated request gets 401; an admin passes.
 - **`GET /servers`** — zero servers yields `{"servers": []}` with 200, not an error; tokens are
   absent from the body (assert on the raw JSON, not the struct); `has_as_token`/`has_hs_token`
-  reflect the stored values; `is_migrated` is true exactly for `SiteURL == ""`; a failing
-  keyspace scan yields `mapped_channel_count: null` plus `counts_unavailable: true` rather than
-  zeros or a 500.
+  reflect the stored values; `is_migrated` is true exactly for `SiteURL == ""`; the list renders
+  with **every** keyspace scan failing, which is what pins it to one registry read and no
+  per-server scan.
 - **`POST /servers`** — happy path returns 201 and the created view; duplicate endpoint, name
   conflict and duplicate `server_id` each return 409 with the registry's message; a malformed
   URL and a malformed body return 400; a `server_id` re-adoption is passed through verbatim.
@@ -766,9 +765,9 @@ tests in enzyme.
 - **Client module** — builds URLs from `Client4.getPluginRoute(manifest.id)`; sends
   `Client4.getOptions`-derived headers; throws an `Error` carrying `message` from a non-2xx JSON
   body, and falls back to status text for a non-JSON body.
-- **Table** — renders name/URL/state/health/count; "unavailable" (not 0) when
-  `counts_unavailable`; Remove disabled with an explanation for `is_migrated`; the
-  enable toggle rolls back its optimistic state when the request fails.
+- **Table** — renders name/URL/state/health and the "Channels shared" expander; Remove disabled
+  with an explanation for `is_migrated`; the enable toggle rolls back its optimistic state when
+  the request fails.
 - **Add form** — omits empty optional fields from the request; surfaces a 409 message verbatim.
 - **Edit form** — blank token inputs are **omitted** from the PATCH body (the regression that
   would otherwise clear a token); the `server_name` change is blocked until the confirm is

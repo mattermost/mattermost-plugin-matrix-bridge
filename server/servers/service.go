@@ -679,31 +679,6 @@ func (s *Service) MergeRemoteIDs(remoteIDs map[string]string) error {
 	})
 }
 
-// CountMappedChannels does a single keyspace scan shared by /matrix list, /matrix
-// status, /matrix server list, /matrix server status and GET /servers.
-func (s *Service) CountMappedChannels() (map[string]int, error) {
-	keys, err := kvstore.ListAllKeysWithPrefix(s.kv, kvstore.KeyPrefixChannelMapping, kvstore.DefaultListKeysBatchSize)
-	if err != nil {
-		return nil, err
-	}
-
-	counts := make(map[string]int)
-	for _, key := range keys {
-		data, err := s.kv.Get(key)
-		if err != nil {
-			continue
-		}
-		mappings, err := kvstore.ParseChannelServerMappings(data)
-		if err != nil {
-			continue
-		}
-		for _, m := range mappings {
-			counts[m.ServerID]++
-		}
-	}
-	return counts, nil
-}
-
 // Mappings returns every channel currently bridged to serverID: a single
 // ListAllKeysWithPrefix scan, ParseChannelServerMappings on each value, keeping
 // entries whose ServerID matches serverID. Never indexes [0] - a channel's mapping

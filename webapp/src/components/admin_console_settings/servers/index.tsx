@@ -36,7 +36,7 @@ type ModalState =
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const MatrixServersSection: React.FC<Props> = (_props) => {
-    const {servers, countsUnavailable, health, loading, error, refresh, refreshHealth} = useServers();
+    const {servers, health, loading, error, refresh, refreshHealth} = useServers();
     const [modal, setModal] = useState<ModalState>({type: 'none'});
     const [expandedServerId, setExpandedServerId] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
@@ -97,7 +97,6 @@ const MatrixServersSection: React.FC<Props> = (_props) => {
 
                 <ServerTable
                     servers={servers}
-                    countsUnavailable={countsUnavailable}
                     health={health}
                     loading={loading}
                     expandedServerId={expandedServerId}

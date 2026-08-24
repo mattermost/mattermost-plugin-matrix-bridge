@@ -81,8 +81,8 @@ func TestSystemAdminRequired(t *testing.T) {
 }
 
 // listKeysErrorKVStore fails ListKeys (and so any keyspace scan built on it, e.g.
-// Servers().CountMappedChannels) while leaving Get/Set untouched, so GET /servers
-// can be tested with a working registry read but a failing count.
+// Servers().Mappings) while leaving Get/Set untouched, so a handler can be tested with
+// a working registry read but a failing keyspace scan.
 type listKeysErrorKVStore struct{ kvstore.KVStore }
 
 func (e *listKeysErrorKVStore) ListKeys(int, int) ([]string, error) {
@@ -124,8 +124,6 @@ func TestHandleListServers(t *testing.T) {
 		assert.True(t, body.Servers[0].HasASToken)
 		assert.True(t, body.Servers[0].HasHSToken)
 		assert.False(t, body.Servers[0].IsMigrated)
-		require.NotNil(t, body.Servers[0].MappedChannelCount)
-		assert.Equal(t, 0, *body.Servers[0].MappedChannelCount)
 	})
 
 	t.Run("is_migrated is true exactly for SiteURL empty", func(t *testing.T) {
@@ -145,7 +143,10 @@ func TestHandleListServers(t *testing.T) {
 		assert.True(t, body.Servers[0].IsMigrated)
 	})
 
-	t.Run("a failing keyspace scan yields mapped_channel_count null and counts_unavailable true, not zeros or a 500", func(t *testing.T) {
+	// The list render must cost one registry read and nothing else. Failing every
+	// keyspace scan is what makes that a real assertion: a per-server scan reintroduced
+	// here (a mapped-channel count, say) would surface below as a 500 rather than a list.
+	t.Run("renders without any keyspace scan", func(t *testing.T) {
 		plugin := newTestPluginForAPI(t)
 		entry := kvstore.ServerConfig{ServerID: "s1", ServerName: "s1.example.com"}
 		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{entry})
@@ -162,9 +163,8 @@ func TestHandleListServers(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code)
 		var body listServersResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		assert.True(t, body.CountsUnavailable)
 		require.Len(t, body.Servers, 1)
-		assert.Nil(t, body.Servers[0].MappedChannelCount)
+		assert.Equal(t, "s1", body.Servers[0].ServerID)
 	})
 }
 
@@ -256,8 +256,6 @@ func TestHandleAddServer(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		assert.NotEmpty(t, body.Server.ServerID)
 		assert.Equal(t, "a.example.com", body.Server.ServerName)
-		assert.NotNil(t, body.Server.MappedChannelCount)
-		assert.Equal(t, 0, *body.Server.MappedChannelCount)
 		assert.Empty(t, body.Warnings)
 	})
 

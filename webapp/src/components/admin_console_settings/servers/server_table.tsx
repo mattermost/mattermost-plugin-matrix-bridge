@@ -4,13 +4,12 @@
 import React from 'react';
 
 import ServerRow from './server_row';
-import {emptyStateStyle, warningBannerStyle} from './styles';
+import {emptyStateStyle} from './styles';
 
 import type {ServerView} from '@/types/matrix';
 
 interface Props {
     servers: ServerView[];
-    countsUnavailable: boolean;
     health: Record<string, string>;
     loading: boolean;
     expandedServerId: string | null;
@@ -24,7 +23,6 @@ interface Props {
 
 const ServerTable: React.FC<Props> = ({
     servers,
-    countsUnavailable,
     health,
     loading,
     expandedServerId,
@@ -60,14 +58,6 @@ const ServerTable: React.FC<Props> = ({
 
     return (
         <div>
-            {countsUnavailable && (
-                <div
-                    className='help-text'
-                    style={warningBannerStyle}
-                >
-                    {'Mapped-channel counts are temporarily unavailable; they are shown as "unavailable" below rather than 0.'}
-                </div>
-            )}
             {servers.map((server) => (
                 <ServerRow
                     key={server.server_id}

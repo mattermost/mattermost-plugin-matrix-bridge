@@ -268,9 +268,3 @@ export const mappingsRoomIDStyle: CSSProperties = {
 export const mappingsEmptyStyle: CSSProperties = {
     padding: '16px 0',
 };
-
-export const warningBannerStyle: CSSProperties = {
-    padding: '12px 24px',
-    color: colors.red,
-    borderBottom: `1px solid ${colors.borderFaint}`,
-};

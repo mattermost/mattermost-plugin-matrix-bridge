@@ -17,15 +17,10 @@ export interface ServerView {
     is_migrated: boolean;
     has_as_token: boolean;
     has_hs_token: boolean;
-
-    // null when the keyspace scan that produces it failed - render "unavailable",
-    // never 0: 0 reads as "nothing is bridged" and invites removing a live server.
-    mapped_channel_count: number | null;
 }
 
 export interface ListServersResponse {
     servers: ServerView[];
-    counts_unavailable?: boolean;
 }
 
 export interface AddServerRequest {
