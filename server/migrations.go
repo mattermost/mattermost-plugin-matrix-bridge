@@ -136,17 +136,42 @@ const serverIDLength = 26
 // Mattermost user ID (itself a bare 26-character alphanumeric ID with no underscore).
 func isNamespacedKey(key, prefix string) bool {
 	rest := strings.TrimPrefix(key, prefix)
-	if len(rest) <= serverIDLength || rest[serverIDLength] != '_' {
+	return hasAlphanumericIDSegment(rest)
+}
+
+// hasAlphanumericIDSegment reports whether s starts with a 26-character alphanumeric ID
+// (the shape of both a ServerID and a Mattermost user ID) followed by '_'.
+func hasAlphanumericIDSegment(s string) bool {
+	if len(s) <= serverIDLength || s[serverIDLength] != '_' {
 		return false
 	}
 	for i := range serverIDLength {
-		c := rest[i]
+		c := s[i]
 		isAlphanumeric := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 		if !isAlphanumeric {
 			return false
 		}
 	}
 	return true
+}
+
+// isNamespacedGhostRoomKey reports whether a ghost_room_ key is already in the v3
+// ghost_room_<serverID>_<mattermostUserID>_<roomID> shape, as opposed to the legacy
+// ghost_room_<mattermostUserID>_<roomID> shape. Both shapes begin with a 26-character
+// alphanumeric ID followed by '_' (a Mattermost user ID is exactly as long as a
+// ServerID), so isNamespacedKey's single-segment check can't tell them apart here the
+// way it can for the other six namespaced prefixes, whose legacy shape's next byte is a
+// non-alphanumeric Matrix sigil ('@', '!', '#', or '$') rather than another ID. The
+// disambiguator: a Matrix room ID/alias always starts with that kind of sigil too, so
+// in the legacy shape the byte right after the first ID+'_' begins the room identifier
+// (non-alphanumeric), while in the v3 shape it begins a *second* alphanumeric-ID+'_'
+// segment (the mattermostUserID) ahead of the room identifier.
+func isNamespacedGhostRoomKey(key, prefix string) bool {
+	rest := strings.TrimPrefix(key, prefix)
+	if !hasAlphanumericIDSegment(rest) {
+		return false
+	}
+	return hasAlphanumericIDSegment(rest[serverIDLength+1:])
 }
 
 // migrateUserMappingsWithResults creates reverse mappings for existing user mappings, returning results.
@@ -511,7 +536,10 @@ func (p *Plugin) legacyMatrixClientForMigration() *matrix.Client {
 //   - 1 registered server -> that one (an install that has already run AddServer/
 //     server add, or a previous partial v3 run that materialized the legacy entry).
 //   - 0 -> materializeServerFromLegacyConfig(), which returns "" on a genuinely fresh
-//     install with no legacy configuration - not an error.
+//     install with no legacy configuration - not an error, UNLESS legacy un-namespaced
+//     KV records still exist with no server left to own them (e.g. the legacy config
+//     was cleared out from under existing data): that case is a hard error too, to avoid
+//     silently stranding those records forever once the version marker advances.
 //   - >=2 -> a hard error. Migrating would rekey one server's records into another's
 //     namespace, which is exactly the corruption this function exists to prevent.
 //
@@ -526,10 +554,101 @@ func (p *Plugin) resolveMigrationServerID() (string, error) {
 	case 1:
 		return servers[0].ServerID, nil
 	case 0:
-		return p.materializeServerFromLegacyConfig()
+		serverID, err := p.materializeServerFromLegacyConfig()
+		if err != nil {
+			return "", err
+		}
+		if serverID != "" {
+			return serverID, nil
+		}
+
+		hasLegacyRecords, err := p.hasUnmigratedV3Records()
+		if err != nil {
+			return "", errors.Wrap(err, "failed to check for legacy KV records before treating this as a fresh install")
+		}
+		if hasLegacyRecords {
+			return "", errors.New("legacy Matrix KV records exist but no Matrix server could be resolved to own them; the plugin will not activate until this is resolved - restore the legacy plugin configuration or register the correct server, then retry")
+		}
+		return "", nil
 	default:
 		return "", errors.New("2 or more Matrix servers are already registered; the v3 migration refuses to run to avoid rekeying one server's records into another's namespace")
 	}
+}
+
+// hasUnmigratedV3Records reports whether any KV record still needs the v3 migration:
+// a key under one of the seven namespaced prefixes not yet in the <prefix><serverID>_<id>
+// shape, or a channel_mapping_ value not yet in the []ChannelServerMapping JSON shape.
+// Used by resolveMigrationServerID to distinguish a genuinely empty/fresh KV store (safe
+// to treat serverID == "" as a no-op) from one that still has legacy records but no
+// resolvable owning server (must not silently strand them).
+//
+// ghost_room_ needs its own shape check (isNamespacedGhostRoomKey) rather than the
+// generic isNamespacedKey: see that function's doc comment for why.
+func (p *Plugin) hasUnmigratedV3Records() (bool, error) {
+	prefixes := append(append([]string{}, kvstore.NamespacedKeyPrefixes...), kvstore.KeyPrefixChannelMapping)
+	keysByPrefix, err := kvstore.ListAllKeysByPrefix(p.kvstore, MigrationBatchSize, prefixes...)
+	if err != nil {
+		return false, errors.Wrap(err, "failed to enumerate KV prefixes")
+	}
+
+	for _, prefix := range kvstore.NamespacedKeyPrefixes {
+		for _, key := range keysByPrefix[prefix] {
+			var namespaced bool
+			if prefix == kvstore.KeyPrefixGhostRoom {
+				namespaced = isNamespacedGhostRoomKey(key, prefix)
+			} else {
+				namespaced = isNamespacedKey(key, prefix)
+			}
+			if !namespaced {
+				return true, nil
+			}
+		}
+	}
+
+	for _, key := range keysByPrefix[kvstore.KeyPrefixChannelMapping] {
+		value, err := p.kvstore.Get(key)
+		if err != nil {
+			return false, errors.Wrapf(err, "failed to read channel mapping %q", key)
+		}
+		if classifyChannelMappingForV3(value) == channelMappingNeedsConversion {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// channelMappingConversionStatus classifies a channel_mapping_ value for the v3
+// migration.
+type channelMappingConversionStatus int
+
+const (
+	// channelMappingAlreadyV3 covers both an empty value (unmapped, not "bare room
+	// ID") and one that already parses as the v3 []ChannelServerMapping JSON shape.
+	channelMappingAlreadyV3 channelMappingConversionStatus = iota
+	// channelMappingNeedsConversion is a legacy bare room identifier awaiting
+	// conversion to the v3 shape.
+	channelMappingNeedsConversion
+	// channelMappingUnrecognized is neither valid v3 JSON nor a plausible room
+	// identifier - convertChannelMappingsToVersion3 logs a warning and skips it
+	// rather than treating it as a blocking legacy record.
+	channelMappingUnrecognized
+)
+
+// classifyChannelMappingForV3 is the single source of truth both
+// convertChannelMappingsToVersion3 and hasUnmigratedV3Records use to decide what a
+// channel_mapping_ value is, so the two can't drift out of sync with each other.
+func classifyChannelMappingForV3(value []byte) channelMappingConversionStatus {
+	if len(value) == 0 {
+		return channelMappingAlreadyV3
+	}
+	if _, err := kvstore.ParseChannelServerMappings(value); err == nil {
+		return channelMappingAlreadyV3
+	}
+	if kvstore.IsPlausibleRoomIdentifier(string(value)) {
+		return channelMappingNeedsConversion
+	}
+	return channelMappingUnrecognized
 }
 
 // runMigrationToVersion3WithResults migrates the pre-v3 un-namespaced KV layout to the
@@ -616,24 +735,17 @@ func (p *Plugin) convertChannelMappingsToVersion3(serverID string) error {
 		if err != nil {
 			return errors.Wrapf(err, "failed to read channel mapping %q", key)
 		}
-		if len(value) == 0 {
-			continue
-		}
 
-		// A successful parse means this value is already in the new shape (a
-		// zero-length array or null both mean "unmapped", not "bare room ID") -
-		// skip it. This is what makes the conversion idempotent.
-		if _, err := kvstore.ParseChannelServerMappings(value); err == nil {
+		switch classifyChannelMappingForV3(value) {
+		case channelMappingAlreadyV3:
+			continue // already in the new shape or unmapped - this is what makes the conversion idempotent
+		case channelMappingUnrecognized:
+			p.logger.LogWarn("Skipping channel mapping with a value that is neither valid JSON nor a plausible room identifier",
+				"key", key, "value", string(value))
 			continue
 		}
 
 		roomIdentifier := string(value)
-		if !kvstore.IsPlausibleRoomIdentifier(roomIdentifier) {
-			p.logger.LogWarn("Skipping channel mapping with a value that is neither valid JSON nor a plausible room identifier",
-				"key", key, "value", roomIdentifier)
-			continue
-		}
-
 		newValue, err := kvstore.BuildSingleChannelMapping(serverID, roomIdentifier)
 		if err != nil {
 			return errors.Wrapf(err, "failed to build converted channel mapping for %q", key)
