@@ -23,7 +23,7 @@ var ErrChannelAlreadyMapped = kvstore.ErrChannelAlreadyMapped
 // (Matrix-initiated DM creation, outbound DM auto-creation) share the same CAS +
 // policy logic instead of duplicating it.
 type ChannelMapper interface {
-	SetChannelMapping(channelID, serverID, roomID string) ([]kvstore.ChannelServerMapping, error)
+	SetChannelMapping(channelID string, entry kvstore.ChannelServerMapping) ([]kvstore.ChannelServerMapping, error)
 }
 
 // SetChannelMapping upserts serverID's entry for channelID via compare-and-set. The
@@ -39,7 +39,8 @@ type ChannelMapper interface {
 //   - Entries for servers no longer in the registry are stale and do not count toward
 //     the limit; they are dropped in the same CAS write. Re-adopting that ServerID later
 //     makes the entry live again with no re-mapping needed.
-func (p *Plugin) SetChannelMapping(channelID, serverID, roomID string) ([]kvstore.ChannelServerMapping, error) {
+func (p *Plugin) SetChannelMapping(channelID string, entry kvstore.ChannelServerMapping) ([]kvstore.ChannelServerMapping, error) {
+	serverID := entry.ServerID
 	// Read the live registry once, before entering the CAS callback, and close over the
 	// result: valueFunc may run more than once on retry and must stay a pure function of
 	// the mapping slice it is given (no network/plugin-API calls inside it).
@@ -76,7 +77,7 @@ func (p *Plugin) SetChannelMapping(channelID, serverID, roomID string) ([]kvstor
 			return nil, ErrChannelAlreadyMapped
 		}
 
-		updated := kvstore.UpsertChannelServerMapping(live, serverID, roomID)
+		updated := kvstore.UpsertChannelServerMapping(live, entry)
 		result = updated
 		return kvstore.MarshalChannelServerMappings(updated)
 	})
@@ -118,8 +119,9 @@ func (p *Plugin) MapChannelToServer(serverID, channelID, matrixRoomIdentifier st
 // the Matrix room state is cleared first (if that fails, the whole operation aborts,
 // or sync messages would keep flowing to a channel Mattermost no longer considers
 // mapped); then the channel_mapping_ entry is removed (deleting the key rather than
-// storing an empty array, once no server remains mapped); then both room_mapping_
-// reverse keys; then that server's shared-channels remote is uninvited.
+// storing an empty array, once no server remains mapped); then every room_mapping_
+// reverse key the mapping created - the room ID always, plus the alias when the mapping
+// was created from one; then that server's shared-channels remote is uninvited.
 //
 // A corrupt (unparseable) mapping value is cleared with an explanatory error rather
 // than reported as "not mapped".
@@ -143,10 +145,11 @@ func (p *Plugin) UnmapChannelFromServer(serverID, channelID string) error {
 		return errors.Wrap(err, "channel mapping was corrupt and has been cleared; nothing to unmap")
 	}
 
-	roomID := kvstore.RoomIDForServer(mappings, serverID)
-	if roomID == "" {
+	mapping, ok := kvstore.ChannelMappingForServer(mappings, serverID)
+	if !ok || mapping.RoomID == "" {
 		return errors.Errorf("channel is not mapped to server %s", serverID)
 	}
+	roomID := mapping.RoomID
 
 	if err := client.RemoveMattermostChannelID(roomID); err != nil {
 		return errors.Wrap(err, "failed to clear Matrix room state; aborting unmap so sync does not continue")
@@ -158,6 +161,15 @@ func (p *Plugin) UnmapChannelFromServer(serverID, channelID string) error {
 
 	if err := p.kvstore.Delete(kvstore.BuildRoomMappingKey(serverID, roomID)); err != nil {
 		p.logger.LogWarn("Failed to delete reverse room mapping", "server_id", serverID, "room_id", roomID, "error", err)
+	}
+
+	// setChannelRoomMapping writes a second reverse key when the mapping was created
+	// from an alias. Nothing else deletes it, and the room ID cannot be reversed back
+	// into the alias, so leaving it behind strands the key permanently.
+	if mapping.Alias != "" {
+		if err := p.kvstore.Delete(kvstore.BuildRoomMappingKey(serverID, mapping.Alias)); err != nil {
+			p.logger.LogWarn("Failed to delete reverse alias mapping", "server_id", serverID, "room_alias", mapping.Alias, "error", err)
+		}
 	}
 
 	remoteID := p.remoteIDForServer(serverID)

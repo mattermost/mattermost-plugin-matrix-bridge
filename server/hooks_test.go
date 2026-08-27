@@ -390,8 +390,8 @@ func TestUserHasJoinedChannelPerServerEnablement(t *testing.T) {
 	require.NoError(t, plugin.kvstore.Set(kvstore.BuildGhostUserKey(serverIDB, userID), []byte("@_mattermost_"+userID+":b.example.com")))
 
 	channelID := model.NewId()
-	mappings := kvstore.UpsertChannelServerMapping(nil, serverIDA, "!room:a.example.com")
-	mappings = kvstore.UpsertChannelServerMapping(mappings, serverIDB, "!room:b.example.com")
+	mappings := kvstore.UpsertChannelServerMapping(nil, kvstore.ChannelServerMapping{ServerID: serverIDA, RoomID: "!room:a.example.com"})
+	mappings = kvstore.UpsertChannelServerMapping(mappings, kvstore.ChannelServerMapping{ServerID: serverIDB, RoomID: "!room:b.example.com"})
 	mappingData, err := kvstore.MarshalChannelServerMappings(mappings)
 	require.NoError(t, err)
 	require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingData))

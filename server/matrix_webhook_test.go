@@ -373,7 +373,7 @@ func TestHandleMatrixTransactionPermanentFailure(t *testing.T) {
 	// The DM channel already belongs to another live server, so the mapping write at the
 	// end of createDMChannelForGhostUser returns ErrChannelAlreadyMapped - permanently.
 	otherServerID, _ := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", client)
-	_, err := plugin.SetChannelMapping(dmChannelID, otherServerID, "!other:b.example.com")
+	_, err := plugin.SetChannelMapping(dmChannelID, kvstore.ChannelServerMapping{ServerID: otherServerID, RoomID: "!other:b.example.com"})
 	require.NoError(t, err)
 
 	api.On("GetUser", mattermostUserID).Return(&model.User{Id: mattermostUserID, Username: "owner"}, nil).Maybe()

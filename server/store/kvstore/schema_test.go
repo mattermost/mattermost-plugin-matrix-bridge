@@ -101,7 +101,7 @@ func twoEntryMapping() []ChannelServerMapping {
 func TestUpsertChannelServerMapping(t *testing.T) {
 	t.Run("appends a new server without disturbing others", func(t *testing.T) {
 		single := []ChannelServerMapping{{ServerID: "serverA", RoomID: "!roomA:example.com"}}
-		result := UpsertChannelServerMapping(single, "serverB", "!roomB:example.com")
+		result := UpsertChannelServerMapping(single, ChannelServerMapping{ServerID: "serverB", RoomID: "!roomB:example.com"})
 
 		require.Len(t, result, 2)
 		assert.Equal(t, "!roomA:example.com", RoomIDForServer(result, "serverA"))
@@ -109,7 +109,7 @@ func TestUpsertChannelServerMapping(t *testing.T) {
 	})
 
 	t.Run("overwrites one server's room while preserving the other's, in a two-entry array", func(t *testing.T) {
-		result := UpsertChannelServerMapping(twoEntryMapping(), "serverA", "!newRoomA:example.com")
+		result := UpsertChannelServerMapping(twoEntryMapping(), ChannelServerMapping{ServerID: "serverA", RoomID: "!newRoomA:example.com"})
 
 		require.Len(t, result, 2)
 		assert.Equal(t, "!newRoomA:example.com", RoomIDForServer(result, "serverA"))
@@ -117,8 +117,8 @@ func TestUpsertChannelServerMapping(t *testing.T) {
 	})
 
 	t.Run("upserting the same server twice does not duplicate it", func(t *testing.T) {
-		result := UpsertChannelServerMapping(nil, "serverA", "!room1:example.com")
-		result = UpsertChannelServerMapping(result, "serverA", "!room2:example.com")
+		result := UpsertChannelServerMapping(nil, ChannelServerMapping{ServerID: "serverA", RoomID: "!room1:example.com"})
+		result = UpsertChannelServerMapping(result, ChannelServerMapping{ServerID: "serverA", RoomID: "!room2:example.com"})
 
 		require.Len(t, result, 1)
 		assert.Equal(t, "!room2:example.com", RoomIDForServer(result, "serverA"))
