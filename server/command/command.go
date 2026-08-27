@@ -17,15 +17,6 @@ import (
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// MigrationResult holds the results of a migration operation
-type MigrationResult struct {
-	UserMappingsCreated      int
-	ChannelMappingsCreated   int
-	RoomMappingsCreated      int
-	DMMappingsCreated        int
-	ReverseDMMappingsCreated int
-}
-
 // PluginAccessor defines the interface for plugin functionality needed by command
 // handlers. It is server-scoped: every Matrix operation takes a serverID, since the
 // plugin bridges N homeservers rather than exactly one.
@@ -53,10 +44,6 @@ type PluginAccessor interface {
 	GetPluginAPI() plugin.API
 	GetPluginAPIClient() *pluginapi.Client
 	GetPluginID() string
-
-	// Migration access
-	RunKVStoreMigrations() error
-	RunKVStoreMigrationsWithResults() (*MigrationResult, error)
 }
 
 // ServerAutocompleteURL builds the plugin-relative URL the webapp fetches the registered
@@ -131,7 +118,7 @@ const (
 	matrixCommandTrigger = "matrix"
 
 	// Main command usage
-	matrixCommandUsage = "Usage: /matrix [test|create|map|unmap|list|status|migrate|server] ..."
+	matrixCommandUsage = "Usage: /matrix [test|create|map|unmap|list|status|server] ..."
 
 	// Subcommand descriptions for autocomplete
 	testCommandDesc    = "Test Matrix server connection and configuration (System Admin only)"
@@ -143,7 +130,6 @@ const (
 	unmapCommandHint   = ""
 	listCommandDesc    = "List all channel-to-room mappings (System Admin only)"
 	statusCommandDesc  = "Show bridge status for every configured Matrix server (System Admin only)"
-	migrateCommandDesc = "Reset and re-run KV store migrations to fix missing room mappings (System Admin only)"
 	serverCommandDesc  = "Manage Matrix homeserver registrations (System Admin only)"
 	serverCommandHint  = "[subcommand]"
 	serverCommandUsage = "Usage: /matrix server [list|add|remove|map|unmap|registration|status|test|enable|disable] ..."
@@ -155,7 +141,7 @@ const (
 
 	// Error messages
 	matrixClientNotConfigured = "❌ Matrix client not configured for that server."
-	unknownSubcommandError    = "Unknown subcommand. Use: test, create, map, unmap, list, status, migrate, or server"
+	unknownSubcommandError    = "Unknown subcommand. Use: test, create, map, unmap, list, status, or server"
 
 	// Status messages
 	autoJoinSuccess     = "\n\n✅ **Auto-joined** Matrix room successfully!"
@@ -228,10 +214,6 @@ func NewCommandHandler(plugin PluginAccessor) Command {
 	statusCmd := model.NewAutocompleteData("status", "", statusCommandDesc)
 	statusCmd.RoleID = model.SystemAdminRoleId
 	matrixData.AddCommand(statusCmd)
-
-	migrateCmd := model.NewAutocompleteData("migrate", "", migrateCommandDesc)
-	migrateCmd.RoleID = model.SystemAdminRoleId
-	matrixData.AddCommand(migrateCmd)
 
 	serverCmd := model.NewAutocompleteData("server", serverCommandHint, serverCommandDesc)
 	serverCmd.RoleID = model.SystemAdminRoleId
@@ -857,55 +839,6 @@ func (c *Handler) executeStatusCommand() *model.CommandResponse {
 	return ephemeral(b.String())
 }
 
-func (c *Handler) executeMigrateCommand(_ *model.CommandArgs) *model.CommandResponse {
-	// The v3 migration step refuses to run with 2+ registered servers (it would rekey
-	// one server's records into another's namespace). Check before resetting the
-	// version marker, so a refusal here doesn't leave it reset with no migration having
-	// actually run to fix it back up.
-
-	servers, err := c.plugin.GetManagedServers()
-	if err != nil {
-		return ephemeral(fmt.Sprintf("❌ Failed to load Matrix servers: %v", err))
-	}
-	if len(servers) >= 2 {
-		return ephemeral("❌ `/matrix migrate` refuses to run while 2 or more Matrix servers are registered - it would rekey one server's records into another's namespace.")
-	}
-
-	// Get current version before reset
-	kvstorage := c.plugin.GetKVStore()
-	versionBytes, err := kvstorage.Get(kvstore.KeyStoreVersion)
-	if err != nil {
-		return ephemeral(fmt.Sprintf("❌ Failed to read migration version: %v", err))
-	}
-	currentVersion := "0"
-	if len(versionBytes) > 0 {
-		currentVersion = string(versionBytes)
-	}
-
-	// Reset KV store version to 0 to force re-migration
-	if err := kvstorage.Set(kvstore.KeyStoreVersion, []byte("0")); err != nil {
-		return ephemeral(fmt.Sprintf("❌ Failed to reset migration version: %v", err))
-	}
-
-	migrationResult, err := c.plugin.RunKVStoreMigrationsWithResults()
-	if err != nil {
-		return ephemeral(fmt.Sprintf("❌ Migration failed: %v", err))
-	}
-
-	return ephemeral(fmt.Sprintf("✅ **Migration completed successfully!**\n\n"+
-		"**Migration Results:**\n"+
-		"   • Reset version: %s → %d\n"+
-		"   • User reverse mappings created/updated: %d\n"+
-		"   • Channel reverse mappings created/updated: %d\n"+
-		"   • Room ID mappings created/updated: %d\n"+
-		"   • DM mappings migrated: %d\n"+
-		"   • DM reverse mappings created: %d\n\n"+
-		"Check the plugin logs for detailed migration information.",
-		currentVersion, kvstore.CurrentKVStoreVersion,
-		migrationResult.UserMappingsCreated, migrationResult.ChannelMappingsCreated, migrationResult.RoomMappingsCreated,
-		migrationResult.DMMappingsCreated, migrationResult.ReverseDMMappingsCreated))
-}
-
 // --- /matrix server ... ---
 
 func (c *Handler) requireSystemAdmin(userID string) *model.CommandResponse {
@@ -1325,11 +1258,6 @@ func (c *Handler) executeMatrixCommand(args *model.CommandArgs) *model.CommandRe
 			return resp
 		}
 		return c.executeStatusCommand()
-	case "migrate":
-		if resp := requireArgs(rest, 0, 0, "Usage: /matrix migrate"); resp != nil {
-			return resp
-		}
-		return c.executeMigrateCommand(args)
 	case "server":
 		return c.executeServerGroup(args, rest)
 	default:

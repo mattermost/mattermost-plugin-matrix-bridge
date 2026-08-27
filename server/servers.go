@@ -80,25 +80,19 @@ func normalizeServerEndpoint(rawURL string) (string, error) {
 	return host + ":" + port, nil
 }
 
-// eventDomainFromEndpoint derives the sanitized property-key suffix for a new server
-// from its normalized endpoint (host:port), replacing '.' and ':' with '_'. This differs
-// from the legacy migration's EventDomain, which instead preserves master's portless
-// hostname-only derivation (extractServerDomain) so pre-upgrade posts stay reachable.
+// eventDomainFromEndpoint derives a server's post-property key suffix from its normalized
+// endpoint. The port must stay in - it is what distinguishes two homeservers on one host.
 func eventDomainFromEndpoint(endpoint string) string {
 	return strings.NewReplacer(".", "_", ":", "_").Replace(endpoint)
 }
 
 // resolveServerName resolves the domain that will appear in this homeserver's Matrix
 // IDs. Resolution order, first success wins:
-//  1. configuredName, if non-empty (manual override, or the legacy matrix_server_name
-//     when called from the v3 migration).
+//  1. configuredName, if non-empty (the --server-name override).
 //  2. GET <serverURL>/_matrix/key/v2/server's server_name field (best-effort - any
 //     failure falls through rather than erroring).
 //  3. Hostname(serverURL), which always succeeds for a parseable URL, so this function
 //     never fails to produce a non-empty name for a parseable URL.
-//
-// The same function is used by server add and the v3 migration so ghost recognition
-// stays consistent between the two callers.
 func (p *Plugin) resolveServerName(serverURL, configuredName string) (string, error) {
 	if configuredName != "" {
 		normalized, err := matrix.NormalizeServerName(configuredName)
@@ -273,11 +267,6 @@ func (p *Plugin) warnIfEventDomainMismatch(serverID, newEventDomain string) {
 // remote. It deletes no other KV records: every namespaced key stays exactly where it
 // was, addressed by a ServerID that this command's caller should print as the recovery
 // key for re-adoption via AddServer.
-//
-// Refuses to remove an entry whose SiteURL is empty - that is the migrated legacy
-// server, which resolves to the pre-upgrade plugin_<PluginID> remote and cannot be
-// re-created with the same identity. Disabling it is the supported way to take it out
-// of service.
 func (p *Plugin) RemoveServer(serverID string) (bool, error) {
 	var removed *kvstore.ServerConfig
 
@@ -292,10 +281,6 @@ func (p *Plugin) RemoveServer(serverID string) (bool, error) {
 		if idx == -1 {
 			removed = nil
 			return servers, nil
-		}
-
-		if servers[idx].SiteURL == "" {
-			return nil, errors.New("this server was migrated from the legacy single-server configuration and cannot be removed; use `/matrix server disable` to take it out of service")
 		}
 
 		entry := servers[idx]
@@ -371,95 +356,4 @@ func (p *Plugin) serverDomainForID(serverID string) (string, error) {
 		return "", err
 	}
 	return server.ServerName, nil
-}
-
-// legacyServerConfig mirrors the pre-v3 flat System Console fields. It intentionally
-// keeps the old JSON tags so LoadPluginConfiguration can still populate it from the
-// persisted plugin configuration after those keys are removed from settings_schema -
-// stored configuration values survive removal of their schema entries.
-type legacyServerConfig struct {
-	MatrixServerURL      string `json:"matrix_server_url"`
-	MatrixServerName     string `json:"matrix_server_name"`
-	MatrixASToken        string `json:"matrix_as_token"`
-	MatrixHSToken        string `json:"matrix_hs_token"`
-	MatrixUsernamePrefix string `json:"matrix_username_prefix"`
-	EnableSync           bool   `json:"enable_sync"`
-}
-
-// materializeServerFromLegacyConfig seeds one registry entry from the pre-v3 flat
-// System Console configuration, for installs upgrading from the single-server layout.
-// Returns ("", nil) on a fresh install with no legacy Matrix server URL configured -
-// that is not an error. Idempotent: a no-op when an entry with the legacy endpoint
-// already exists.
-//
-// Deliberately does not call AddServer: this entry needs SiteURL == "" (so it resolves
-// to the pre-upgrade plugin_<PluginID> remote) and an EventDomain derived the way
-// master derived it (portless URL hostname), neither of which is what AddServer
-// produces. Remote registration is also deferred - registerForSharedChannels runs once
-// for every entry immediately after all migrations complete.
-func (p *Plugin) materializeServerFromLegacyConfig() (string, error) {
-	var legacy legacyServerConfig
-	if err := p.API.LoadPluginConfiguration(&legacy); err != nil {
-		return "", errors.Wrap(err, "failed to load legacy plugin configuration")
-	}
-
-	if legacy.MatrixServerURL == "" {
-		return "", nil
-	}
-
-	endpoint, err := normalizeServerEndpoint(legacy.MatrixServerURL)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to normalize legacy Matrix server URL")
-	}
-
-	if servers, err := p.getServers(); err == nil {
-		for _, s := range servers {
-			if s.Endpoint == endpoint {
-				return s.ServerID, nil // already materialized
-			}
-		}
-	}
-
-	serverName, err := p.resolveServerName(legacy.MatrixServerURL, legacy.MatrixServerName)
-	if err != nil {
-		return "", errors.Wrap(err, "failed to resolve legacy server name")
-	}
-
-	usernamePrefix := legacy.MatrixUsernamePrefix
-	if usernamePrefix == "" {
-		usernamePrefix = DefaultMatrixUsernamePrefix
-	}
-
-	serverID := model.NewId()
-	entry := kvstore.ServerConfig{
-		ServerID:       serverID,
-		ServerURL:      legacy.MatrixServerURL,
-		Endpoint:       endpoint,
-		ServerName:     serverName,
-		EventDomain:    extractServerDomain(p.logger, legacy.MatrixServerURL),
-		ASToken:        legacy.MatrixASToken,
-		HSToken:        legacy.MatrixHSToken,
-		UsernamePrefix: usernamePrefix,
-		Enabled:        legacy.EnableSync,
-		SiteURL:        "", // resolves to the pre-upgrade plugin_<PluginID> remote
-	}
-
-	var resultID string
-	err = p.mutateServers(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		for _, s := range current {
-			if s.Endpoint == endpoint {
-				resultID = s.ServerID
-				return current, nil // materialized concurrently
-			}
-		}
-		resultID = serverID
-		result := make([]kvstore.ServerConfig, len(current), len(current)+1)
-		copy(result, current)
-		return append(result, entry), nil
-	})
-	if err != nil {
-		return "", err
-	}
-
-	return resultID, nil
 }

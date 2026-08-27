@@ -71,11 +71,6 @@ func setupPluginForTest() *Plugin {
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 
-	// Migration code paths call LoadPluginConfiguration to check for legacy flat
-	// configuration; default to "none configured" (a fresh install) unless a test
-	// overrides this expectation.
-	api.On("LoadPluginConfiguration", mock.Anything).Return(nil).Maybe()
-
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.logger = &testLogger{}
@@ -438,12 +433,16 @@ func setupBasicMocks(api *plugintest.API, testUserID string) {
 	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 }
 
+func buildSingleChannelMapping(serverID, roomID string) ([]byte, error) {
+	return kvstore.MarshalChannelServerMappings([]kvstore.ChannelServerMapping{{ServerID: serverID, RoomID: roomID}})
+}
+
 // setupTestKVData sets up initial test data in the KV store
 func setupTestKVData(t *testing.T, kv kvstore.KVStore, serverID, testChannelID, testRoomID string) {
 	t.Helper()
 
 	// Set up channel mapping
-	data, err := kvstore.BuildSingleChannelMapping(serverID, testRoomID)
+	data, err := buildSingleChannelMapping(serverID, testRoomID)
 	require.NoError(t, err)
 	require.NoError(t, kv.Set(kvstore.BuildChannelMappingKey(testChannelID), data))
 

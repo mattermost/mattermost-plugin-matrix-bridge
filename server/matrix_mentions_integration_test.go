@@ -96,7 +96,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Mention Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			mappingData, err := kvstore.BuildSingleChannelMapping(setup.ServerID, freshRoomID)
+			mappingData, err := buildSingleChannelMapping(setup.ServerID, freshRoomID)
 			require.NoError(t, err)
 			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData))
 
@@ -302,7 +302,7 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Edge Case Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			mappingData, err := kvstore.BuildSingleChannelMapping(setup.ServerID, freshRoomID)
+			mappingData, err := buildSingleChannelMapping(setup.ServerID, freshRoomID)
 			require.NoError(t, err)
 			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData))
 

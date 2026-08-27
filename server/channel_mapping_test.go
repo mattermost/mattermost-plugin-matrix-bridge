@@ -82,7 +82,7 @@ func TestSetChannelMapping(t *testing.T) {
 		plugin := newTestPluginForChannelMapping(t, "serverB")
 
 		// Seed a stale entry as if serverA were mapped, but serverA is not registered.
-		staleData, err := kvstore.BuildSingleChannelMapping("serverA", "!room:serverA.example.com")
+		staleData, err := buildSingleChannelMapping("serverA", "!room:serverA.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), staleData))
 
@@ -95,7 +95,7 @@ func TestSetChannelMapping(t *testing.T) {
 	t.Run("re-adopting a server ID that has a stale mapping restores the link", func(t *testing.T) {
 		plugin := newTestPluginForChannelMapping(t) // no servers registered yet
 
-		staleData, err := kvstore.BuildSingleChannelMapping("serverA", "!room:serverA.example.com")
+		staleData, err := buildSingleChannelMapping("serverA", "!room:serverA.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), staleData))
 

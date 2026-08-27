@@ -59,7 +59,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -74,7 +74,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		_, remoteIDA := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 		serverIDB, _ := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverIDB, "!room:b.example.com")
+		mappingData, err := buildSingleChannelMapping(serverIDB, "!room:b.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -117,7 +117,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		api.On("GetChannel", "channel1").Return(&model.Channel{Type: model.ChannelTypeDirect}, nil)
 
 		serverIDA, _ := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverIDA, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverIDA, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -146,7 +146,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 
 		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(model.NewId(), "!room:gone.example.com")
+		mappingData, err := buildSingleChannelMapping(model.NewId(), "!room:gone.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -167,7 +167,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		_, remoteIDA := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 		serverIDB, _ := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverIDB, "!room:b.example.com")
+		mappingData, err := buildSingleChannelMapping(serverIDB, "!room:b.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -183,7 +183,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -200,11 +200,11 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		serverIDB, remoteIDB := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
 		require.NoError(t, plugin.SetServerEnabled(serverIDB, false))
 
-		mappingA, err := kvstore.BuildSingleChannelMapping(serverIDA, "!room:a.example.com")
+		mappingA, err := buildSingleChannelMapping(serverIDA, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channelA"), mappingA))
 
-		mappingB, err := kvstore.BuildSingleChannelMapping(serverIDB, "!room:b.example.com")
+		mappingB, err := buildSingleChannelMapping(serverIDB, "!room:b.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channelB"), mappingB))
 
@@ -253,7 +253,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -298,7 +298,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 

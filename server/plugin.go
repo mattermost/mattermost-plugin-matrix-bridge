@@ -552,28 +552,6 @@ func (p *Plugin) SetServerEnabled(serverID string, enabled bool) error {
 	return p.refreshServersAndBroadcast("server_enabled_changed")
 }
 
-// RunKVStoreMigrations exposes migration functionality to command handlers
-func (p *Plugin) RunKVStoreMigrations() error {
-	return p.runKVStoreMigrations()
-}
-
-// RunKVStoreMigrationsWithResults exposes migration functionality to command handlers and returns detailed results
-func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, error) {
-	result, err := p.runKVStoreMigrationsWithResults()
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert from internal MigrationResult to command.MigrationResult
-	return &command.MigrationResult{
-		UserMappingsCreated:      result.UserMappingsCreated,
-		ChannelMappingsCreated:   result.ChannelMappingsCreated,
-		RoomMappingsCreated:      result.RoomMappingsCreated,
-		DMMappingsCreated:        result.DMMappingsCreated,
-		ReverseDMMappingsCreated: result.ReverseDMMappingsCreated,
-	}, nil
-}
-
 // serverIDForSyncMsg resolves the single Matrix server an outbound SyncMsg should
 // target. One shared-channels remote is registered per homeserver and the platform
 // invokes the outbound hooks once per invited remote, so this never fans out - it

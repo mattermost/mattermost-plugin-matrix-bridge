@@ -19,8 +19,9 @@ Backend only. Do not build admin-console UI.
 **In scope**
 
 - KV-backed server registry as the _sole_ source of truth for homeserver connection settings.
-- Removal of the flat per-server System Console fields; a one-time migration seeds the
-  registry from them so existing installs keep working.
+- Removal of the flat per-server System Console fields. **No upgrade path**: the new
+  layout is not backward compatible, a one-time purge clears the old records, and
+  operators re-register their homeservers and re-map their channels (§3.8).
 - **Removal of the global `enable_sync` toggle.** Sync is enabled per server
   (`ServerConfig.Enabled`, `/matrix server enable|disable`). A global off-switch is
   redundant with deactivating the plugin, and with N servers it is actively wrong — it
@@ -130,20 +131,10 @@ enforced:
    is created with a `serverID` whose surviving `matrix_event_post_` records exist but whose
    computed `EventDomain` differs from any in the current registry — this is the one case
    the operator cannot discover any other way.
-3. **`SiteURL`** — see the migrated-entry trap below.
-
-**The migrated entry cannot be re-added.** §3.4 has the legacy-seeded server keep
-`SiteURL == ""` so the platform resolves it to the pre-upgrade `plugin_<PluginID>` remote,
-preserving that install's shared channels and sync cursors. `AddServer` always derives
-`SiteURL` from the endpoint, so re-adding it — even with the right `ServerID` — yields
-`"https://<endpoint>"`, a _different_ remote, and every previously-synced ghost user stays
-attributed to a remote its server no longer owns. `RemoveServer` must therefore **refuse**
-to remove an entry whose `SiteURL == ""`, with a message explaining that this server was
-migrated from the legacy configuration and cannot be re-created. Disabling it
-(`server disable`) is the supported way to take it out of service.
+3. **`SiteURL`** — always `"https://<endpoint>"`; see §3.4.
 
 **Finding an orphaned `ServerID` without the recovery key.** If the operator lost it, it is
-still derivable: scan the seven namespaced prefixes with `ListAllKeysByPrefix` (§3.8),
+still derivable: scan the namespaced prefixes with `ListAllKeysByPrefix` (§3.8),
 collect the distinct `serverID` segments, and subtract the IDs present in `servers`. The
 remainder is exactly the set of orphaned identities. No stored record is needed for this,
 which is why none is kept. Expose it only if it proves necessary — the `remove` response is
@@ -165,7 +156,7 @@ which is the point — the channel↔room links come back with no re-mapping.
 depends on it (`isGhostUser`, §3.5), so a wrong value silently breaks inbound routing and a
 shared value makes two servers' ghosts indistinguishable.
 
-One function resolves it, used by both `server add` and the v3 migration:
+One function resolves it:
 
 ```go
 // server/servers.go
@@ -174,8 +165,7 @@ func (p *Plugin) resolveServerName(serverURL, configuredName string) (string, er
 
 Resolution order, first success wins:
 
-1. **`configuredName`** — `--server-name` on `server add`, or the legacy
-   `matrix_server_name` when the migration calls this (§3.8).
+1. **`configuredName`** — the `--server-name` override on `server add`.
 2. **`GET <serverURL>/_matrix/key/v2/server`** → the `server_name` field of the response.
    Unauthenticated, and an explicit field rather than a domain parsed out of an MXID:
 
@@ -322,9 +312,9 @@ Semantics:
 - Entries for servers no longer in the registry are **stale** and do not count toward
   `maxServersPerChannel`; they are dropped in the same CAS write (§3.1.1). Only live
   entries can block a map.
-- Removing the last entry **deletes the key** rather than storing `[]`: the migration's
-  converter reads a zero-length array as "not yet converted" and would re-map the channel to
-  a literal room ID of `"[]"`.
+- Removing the last entry **deletes the key** rather than storing `[]`, so "unmapped"
+  has exactly one on-disk representation and readers never have to treat an empty array as
+  a special case.
 
 Everything downstream of the write is already per-server and needs no change when the limit
 is lifted: `room_mapping_<serverID>_<room>` keys, ghost/event/reaction namespaces, the
@@ -372,16 +362,15 @@ clobbered; a concurrently-removed server is simply absent and its remote ID is d
 - Derived from the **normalized endpoint** (`"https://" + endpoint`) so servers that share
   a hostname but differ by port get distinct remotes — this matters in dev and tests
   (`localhost:8008` vs `localhost:8009`).
-- The single server seeded by the migration keeps `SiteURL == ""`, which the platform
-  resolves to the legacy `plugin_<PluginID>` remote. This is what preserves an existing
-  install's shared channels and sync cursors across the upgrade. Never overwrite it, and
-  never let `AddServer` re-key an existing entry's `SiteURL`.
+- Always non-empty: every entry comes from `AddServer`. Never let `AddServer` re-key an
+  existing entry's `SiteURL` — the remote it resolves to is what carries that server's sync
+  cursors.
 
 Lifecycle:
 
 | When              | What happens to remotes                                                                                                                                                                                                                                                                                                 |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OnActivate`      | migrations first (so the registry exists), then `registerForSharedChannels()` for every entry, then `initMatrixClients()` — clients must be built _after_ registration so each carries its own `RemoteID`.                                                                                                              |
+| `OnActivate`      | migrations first (the purge must land before anything reads KV), then `registerForSharedChannels()` for every entry, then `initMatrixClients()` — clients must be built _after_ registration so each carries its own `RemoteID`.                                                                                                              |
 | `server add`      | register immediately, so the new server has its own remote (and correct loop attribution) without waiting for a restart. Failure is non-fatal — warn and continue; the next activation retries.                                                                                                                         |
 | `server remove`   | `UnregisterPluginRemoteForSharedChannels(entry.RemoteID)`. Non-fatal: the registry write already happened and is the source of truth. Re-adopting the `ServerID` later re-registers a fresh remote (`SiteURL` is derived from the endpoint, so the platform hands back the same `remoteID` and preserves sync cursors). |
 | `map` a channel   | `ShareChannel` once, then `InviteRemoteToChannel(channelID, remoteIDForServer(serverID), …)` — invite **that server's** remote.                                                                                                                                                                                         |
@@ -563,17 +552,15 @@ nothing survives, while the `map` path only lowercases and replaces spaces/under
 punctuated channel name can still produce an alias the homeserver rejects. Best-effort in
 both cases (a failure is a warning, not an error), so unifying that is a follow-up.
 
-**The migrated entry keeps the legacy key.** Master computes this property as
-`matrix_event_id_<sanitized URL hostname>` (`extractServerDomain`, `matrix_util.go:23-42` —
-`parsedURL.Hostname()`, so no port). Every post an existing install has ever synced carries
-that key. Post properties live on posts, not in KV, so they cannot be migrated by a
-keyspace loop the way §3.8 rekeys KV — rewriting them would mean touching every synced post
-via `UpdatePost`, bumping `UpdateAt` and tripping the very edit-detection the `postTracker`
-exists to suppress (`sync_to_matrix.go:315-330`). So the v3 migration must seed the legacy
-entry's `EventDomain` with **exactly** what master would have computed, and new entries get
-the endpoint-derived value. This is the single reason `EventDomain` is a stored field rather
-than a derivation, and getting it wrong silently breaks edit and delete of every
-pre-upgrade post.
+**Pre-upgrade posts keep a key nothing resolves.** Earlier builds computed this property
+as `matrix_event_id_<sanitized URL hostname>` (portless), and every post such an install
+synced still carries it. Post properties live on posts, not in KV, so the §3.8 purge cannot
+touch them — rewriting them would mean an `UpdatePost` per synced post, bumping `UpdateAt`
+and tripping the very edit-detection the `postTracker` exists to suppress
+(`sync_to_matrix.go:315-330`). Those posts are simply left unlinked, which is the accepted
+cost of the clean break: they stay in place, but edits and deletions no longer propagate.
+`EventDomain` remains a stored rather than derived field so that a server re-added at a
+different endpoint is detectable (§3.1.1).
 
 ### 3.7 Cluster invalidation
 
@@ -591,67 +578,39 @@ func (p *Plugin) OnPluginClusterEvent(_ *plugin.Context, ev model.PluginClusterE
 `initMatrixClients`. A failed publish is non-fatal (single-node installs have no cluster) —
 warn and continue. Activation-time work is exempt: every node runs `OnActivate` itself.
 
-### 3.8 Migration (KV v2 → v3)
+### 3.8 Migration (purge to KV v1)
 
-In `server/migrations.go`, add `runMigrationToVersion3WithResults(serverID string)`:
+The multi-server layout **is** KV version 1. It is not backward compatible with any earlier
+layout — every per-server record gains a `<serverID>_` key segment and every
+`channel_mapping_` value becomes a JSON array — and no attempt is made to translate the old
+layout into it. `server/migrations.go` holds exactly one step:
 
-1. `resolveMigrationServerID()` — the legacy un-namespaced layout has exactly one implicit
-   owner:
-    - 1 registered server → that one;
-    - 0 → `materializeServerFromLegacyConfig()` (below), which returns `""` on a fresh
-      install (not an error);
-    - ≥2 → **hard error**. Migrating would rekey one server's records into another's
-      namespace.
-      Resolve it **once** and pass the same value to the v1 and v3 steps.
-2. `materializeServerFromLegacyConfig()` reads the _old_ flat fields with
-   `p.API.LoadPluginConfiguration(&legacyServerConfig{...})` into a private struct that
-   still carries the old `json` tags (`matrix_server_url`, `matrix_server_name`,
-   `matrix_as_token`, `matrix_hs_token`, `matrix_username_prefix`, `enable_sync`). Stored
-   plugin-config values survive removal of the keys from `settings_schema`, which is what
-   makes this work — **verify this on a real upgrade**, it is the single riskiest
-   assumption in the plan. Seed one entry with a fresh `model.NewId()`, the normalized
-   endpoint, `Enabled` from the legacy `enable_sync` (the field leaves `settings_schema` in
-   §3.10, but its stored value survives that removal — the same mechanism this step already
-   relies on for the URL and tokens, so an install that had sync off stays off after the
-   upgrade), and `SiteURL: ""`. Idempotent: no-op
-   when an entry with that endpoint already exists.
+1. Read `kvstore.KeySchemaVersion` (`kv_schema_version`). Deliberately **not** the earlier
+   builds' `kv_store_version`, which those builds left at `2`: a version-1 baseline reading
+   that marker would conclude the store is already ahead of current and skip the purge. With
+   a distinct key, an unpurged install is indistinguishable from a fresh one — which is
+   exactly how it should be treated. A missing marker means 0; an unparseable one is a hard
+   error rather than a silent 0, which would purge a healthy store.
+2. If the marker is already ≥ `CurrentKVStoreVersion`, return.
+3. `purgeStaleRecords()` — `ListAllKeysByPrefix` over `kvstore.BridgeDataPrefixes` and
+   delete every key, then delete the `kv_store_version` marker. `BridgeDataPrefixes` covers
+   the seven namespaced prefixes, `channel_mapping_`, and the two pre-unification DM
+   prefixes (`dm_mapping_`, `matrix_dm_mapping_`) that no live code reads. The server
+   registry (`KeyServersConfig`) is **not** in that list and is never deleted.
+4. Stamp the marker — only after the purge fully succeeded.
 
-    `ServerName` ← `resolveServerName(legacy matrix_server_url, legacy matrix_server_name)`,
-    the **same function `server add` uses** (§3.1.2). The legacy `matrix_server_name` lands on
-    step 1 when it is set; when it is blank — which is the documented default, the System
-    Console labels the field "(Optional)" and tells admins to leave it empty — it falls through
-    to step 2, and to step 3 if the homeserver is unreachable during the upgrade. Step 3 is
-    `Hostname(matrix_server_url)`, byte-identical to what master derives, so an unreachable
-    homeserver degrades to exact continuity rather than blocking the migration.
+**Why this is safe to run unconditionally.** A fresh install runs the purge too and finds
+nothing, so there is no shape check anywhere that has to tell an old record apart from a
+current one — the entire `isNamespacedKey` / `classifyChannelMappingForV3` problem class
+disappears. It can only ever run before the marker exists, which is before `OnActivate` has
+registered the slash command, so no server can have been added and no channel mapped yet.
 
-    `EventDomain` ← `extractServerDomain(legacy matrix_server_url)` — the sanitized URL
-    hostname, matching master's property key byte for byte (§3.6). This one is **not** shared
-    with `add`, which derives it from the endpoint (`host:port`); the migrated entry must keep
-    master's portless shape or every pre-upgrade post's event ID becomes unreachable.
+**Fail closed.** Any error — scan, delete, or the marker read — returns before the marker is
+stamped, so the purge retries on the next activation. A marker claiming the store is current
+while unreadable records survive is the one state no later run would correct.
 
-    **What the migration does not take from `AddServer`.** Only the name resolution is shared;
-    the migration must not call `AddServer` wholesale, because three of its behaviours are
-    wrong for this entry:
-
-    - `SiteURL` — `AddServer` derives it from the endpoint; this entry needs `""` to resolve to
-      the pre-upgrade `plugin_<PluginID>` remote and keep the install's sync cursors (§3.4).
-    - `EventDomain` — endpoint-derived in `AddServer`, master-derived here, as above.
-    - remote registration — `AddServer` registers immediately, but migrations run _before_
-      `registerForSharedChannels` in the `OnActivate` order (§3.4), which is what lets every
-      entry be registered once, together, after the registry exists.
-
-3. Rekey each namespaced prefix from `<prefix><id>` to `<prefix><serverID>_<id>`
-   (get → set new → delete old). Skip keys already namespaced. Enumerate the full key list
-   _before_ any writes.
-4. Convert each `channel_mapping_` value from a bare room-ID string into a **single-entry
-   `[]ChannelServerMapping` array** (`BuildSingleChannelMapping`). Values that already parse
-   as the new shape are skipped (idempotent) — a successful parse is sufficient, since a
-   zero-length array or `null` means "unmapped", not "bare room ID", and a real bare room ID
-   like `!abc:example.org` is not valid JSON so it still converts. Values that are neither
-   valid JSON nor a plausible room identifier (`isPlausibleRoomIdentifier`: starts with `!`
-   or `#`) are skipped with a warning rather than persisted as a literal unusable room ID.
-5. Any failure returns an error so the version marker is **not** advanced and the migration
-   retries on next activation. A failed `Delete` of a legacy key is the one non-fatal case.
+There is no `/matrix migrate` command: with a single unconditional step and no version
+ladder, there is nothing for an operator to re-run.
 
 **Key enumeration must page the raw keyspace.** `pluginapi`'s `ListKeysWithPrefix` fetches
 an unfiltered page and filters client-side, so a short filtered batch means "few matches in
@@ -663,11 +622,7 @@ func ListAllKeysWithPrefix(store KVStore, prefix string, batchSize int) ([]strin
 func ListAllKeysByPrefix(store KVStore, batchSize int, prefixes ...string) (map[string][]string, error)
 ```
 
-`ListAllKeysByPrefix` does one pass for all eight prefixes instead of eight passes.
-
-`/matrix migrate` re-runs migrations. It must not cross-namespace or delete per-server
-keys, and it must refuse to run when ≥2 servers are registered (same reasoning as
-`resolveMigrationServerID`).
+`ListAllKeysByPrefix` does one pass for all prefixes instead of one pass per prefix.
 
 ### 3.9 Slash commands
 
@@ -676,7 +631,7 @@ keys, and it must refuse to run when ≥2 servers are registered (same reasoning
 ```go
 GetManagedServers() ([]kvstore.ServerConfig, error)
 AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID, serverNameOverride string) (string, error) // §3.1.1, §3.1.2
-RemoveServer(serverID string) (bool, error) // refuses an entry with SiteURL == "" (§3.1.1)
+RemoveServer(serverID string) (bool, error) // §3.1.1
 SetServerEnabled(serverID string, enabled bool) error // §3.11
 GetMatrixClientForServer(serverID string) *matrix.Client
 GetRemoteIDForServer(serverID string) string
@@ -699,13 +654,13 @@ command out in full. Set it for tidiness, but never rely on it for authorization
 | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `server list`                                                                                                     | All entries: display name, `server_id`, URL, username prefix, mapped-channel count, enabled state. Never print tokens.                                                                                                                                                                                                                                                                                                          |
 | `server add <server_url> <as_token> <hs_token> [username_prefix] [--server-id <prior_id>] [--server-name <name>]` | Validate + normalize the URL, reject an endpoint that is live in the registry, resolve `ServerName` via `resolveServerName` and reject the add if it duplicates another entry's (§3.1.2), resolve `EventDomain` from the endpoint (§3.6), mint `model.NewId()` (or re-adopt `--server-id`, §3.1.1), register the shared-channels remote, `refreshServersAndBroadcast`. Report the `server_id` and the discovered `server_name`. |
-| `server remove <server_id>`                                                                                       | Remove the entry, `UnregisterPluginRemoteForSharedChannels`, `refreshServersAndBroadcast`. The server's KV records are **kept** (§3.1.1); the response must print the `server_id` as the recovery key for re-adopting them. **Refuses** an entry with `SiteURL == ""` (the migrated server — it cannot be re-created; use `server disable`).                                                                                    |
+| `server remove <server_id>`                                                                                       | Remove the entry, `UnregisterPluginRemoteForSharedChannels`, `refreshServersAndBroadcast`. The server's KV records are **kept** (§3.1.1); the response must print the `server_id` as the recovery key for re-adopting them.                                                                                    |
 | `server map [server_id] <room_alias\|room_id>`                                                                    | Map the current channel — refuses if already mapped to another server.                                                                                                                                                                                                                                                                                                                                                          |
 | `server unmap [server_id]`                                                                                        | Unmap the current channel for that server.                                                                                                                                                                                                                                                                                                                                                                                      |
 | `server registration [server_id]`                                                                                 | Print the Application Service registration YAML, built server-side from the registry entry (the webapp download is gone). See the `url` rule below — getting it wrong silently kills inbound sync.                                                                                                                                                                                                                               |
 | `server status [server_id]`                                                                                       | Status for one server.                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `server test [server_id]`                                                                                         | Full connection diagnostic for one server: registry entry, client initialized, `TestConnection`, homeserver name/version, and `TestApplicationServicePermissions`. The AS-permission check exists nowhere else, and `/matrix test` cannot reach it once a second server is registered, so this subcommand is required rather than a convenience.                                                                                   |
-| `server enable\|disable <server_id>`                                                                              | **Required, not optional** — flips `Enabled` and refreshes. This is the only supported way to take the migrated server out of service, since `remove` refuses it (§3.1.1).                                                                                                                                                                                                                                                      |
+| `server enable\|disable <server_id>`                                                                              | **Required, not optional** — flips `Enabled` and refreshes. Takes a server out of service without discarding its registry entry, which `remove` would.                                                                                                                                                                                                                                                      |
 
 `[server_id]` may be omitted when exactly one server is registered. `resolveServerIDArg`
 matches by `server_id` first, then by `ServerName`, then by URL host.
@@ -739,7 +694,7 @@ func requireArgs(rest []string, minArgs, maxArgs int, usage string) *model.Comma
 
 Extra positionals must **not** be silently dropped: a stray word would otherwise change
 which server a command acted on. This applies to the zero-argument subcommands too
-(`server list`, `/matrix list|status|unmap|migrate|test`). `optionalServerIDArg` (0–1, for
+(`server list`, `/matrix list|status|unmap|test`). `optionalServerIDArg` (0–1, for
 `server unmap|registration|status|test`) is built on the same helper. `/matrix create` is the
 one exception — its room name is deliberately variadic, so it validates its own arguments.
 
@@ -840,12 +795,11 @@ finish with a commit following the conventional commits notation.
 
 1. **kvstore foundation** — `SetAtomicWithRetries` on the interface + implementation +
    regenerated mock; `listall.go`; `schema.go` (`ServerConfig`, `ChannelServerMapping`,
-   parse/marshal helpers); serverID-aware key builders; `CurrentKVStoreVersion = 3`.
+   parse/marshal helpers); serverID-aware key builders; `CurrentKVStoreVersion = 1`.
 2. **Registry** — `server/servers.go`: `getServers`, `mutateServers`,
    `normalizeServerEndpoint`, `resolveServerName`, `AddServer` (mint or re-adopt; resolve +
-   validate `ServerName`; resolve `EventDomain`), `RemoveServer` (refusing `SiteURL == ""`),
-   `GetManagedServers`, `serverDomainForID`, `materializeServerFromLegacyConfig`,
-   `legacyServerConfig`. Also a `matrix.Client` method for
+   validate `ServerName`; resolve `EventDomain`), `RemoveServer`,
+   `GetManagedServers`, `serverDomainForID`. Also a `matrix.Client` method for
    `GET /_matrix/key/v2/server` returning its `server_name` field (§3.1.2).
 3. **Plugin wiring** — per-server client maps, `initMatrixClients`, on-demand bridge
    constructors, `registerForSharedChannels` with per-server `SiteURL`,
@@ -857,7 +811,7 @@ finish with a commit following the conventional commits notation.
    (§3.11). Do this step **after** step 3 so `serverIDForSyncMsg` exists to host the routing
    check, and never leave a state where the global gate is gone but the per-server one is not
    yet wired — that would sync unconditionally.
-5. **Migration v3** — including `resolveMigrationServerID` and the legacy-config seeding.
+5. **Migration** — the single purge step and the `kv_schema_version` marker (§3.8).
 6. **Bridges** — thread `serverID` through `BridgeUtils`, `sync_to_matrix.go`,
    `sync_to_mattermost.go`, `matrix_util.go`, `post_tracker.go`; per-server property key,
    username prefix, ghost keys.
@@ -872,8 +826,9 @@ finish with a commit following the conventional commits notation.
     integration suites.
 12. **Docs** — README "Multiple homeservers" section (state the one-server-per-channel rule
     explicitly; document the remove/re-adopt recovery path — `remove` keeps the server's
-    records and prints its `server_id`, `add --server-id <id>` restores them, and the
-    migrated server cannot be removed at all; and note that `server_name` is discovered from
+    records and prints its `server_id`, and `add --server-id <id>` restores them; warn that
+    upgrading from a single-homeserver install wipes all stored bridge state; and note that
+    `server_name` is discovered from
     the homeserver rather than supplied, with `--server-name` as the escape hatch; and that
     `server registration` output is copied verbatim — admins must not append
     `/_matrix/app/v1` to its `url`), and
@@ -907,8 +862,7 @@ finish with a commit following the conventional commits notation.
   or transport error falls through to `Hostname(serverURL)`; a malformed or `server_name`-less
   response body also falls through rather than erroring. Resolution **never fails** for a
   parseable URL. A name equal to an existing entry's is rejected by `AddServer` and the message
-  names the conflicting `server_id`. `--server-name` lands on step 1. Assert the same function
-  is used by the migration (§3.8) — one code path, two callers.
+  names the conflicting `server_id`. `--server-name` lands on step 1.
 - **`EventDomain` (§3.6)** — resolved from the endpoint at add time, persisted, and read
   back verbatim by every property-key call site; distinct for `localhost:8008` vs
   `localhost:8009`; **never recomputed** — mutating an entry's `ServerName` afterwards leaves
@@ -916,27 +870,19 @@ finish with a commit following the conventional commits notation.
 - **Re-adoption (§3.1.1)** — `AddServer` with an explicit `serverID` reuses it verbatim;
   rejects a malformed ID and one colliding with a live entry; remove-then-re-adopt makes the
   server's namespaced records and channel mappings reachable again (assert a ghost-user key
-  and a `channel_mapping_` entry resolve after re-adoption); `RemoveServer` **refuses** an
-  entry with `SiteURL == ""` and leaves it registered; re-adding the same `serverID` at a
+  and a `channel_mapping_` entry resolve after re-adoption); re-adding the same `serverID` at a
   _different_ endpoint warns that surviving `matrix_event_post_` records are under a
   different `EventDomain`.
 - **Stale mappings** — a mapping entry for a deregistered server does not count toward
   `maxServersPerChannel` (mapping a different server succeeds and drops the stale entry in
   the same write), and `RoomIDForServer` still resolves that entry's room, which is what
   makes re-adoption restore the link.
-- **Migration** — fresh install (no legacy config → no-op, version still advances);
-  v2 upgrade seeds one entry with `SiteURL == ""` and rekeys all seven prefixes;
-  the seeded `ServerName` comes from `resolveServerName` — the legacy `matrix_server_name` when
-  set, and with it blank, the URL hostname when the homeserver is unreachable — assert a ghost
-  MXID built from the seeded name matches what master would have produced, and that an
-  unreachable homeserver does **not** fail the migration;
-  the seeded `EventDomain` equals `extractServerDomain(legacy URL)` **byte for byte**, so a
-  post carrying master's `matrix_event_id_<host>` property is still found after upgrade
-  (assert against a fixture prop written in the legacy format — this guards edit/delete of
-  every pre-upgrade post);
-  channel-mapping conversion including already-converted, `"[]"`/`"null"`, and
-  non-room-identifier values; idempotent re-run is a no-op; ≥2 registered servers is an
-  error; a KV write failure leaves the version marker unadvanced.
+- **Migration (§3.8)** — fresh install (empty store → nothing deleted, marker still
+  advances to 1); an upgrade with a record under every prefix plus a `kv_store_version`
+  marker purges all of them and the old marker; `KeyServersConfig` is **never** deleted;
+  a store already at version 1 is left untouched; a failed delete, a failed keyspace scan,
+  an unreadable marker, and a non-numeric marker each leave the marker unstamped **and**
+  the records in place; a retry after a failed run completes the purge and stamps.
 - **`initMatrixClients`** — builds one client per entry **including disabled ones** (§3.11, so
   `/matrix status` can probe them), populates `remoteToServerID` / `ownRemoteIDs`, no-ops with
   a nil kvstore, returns an error on registry read failure, and concurrent rebuilds do not
@@ -967,7 +913,7 @@ finish with a commit following the conventional commits notation.
   encoded bytes, so a future `maxServersPerChannel` bump needs no migration).
 - **Shared-channels remotes** — `registerForSharedChannels` calls
   `RegisterPluginForSharedChannels` once per entry with distinct `SiteURL`s and persists each
-  `RemoteID`; the migrated entry keeps `SiteURL == ""`; a failure for one server does not
+  `RemoteID`; a failure for one server does not
   block the others; the merge does not clobber a concurrently added/removed server; each
   client and both bridge directions carry their own server's `RemoteID`; `map`/`unmap`
   invite/uninvite that server's remote only.
@@ -977,7 +923,7 @@ finish with a commit following the conventional commits notation.
   arg-count errors; `--server-id <id>` and `--server-id=<id>` stripping does not shift the
   optional trailing `username_prefix` regardless of position (same for `--server-name`), and
   an unknown `--flag` errors instead of being taken as a positional; `remove` prints the
-  recovery key and refuses the migrated entry; `server enable`/`disable` flip `Enabled` and
+  recovery key; `server enable`/`disable` flip `Enabled` and
   refresh; non-admin is rejected for the whole `server` group;
 - **Registration YAML** — assert the exact `url:` line equals `<SiteURL>/plugins/<plugin_id>`
   with **no** `_matrix/app/v1` anywhere in the output, over both a plain SiteURL and one with
@@ -1085,6 +1031,6 @@ as a bug in this plan's implementation:
   server (§3.6).
 - Reads never index `[0]`; they resolve by `serverID`.
 
-Unchanged and worth keeping: the KV namespacing scheme, the v3 migration shape, the
+Unchanged and worth keeping: the KV namespacing scheme, the
 `hs_token`→server middleware, the `/matrix server` command surface, the cluster-event
 invalidation, the per-server trackers, and the dev/test infrastructure.

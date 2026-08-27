@@ -76,15 +76,8 @@ func TestParseChannelServerMappings(t *testing.T) {
 	})
 }
 
-func TestBuildSingleChannelMapping(t *testing.T) {
-	data, err := BuildSingleChannelMapping("server1", "!room:example.com")
-	require.NoError(t, err)
-
-	parsed, err := ParseChannelServerMappings(data)
-	require.NoError(t, err)
-	require.Len(t, parsed, 1)
-	assert.Equal(t, "server1", parsed[0].ServerID)
-	assert.Equal(t, "!room:example.com", parsed[0].RoomID)
+func buildSingleChannelMapping(serverID, roomID string) ([]byte, error) {
+	return MarshalChannelServerMappings([]ChannelServerMapping{{ServerID: serverID, RoomID: roomID}})
 }
 
 // twoEntryMapping is the fixture used across the mapping-helper tests below: a channel
@@ -181,7 +174,7 @@ func TestRemoveServerFromChannelMapping(t *testing.T) {
 
 	t.Run("removing the last entry deletes the key rather than storing an empty array", func(t *testing.T) {
 		kv := newFakeKV()
-		data, err := BuildSingleChannelMapping("serverA", "!room:example.com")
+		data, err := buildSingleChannelMapping("serverA", "!room:example.com")
 		require.NoError(t, err)
 		require.NoError(t, kv.Set("channel_mapping_c1", data))
 
@@ -216,7 +209,7 @@ func TestRemoveServerFromChannelMapping(t *testing.T) {
 		kv := &flakyKV{fakeKV: newFakeKV()}
 
 		// Stale snapshot the first (discarded) attempt sees: mapped only to serverA.
-		staleData, err := BuildSingleChannelMapping("serverA", "!room:example.com")
+		staleData, err := buildSingleChannelMapping("serverA", "!room:example.com")
 		require.NoError(t, err)
 		kv.firstOld = staleData
 
@@ -270,14 +263,6 @@ func (f *flakyKV) SetAtomicWithRetries(key string, valueFunc func([]byte) ([]byt
 		return err
 	}
 	return f.Set(key, newValue)
-}
-
-func TestIsPlausibleRoomIdentifier(t *testing.T) {
-	assert.True(t, IsPlausibleRoomIdentifier("!room:example.com"))
-	assert.True(t, IsPlausibleRoomIdentifier("#alias:example.com"))
-	assert.False(t, IsPlausibleRoomIdentifier("example.com"))
-	assert.False(t, IsPlausibleRoomIdentifier(""))
-	assert.False(t, IsPlausibleRoomIdentifier("null"))
 }
 
 func TestBuildKeys(t *testing.T) {

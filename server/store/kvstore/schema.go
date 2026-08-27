@@ -2,7 +2,6 @@ package kvstore
 
 import (
 	"encoding/json"
-	"strings"
 
 	"github.com/pkg/errors"
 )
@@ -88,12 +87,6 @@ func MarshalChannelServerMappings(m []ChannelServerMapping) ([]byte, error) {
 		return nil, errors.Wrap(err, "failed to marshal channel server mappings")
 	}
 	return data, nil
-}
-
-// BuildSingleChannelMapping builds the stored value for a channel mapped to exactly
-// one server. Used by the v3 migration to convert the legacy bare-room-ID value.
-func BuildSingleChannelMapping(serverID, roomID string) ([]byte, error) {
-	return MarshalChannelServerMappings([]ChannelServerMapping{{ServerID: serverID, RoomID: roomID}})
 }
 
 // UpsertChannelServerMapping returns a copy of m with entry replacing the one for
@@ -184,17 +177,4 @@ func MappedServerIDs(m []ChannelServerMapping) []string {
 		ids = append(ids, entry.ServerID)
 	}
 	return ids
-}
-
-// isPlausibleRoomIdentifier reports whether s looks like a Matrix room ID or alias
-// (starts with '!' or '#'). Used by the v3 migration to distinguish a legacy bare
-// room identifier from garbage that should be skipped rather than persisted.
-func isPlausibleRoomIdentifier(s string) bool {
-	return strings.HasPrefix(s, "!") || strings.HasPrefix(s, "#")
-}
-
-// IsPlausibleRoomIdentifier is the exported form of isPlausibleRoomIdentifier, for
-// use by the migration code in the main package.
-func IsPlausibleRoomIdentifier(s string) bool {
-	return isPlausibleRoomIdentifier(s)
 }

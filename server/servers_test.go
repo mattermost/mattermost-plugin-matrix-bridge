@@ -392,23 +392,6 @@ func TestRemoveServer(t *testing.T) {
 		assert.False(t, removed)
 	})
 
-	t.Run("refuses to remove the migrated entry (SiteURL empty) and leaves it registered", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		entry := kvstore.ServerConfig{ServerID: "legacy1", ServerName: "legacy.example.com", SiteURL: ""}
-		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{entry})
-		require.NoError(t, err)
-		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
-
-		removed, err := plugin.RemoveServer("legacy1")
-		require.Error(t, err)
-		assert.False(t, removed)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		require.Len(t, servers, 1, "the migrated entry must remain registered")
-		assert.Equal(t, "legacy1", servers[0].ServerID)
-	})
-
 	t.Run("removes an entry but leaves its namespaced keys and channel mappings intact", func(t *testing.T) {
 		plugin := newTestPluginForAddServer(t)
 		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
@@ -418,7 +401,7 @@ func TestRemoveServer(t *testing.T) {
 		require.NoError(t, plugin.kvstore.Set(ghostKey, []byte("@_mattermost_mmuser1:a.example.com")))
 
 		channelID := model.NewId()
-		mappingData, err := kvstore.BuildSingleChannelMapping(id, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(id, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingData))
 
@@ -471,7 +454,7 @@ func TestReAdoptionRestoresNamespacedRecords(t *testing.T) {
 	require.NoError(t, plugin.kvstore.Set(ghostKey, []byte("@_mattermost_mmuser1:a.example.com")))
 
 	channelID := model.NewId()
-	mappingData, err := kvstore.BuildSingleChannelMapping(id, "!room:a.example.com")
+	mappingData, err := buildSingleChannelMapping(id, "!room:a.example.com")
 	require.NoError(t, err)
 	mappingKey := kvstore.BuildChannelMappingKey(channelID)
 	require.NoError(t, plugin.kvstore.Set(mappingKey, mappingData))
@@ -494,46 +477,6 @@ func TestReAdoptionRestoresNamespacedRecords(t *testing.T) {
 	mappings, err := kvstore.ParseChannelServerMappings(mappingVal)
 	require.NoError(t, err)
 	assert.Equal(t, "!room:a.example.com", kvstore.RoomIDForServer(mappings, id), "channel mapping must resolve again after re-adoption")
-}
-
-func TestMaterializeServerFromLegacyConfig(t *testing.T) {
-	t.Run("fresh install with no legacy URL returns empty, not an error", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		api := plugin.API.(*plugintest.API)
-		api.On("LoadPluginConfiguration", mock.Anything).Return(nil).Maybe()
-
-		id, err := plugin.materializeServerFromLegacyConfig()
-		require.NoError(t, err)
-		assert.Empty(t, id)
-	})
-
-	t.Run("idempotent: a second call with the same endpoint returns the same ID", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		api := plugin.API.(*plugintest.API)
-		// newTestPluginForServers's default LoadPluginConfiguration expectation (via
-		// setupPluginForTest) is registered first and would otherwise shadow this one.
-		clearMockExpectations(api)
-		mockAnyLogCalls(api)
-		api.On("LoadPluginConfiguration", mock.Anything).Run(func(args mock.Arguments) {
-			dest := args.Get(0).(*legacyServerConfig)
-			dest.MatrixServerURL = "https://legacy.example.com"
-			dest.MatrixASToken = "legacy-as"
-			dest.MatrixHSToken = "legacy-hs"
-		}).Return(nil)
-
-		id1, err := plugin.materializeServerFromLegacyConfig()
-		require.NoError(t, err)
-		require.NotEmpty(t, id1)
-
-		id2, err := plugin.materializeServerFromLegacyConfig()
-		require.NoError(t, err)
-		assert.Equal(t, id1, id2)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		require.Len(t, servers, 1)
-		assert.Empty(t, servers[0].SiteURL, "the migrated entry must keep SiteURL empty")
-	})
 }
 
 // TestMutateServersRetriesOnRealConflict covers §5.1's "mutateServers CAS-retry-under-
