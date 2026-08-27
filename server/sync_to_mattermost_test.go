@@ -3,8 +3,11 @@ package main
 import (
 	"testing"
 
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
@@ -179,4 +182,47 @@ func TestGetPostIDFromMatrixEvent_MatrixAPIFallback(t *testing.T) {
 	// Call function - should fall back to Matrix API and return empty (since we don't have a real Matrix server)
 	result := bridge.getPostIDFromMatrixEvent(eventID, channelID)
 	assert.Equal(t, "", result, "Should return empty when Matrix API fallback fails")
+}
+
+// TestSyncMatrixMessageSkipsAlreadySyncedEvent pins the idempotency guard that makes a
+// homeserver transaction retry safe. Application service transactions are redelivered
+// whole when any event in them fails, so an event that already produced a post must not
+// produce a second one - none of the sync handlers are otherwise idempotent.
+func TestSyncMatrixMessageSkipsAlreadySyncedEvent(t *testing.T) {
+	t.Run("an event with a stored post mapping is skipped without creating a post", func(t *testing.T) {
+		bridge, store, serverID := setupGetPostIDTest(t)
+		api := bridge.API.(*plugintest.API)
+		mockAnyLogCalls(api)
+
+		const eventID = "$already-synced"
+		require.NoError(t, store.Set(kvstore.BuildMatrixEventPostKey(serverID, eventID), []byte("post123")))
+
+		event := MatrixEvent{
+			EventID: eventID,
+			Sender:  "@alice:matrix.example.com",
+			Content: map[string]any{"msgtype": "m.text", "body": "hello"},
+		}
+		require.NoError(t, bridge.syncMatrixMessageToMattermost(event, "channel1"))
+
+		api.AssertNotCalled(t, "CreatePost", mock.Anything)
+	})
+
+	t.Run("a KV read failure aborts rather than re-posting the event", func(t *testing.T) {
+		bridge, store, serverID := setupGetPostIDTest(t)
+		api := bridge.API.(*plugintest.API)
+		mockAnyLogCalls(api)
+
+		const eventID = "$read-fails"
+		bridge.kvstore = &erroringKVStore{KVStore: store, errOnGetKey: kvstore.BuildMatrixEventPostKey(serverID, eventID)}
+
+		event := MatrixEvent{
+			EventID: eventID,
+			Sender:  "@alice:matrix.example.com",
+			Content: map[string]any{"msgtype": "m.text", "body": "hello"},
+		}
+		err := bridge.syncMatrixMessageToMattermost(event, "channel1")
+
+		require.Error(t, err, "an unreadable guard must fail the event so the homeserver retries, not fall through to CreatePost")
+		api.AssertNotCalled(t, "CreatePost", mock.Anything)
+	})
 }

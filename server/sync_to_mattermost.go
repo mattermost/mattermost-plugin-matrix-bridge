@@ -29,6 +29,17 @@ func NewMatrixToMattermostBridge(utils *BridgeUtils) *MatrixToMattermostBridge {
 func (b *MatrixToMattermostBridge) syncMatrixMessageToMattermost(event MatrixEvent, channelID string) error {
 	b.logger.LogDebug("Syncing Matrix message to Mattermost", "event_id", event.EventID, "sender", event.Sender, "channel_id", channelID)
 
+	// A homeserver redelivers an entire transaction when any event in it fails, so an
+	// event that already produced a post must not produce a second one.
+	syncedPostID, err := b.syncedPostIDForMatrixEvent(event.EventID)
+	if err != nil {
+		return err
+	}
+	if syncedPostID != "" {
+		b.logger.LogDebug("Skipping Matrix event that was already synced", "event_id", event.EventID, "mattermost_post_id", syncedPostID)
+		return nil
+	}
+
 	// Extract Mattermost metadata if present
 	mattermostPostID, mattermostRemoteID := b.extractMattermostMetadata(event)
 	if mattermostPostID != "" || mattermostRemoteID != "" {
@@ -775,6 +786,14 @@ func (b *MatrixToMattermostBridge) getPostIDFromMatrixEvent(matrixEventID, chann
 
 	// Fall back to Matrix event metadata for Mattermost-originated events
 	return b.getPostIDFromMatrixEventMetadata(matrixEventID, channelID)
+}
+
+func (b *MatrixToMattermostBridge) syncedPostIDForMatrixEvent(matrixEventID string) (string, error) {
+	postIDBytes, err := b.kvstore.Get(kvstore.BuildMatrixEventPostKey(b.serverID, matrixEventID))
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read Matrix event post mapping")
+	}
+	return string(postIDBytes), nil
 }
 
 // storeMatrixEventPostMapping stores the mapping from Matrix event ID to Mattermost post ID

@@ -162,6 +162,10 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	// Process each event in the transaction.
 	for _, event := range transaction.Events {
 		if err := p.processMatrixEvent(serverID, event); err != nil {
+			if isPermanentEventError(err) {
+				p.logger.LogError("Skipping Matrix event that cannot succeed on retry", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "server_id", serverID, "txn_id", txnID)
+				continue
+			}
 			p.logger.LogError("Failed to process Matrix event", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "server_id", serverID, "txn_id", txnID)
 			w.Header().Set("Retry-After", "5")
 			http.Error(w, "Transaction processing failed", http.StatusServiceUnavailable)
@@ -187,6 +191,12 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	if _, err := w.Write([]byte("{}")); err != nil {
 		p.logger.LogWarn("Failed to write webhook response", "error", err)
 	}
+}
+
+// isPermanentEventError reports whether err will fail identically on every redelivery of
+// the same event, making an acknowledgement better than an endless retry.
+func isPermanentEventError(err error) bool {
+	return errors.Is(err, ErrChannelAlreadyMapped)
 }
 
 // processMatrixEvent routes a single Matrix event, received on serverID, to the
