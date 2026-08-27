@@ -742,6 +742,31 @@ func (w *writeCountingKVStore) SetAtomicWithRetries(key string, valueFunc func(o
 // erroringKVStore wraps a KVStore and fails Get for one specific key, for tests that
 // need to simulate a registry-read failure (e.g. a corrupt or unreachable backing store)
 // without a full hand-written fake.
+// readCountingKVStore wraps a KVStore and counts reads of one key, so a test can assert
+// how many times an operation actually went to the registry rather than a cache.
+type readCountingKVStore struct {
+	kvstore.KVStore
+	countKey string
+
+	mu    sync.Mutex
+	reads int
+}
+
+func (r *readCountingKVStore) Get(key string) ([]byte, error) {
+	if key == r.countKey {
+		r.mu.Lock()
+		r.reads++
+		r.mu.Unlock()
+	}
+	return r.KVStore.Get(key)
+}
+
+func (r *readCountingKVStore) readCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
+}
+
 type erroringKVStore struct {
 	kvstore.KVStore
 	errOnGetKey string

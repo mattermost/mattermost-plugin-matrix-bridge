@@ -589,11 +589,14 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 //
 // Resolution:
 //  1. rc == nil || rc.RemoteId == "" -> (defensive; should not happen in production) no-op.
-//  2. rc.RemoteId doesn't match one of our remotes -> refresh the client caches once, in
-//     case this node's remoteToServerID lags a registry mutation made on another node
-//     that hasn't reached this node's cluster event handler yet; a refresh failure is an
-//     operational failure. Still unresolved after the refresh -> genuinely not one of our
-//     remotes, no-op.
+//  2. rc.RemoteId misses this node's remoteToServerID -> ambiguous, since the miss reads
+//     the same whether the remote is not ours or this node's cache lags a registry
+//     mutation made on another node that hasn't reached its cluster event handler yet.
+//     The registry is the source of truth, so it decides: absent there -> genuinely not
+//     one of our remotes, no-op; present -> cache lag, so refresh the client caches to
+//     build this server's client. A registry read or refresh failure is an operational
+//     failure - never conflated with "not ours", which would advance the cursor past
+//     undelivered posts.
 //  3. serverConfigForRouting fails -> operational failure (registry read failure).
 //  4. The resolved server is disabled -> skip. This is the only thing stopping outbound
 //     traffic for a disabled server (§3.11) - its remote stays registered and invited,
@@ -615,14 +618,20 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 
 	serverID, ok := p.serverIDForRemoteID(rc.RemoteId)
 	if !ok {
-		if refreshErr := p.initMatrixClients(); refreshErr != nil {
-			return "", false, errors.Wrap(refreshErr, "refresh Matrix client cache")
+		// Read from the store in case this server was just handled by another node,
+		// since that's the source of truth.
+		registeredServerID, err := p.registeredServerIDForRemote(rc.RemoteId)
+		if err != nil {
+			return "", false, errors.Wrap(err, "read server registry")
 		}
-		serverID, ok = p.serverIDForRemoteID(rc.RemoteId)
-		if !ok {
+		if registeredServerID == "" {
 			p.logger.LogWarn("SyncMsg received for an unrecognized remote; skipping", "remote_id", rc.RemoteId)
 			return "", false, nil
 		}
+		if refreshErr := p.initMatrixClients(); refreshErr != nil {
+			return "", false, errors.Wrap(refreshErr, "refresh Matrix client cache")
+		}
+		serverID = registeredServerID
 	}
 
 	server, err := p.serverConfigForRouting(serverID)

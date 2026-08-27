@@ -268,6 +268,61 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		assert.Equal(t, serverID, got)
 	})
 
+	// initMatrixClients is a full registry read plus a client per registered server, run
+	// under a mutex that serializes every other rebuild. A remote that will never resolve
+	// - a server whose unregister failed, or a remote that was never ours - must never
+	// pay for it, since the registry read alone already proves the remote is not ours.
+	t.Run("an unresolvable remote is settled by a registry read, never a client rebuild", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		serverID, _ := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+
+		counter := &readCountingKVStore{KVStore: plugin.kvstore, countKey: kvstore.KeyServersConfig}
+		plugin.kvstore = counter
+
+		for range 5 {
+			_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: "never-ours"})
+			require.NoError(t, err)
+			assert.False(t, shouldSync)
+		}
+
+		assert.Equal(t, 5, counter.readCount(), "each message may read the registry once and no more")
+		// registerTestServer seeds a nil client; only a rebuild would construct a real one.
+		assert.Nil(t, plugin.matrixClients[serverID], "no message may trigger a client rebuild")
+	})
+
+	// A remote found absent from the registry is re-checked against the registry on its
+	// very next message, so a server registered moments later is picked up immediately.
+	// Nothing caches the "absent" answer, so no window exists in which its traffic is
+	// silently dropped.
+	t.Run("a remote registered after a skip resolves on its next message", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+
+		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		// Hide the server from the registry so the first message finds nothing to resolve.
+		servers, err := plugin.getServers()
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, []byte("[]")))
+		require.NoError(t, plugin.initMatrixClients())
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		require.False(t, shouldSync)
+
+		// Put it back in the registry only - no cluster event, no rebuild on this node.
+		restored, err := kvstore.MarshalServersConfig(servers)
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, restored))
+
+		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.True(t, shouldSync, "the registry read must pick the server up without a cluster event")
+		assert.Equal(t, serverID, got)
+	})
+
 	t.Run("a refresh failure on remote-ID cache miss is an operational error, not a silent no-op", func(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)

@@ -343,6 +343,27 @@ func (p *Plugin) serverByID(serverID string) (kvstore.ServerConfig, error) {
 	return kvstore.ServerConfig{}, errors.Errorf("server %s is not registered", serverID)
 }
 
+// registeredServerIDForRemote resolves a shared-channels remote ID against the registry
+// itself rather than this node's remoteToServerID cache, returning "" when no registered
+// server claims it. This is the authoritative answer to "is this remote one of ours?",
+// and it costs a single KV read - no client construction, no rebuild mutex - so a cache
+// miss on a hot path can be disambiguated without paying for initMatrixClients.
+func (p *Plugin) registeredServerIDForRemote(remoteID string) (string, error) {
+	if remoteID == "" {
+		return "", nil
+	}
+	servers, err := p.getServers()
+	if err != nil {
+		return "", err
+	}
+	for _, s := range servers {
+		if s.RemoteID == remoteID {
+			return s.ServerID, nil
+		}
+	}
+	return "", nil
+}
+
 // serverDomainForID returns the ServerName (Matrix ID domain) for a registered server.
 func (p *Plugin) serverDomainForID(serverID string) (string, error) {
 	server, err := p.serverConfigForRouting(serverID)
