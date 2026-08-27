@@ -419,7 +419,10 @@ func (p *Plugin) createDMChannelForGhostUser(serverID, roomID, ghostUserID, matr
 	// Verify that this ghost user exists in our KV store (meaning we created it)
 	ghostUserKey := kvstore.BuildGhostUserKey(serverID, mattermostUserID)
 	ghostUserData, err := p.kvstore.Get(ghostUserKey)
-	if err != nil || len(ghostUserData) == 0 {
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read ghost user record")
+	}
+	if len(ghostUserData) == 0 {
 		p.logger.LogDebug("Rejecting DM creation for unrecognized ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID, "server_id", serverID)
 		return "", nil // Not our ghost user - reject silently
 	}

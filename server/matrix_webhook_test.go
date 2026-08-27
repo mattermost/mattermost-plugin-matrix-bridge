@@ -425,3 +425,66 @@ func mustParseMappings(t *testing.T, plugin *Plugin, channelID string) []kvstore
 	require.NoError(t, err)
 	return mappings
 }
+
+// TestCreateDMChannelForGhostUserReadFailure pins the distinction between "not our ghost
+// user" and "the ghost user record could not be read". Both used to return ("", nil),
+// which processMatrixEvent reads as an unmapped room - it acknowledges the transaction,
+// the homeserver never redelivers it, and the Matrix-initiated DM is lost for good.
+func TestCreateDMChannelForGhostUserReadFailure(t *testing.T) {
+	const serverDomain = "a.example.com"
+
+	setup := func(t *testing.T) (*Plugin, string, string) {
+		t.Helper()
+		plugin := newTestPluginForTransaction(t)
+		client := createMatrixClientWithTestLogger(t, "https://"+serverDomain, "as", "")
+		serverID, _ := registerTestServer(t, plugin, "https://"+serverDomain, serverDomain, client)
+
+		mattermostUserID := model.NewId()
+		ghostUserID := "@_mattermost_" + mattermostUserID + ":" + serverDomain
+		plugin.kvstore = &erroringKVStore{
+			KVStore:     plugin.kvstore,
+			errOnGetKey: kvstore.BuildGhostUserKey(serverID, mattermostUserID),
+		}
+		return plugin, serverID, ghostUserID
+	}
+
+	t.Run("an unreadable ghost user record is an error, not a rejection", func(t *testing.T) {
+		plugin, serverID, ghostUserID := setup(t)
+
+		stateKey := ghostUserID
+		event := MatrixEvent{
+			Type:     "m.room.member",
+			EventID:  "$dm",
+			RoomID:   "!dm:" + serverDomain,
+			Sender:   "@alice:" + serverDomain,
+			StateKey: &stateKey,
+			Content:  map[string]any{"membership": "join"},
+		}
+
+		channelID, err := plugin.handleMatrixMemberDM(serverID, event)
+
+		require.Error(t, err, "a KV read failure must not be reported as \"not our ghost user\"")
+		assert.Empty(t, channelID)
+	})
+
+	t.Run("the transaction is retried rather than acknowledged", func(t *testing.T) {
+		plugin, serverID, ghostUserID := setup(t)
+
+		body := `{"events":[{"type":"m.room.member","event_id":"$dm","room_id":"!dm:` + serverDomain +
+			`","sender":"@alice:` + serverDomain + `","state_key":"` + ghostUserID +
+			`","content":{"membership":"join"}}]}`
+
+		txnID := "txn-" + model.NewId()
+		w := httptest.NewRecorder()
+		plugin.handleMatrixTransaction(w, transactionRequest(serverID, txnID, body))
+
+		resp := w.Result()
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "a lost DM must be retried, not acknowledged")
+		assert.Equal(t, "5", resp.Header.Get("Retry-After"))
+
+		transactionsMutex.RLock()
+		_, processed := processedTransactions[transactionKey{serverID: serverID, txnID: txnID}]
+		transactionsMutex.RUnlock()
+		assert.False(t, processed, "the transaction must stay unrecorded so the homeserver redelivers it")
+	})
+}
