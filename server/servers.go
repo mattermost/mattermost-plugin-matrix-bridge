@@ -157,7 +157,42 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 	eventDomain := eventDomainFromEndpoint(endpoint)
 	siteURL := "https://" + endpoint
 
-	// Register the remote into shared channels first to retrieve the RemoteID.
+	checkConflicts := func(servers []kvstore.ServerConfig) error {
+		for _, s := range servers {
+			if s.Endpoint == endpoint {
+				return errors.Errorf("a server is already registered at this endpoint (server_id: %s); use `/matrix server remove %s` first", s.ServerID, s.ServerID)
+			}
+			if s.ServerName == resolvedServerName {
+				return errors.Errorf("server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", resolvedServerName, s.ServerID)
+			}
+			if serverID != "" && s.ServerID == serverID {
+				return errors.Errorf("server ID %s is already registered", serverID)
+			}
+			if hsToken != "" && s.HSToken == hsToken {
+				return errors.Errorf("hs_token conflicts with existing server %s; hs_token must be unique across registered servers", s.ServerID)
+			}
+		}
+		return nil
+	}
+
+	// Conflicts are checked here as well as inside the mutateServers callback below.
+	// RegisterPluginForSharedChannels is idempotent per SiteURL, so re-adding an endpoint
+	// that is already registered hands back the *existing* server's RemoteID; without this
+	// pre-check the rollback would unregister that live remote, taking down the existing
+	// server's channel invitations and sync cursors.
+	//
+	// This narrows the window rather than closing it: two concurrent adds for the same
+	// endpoint can both clear the pre-check, both receive the same idempotent RemoteID,
+	// and the CAS loser's rollback then unregisters the winner's live remote. Closing
+	// that needs the registry entry reserved by CAS before the remote is created.
+	existing, err := p.getServers()
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read servers config")
+	}
+	if err := checkConflicts(existing); err != nil {
+		return "", err
+	}
+
 	remoteID, err := p.doRegisterPluginForSharedChannels(siteURL)
 	if err != nil {
 		return "", errors.Wrap(err, "failed to register server for shared channels")
@@ -165,20 +200,9 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 
 	var mintedID string
 	err = p.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		for _, s := range servers {
-			if s.Endpoint == endpoint {
-				return nil, errors.Errorf("a server is already registered at this endpoint (server_id: %s); use `/matrix server remove %s` first", s.ServerID, s.ServerID)
-			}
-			if s.ServerName == resolvedServerName {
-				return nil, errors.Errorf("server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", resolvedServerName, s.ServerID)
-			}
-			if serverID != "" && s.ServerID == serverID {
-				return nil, errors.Errorf("server ID %s is already registered", serverID)
-			}
-			// Reject duplicate hs_tokens
-			if hsToken != "" && s.HSToken == hsToken {
-				return nil, errors.Errorf("hs_token conflicts with existing server %s; hs_token must be unique across registered servers", s.ServerID)
-			}
+		// The authoritative check: only this callback sees the slice the write lands on.
+		if err := checkConflicts(servers); err != nil {
+			return nil, err
 		}
 
 		id := serverID
@@ -206,8 +230,9 @@ func (p *Plugin) AddServer(serverURL, asToken, hsToken, usernamePrefix, serverID
 		return append(result, entry), nil
 	})
 	if err != nil {
-		// The registry rejected this add (a conflict, or a CAS failure) after the remote
-		// was already created - it belongs to no entry, so it must not be left registered.
+		// The remote was created but belongs to no entry, so it must not be left
+		// registered. Reaching here means a concurrent writer won the race after the
+		// pre-check above passed, or the CAS itself failed.
 		if appErr := p.API.UnregisterPluginRemoteForSharedChannels(remoteID); appErr != nil {
 			p.logger.LogWarn("Failed to unregister shared-channels remote after a rejected AddServer", "remote_id", remoteID, "error", appErr)
 		}

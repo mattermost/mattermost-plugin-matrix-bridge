@@ -295,25 +295,16 @@ func TestAddServer(t *testing.T) {
 		api.AssertExpectations(t)
 	})
 
-	t.Run("unregisters the remote when the registry write is rejected by a conflict", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
+	t.Run("rejects a conflicting endpoint without touching the shared-channels remote", func(t *testing.T) {
+		plugin := newTestPluginForAddServer(t)
 		api := plugin.API.(*plugintest.API)
-		api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
-		api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
-		mockAnyLogCalls(api)
 
-		// Seed an existing entry directly so the second AddServer's endpoint conflict is
-		// deterministic: registration (below) now happens before the conflict check runs,
-		// so this add must still get as far as obtaining a remote before being rejected.
 		seed := []kvstore.ServerConfig{
 			{ServerID: "existing1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "existing.example.com", SiteURL: "https://a.example.com:443", RemoteID: "remote-existing"},
 		}
 		data, err := kvstore.MarshalServersConfig(seed)
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
-
-		api.On("RegisterPluginForSharedChannels", mock.Anything).Return("remote-orphan", nil).Once()
-		api.On("UnregisterPluginRemoteForSharedChannels", "remote-orphan").Return(nil).Once()
 
 		id, err := plugin.AddServer("https://a.example.com", "as2", "hs2", "", "", "second.example.com")
 		require.Error(t, err)
@@ -324,6 +315,53 @@ func TestAddServer(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, servers, 1, "the rejected add must not add a second entry")
 		assert.Equal(t, "existing1", servers[0].ServerID)
+		assert.Equal(t, "remote-existing", servers[0].RemoteID, "the existing entry's remote must be left intact")
+
+		api.AssertNotCalled(t, "RegisterPluginForSharedChannels", mock.Anything)
+		api.AssertNotCalled(t, "UnregisterPluginRemoteForSharedChannels", mock.Anything)
+		api.AssertNotCalled(t, "PublishPluginClusterEvent", mock.Anything, mock.Anything)
+		api.AssertExpectations(t)
+	})
+
+	// The pre-check races with concurrent writers, so the in-callback check remains the
+	// authoritative one. The conflict raced here is a server-name collision across two
+	// *different* endpoints: distinct SiteURLs mean the losing add holds a remote of its
+	// own, so rolling it back cannot touch the winner's. (A same-endpoint race is not
+	// covered - see the note on AddServer's pre-check.)
+	t.Run("unregisters its own remote when a concurrent writer wins a name conflict", func(t *testing.T) {
+		plugin := newTestPluginForServers(t)
+		store := newCASConflictKVStore()
+		plugin.kvstore = store
+
+		api := plugin.API.(*plugintest.API)
+		api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
+		api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
+		mockAnyLogCalls(api)
+
+		// The registry is empty when AddServer's pre-check reads it; the conflicting entry
+		// only lands between mutateServers' first read and its write.
+		store.onFirstRead = func(kv kvstore.KVStore) {
+			seed := []kvstore.ServerConfig{
+				{ServerID: "winner1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "shared.example.com", SiteURL: "https://a.example.com:443", RemoteID: "remote-winner"},
+			}
+			data, marshalErr := kvstore.MarshalServersConfig(seed)
+			require.NoError(t, marshalErr)
+			require.NoError(t, kv.Set(kvstore.KeyServersConfig, data))
+		}
+
+		api.On("RegisterPluginForSharedChannels", mock.Anything).Return("remote-orphan", nil).Once()
+		api.On("UnregisterPluginRemoteForSharedChannels", "remote-orphan").Return(nil).Once()
+
+		id, err := plugin.AddServer("https://b.example.com", "as2", "hs2", "", "", "shared.example.com")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "conflicts")
+		assert.Empty(t, id)
+
+		servers, err := plugin.getServers()
+		require.NoError(t, err)
+		require.Len(t, servers, 1, "the rejected add must not add a second entry")
+		assert.Equal(t, "winner1", servers[0].ServerID)
+		assert.Equal(t, "remote-winner", servers[0].RemoteID, "only this call's own remote may be rolled back")
 
 		api.AssertExpectations(t)
 	})
