@@ -106,6 +106,79 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		assert.False(t, shouldSync)
 	})
 
+	// Removing a server leaves its channel_mapping_ entry behind, so a mapping is only
+	// evidence of ownership while its server is still registered. Counting a dead entry
+	// stranded the channel: RoomIDForServer found nothing for the new server, the stale
+	// entry made it look "mapped elsewhere", and the DM never got auto-created.
+	t.Run("a mapping to a removed server does not block auto-creation on the new server", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		api := plugin.API.(*plugintest.API)
+		api.On("UnregisterPluginRemoteForSharedChannels", mock.Anything).Return(nil).Maybe()
+		api.On("GetChannel", "channel1").Return(&model.Channel{Type: model.ChannelTypeDirect}, nil)
+
+		serverIDA, _ := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		mappingData, err := kvstore.BuildSingleChannelMapping(serverIDA, "!room:a.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		removed, err := plugin.RemoveServer(serverIDA)
+		require.NoError(t, err)
+		require.True(t, removed)
+
+		serverIDB, remoteIDB := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
+
+		// The dead entry for A is still on the channel.
+		mappings, err := plugin.getChannelServerMappings("channel1")
+		require.NoError(t, err)
+		require.Len(t, mappings, 1)
+		require.Equal(t, serverIDA, mappings[0].ServerID)
+
+		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteIDB})
+		require.NoError(t, err)
+		assert.True(t, shouldSync, "a channel holding only a dead mapping must read as unmapped, not as owned by another server")
+		assert.Equal(t, serverIDB, got)
+	})
+
+	t.Run("a mapping to an unregistered server falls through to the unmapped path", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetChannel", "channel1").Return(&model.Channel{Type: model.ChannelTypeOpen}, nil)
+
+		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+
+		mappingData, err := kvstore.BuildSingleChannelMapping(model.NewId(), "!room:gone.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.False(t, shouldSync)
+		// Reaching the channel-type lookup is what proves the stale entry was ignored -
+		// the "mapped elsewhere" branch returns before it.
+		api.AssertCalled(t, "GetChannel", "channel1")
+	})
+
+	// Only registration is checked, not Enabled: a disabled server still owns its
+	// channels, and remapping them is an explicit operator action.
+	t.Run("a mapping to a registered but disabled server still counts as owned", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		api := plugin.API.(*plugintest.API)
+
+		_, remoteIDA := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		serverIDB, _ := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
+
+		mappingData, err := kvstore.BuildSingleChannelMapping(serverIDB, "!room:b.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		require.NoError(t, plugin.SetServerEnabled(serverIDB, false))
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteIDA})
+		require.NoError(t, err)
+		assert.False(t, shouldSync, "a disabled server's mapping must not be treated as stale")
+		api.AssertNotCalled(t, "GetChannel", "channel1")
+	})
+
 	t.Run("disabled server is skipped even when mapped to it", func(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)

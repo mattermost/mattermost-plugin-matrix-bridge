@@ -599,12 +599,14 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 //     traffic for a disabled server (§3.11) - its remote stays registered and invited,
 //     so the hooks keep firing, and this check is what makes that a no-op.
 //  5. getChannelServerMappings fails -> operational failure (KV read/parse failure).
-//  6. Membership (not equality) against channelID's mappings: mapped to this server ->
-//     use it; mapped but not to this server -> skip (the remote is still invited but
-//     its server is no longer mapped, do not relay its traffic elsewhere); unmapped ->
-//     isChannelDirect fails -> operational failure; unmapped and the channel is a DM ->
-//     use this server anyway, so the DM room can be auto-created on it; unmapped and not
-//     a DM -> skip.
+//  6. Membership (not equality) against channelID's mappings, counting only mappings
+//     whose server is still registered - a removed server leaves its entry behind, and
+//     treating that as "owned elsewhere" would strand the channel forever: mapped to
+//     this server -> use it; mapped to another registered server -> skip (that remote is
+//     still invited but its server is no longer mapped, do not relay its traffic
+//     elsewhere); unmapped, or mapped only to removed servers -> isChannelDirect fails
+//     -> operational failure; and the channel is a DM -> use this server anyway, so the
+//     DM room can be auto-created on it; and not a DM -> skip.
 func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (serverID string, shouldSync bool, err error) {
 	if rc == nil || rc.RemoteId == "" {
 		p.logger.LogWarn("SyncMsg received without a usable RemoteCluster; skipping")
@@ -641,9 +643,19 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 		return serverID, true, nil
 	}
 
-	if len(mappings) > 0 {
-		// Mapped, but to a different server - the remote is still invited, but its
-		// server no longer owns this channel's traffic.
+	// Only a mapping whose server is still registered means "owned by someone else".
+	// Removal leaves a channel's entry behind, so counting stale entries here would
+	// strand the channel permanently: a DM would never auto-create on the replacement
+	// server, and non-DM traffic would be dropped silently rather than read as unmapped.
+	// A registered-but-disabled server still owns its channels - remapping is an
+	// explicit operator action - so only registration is checked, not Enabled.
+	for _, mappedServerID := range kvstore.MappedServerIDs(mappings) {
+		if _, err := p.serverConfigForRouting(mappedServerID); err != nil {
+			p.logger.LogDebug("Ignoring stale channel mapping for unregistered server", "server_id", mappedServerID, "channel_id", channelID)
+			continue
+		}
+		// Mapped to a live server that is not this one - the remote is still invited,
+		// but its server no longer owns this channel's traffic.
 		return "", false, nil
 	}
 
