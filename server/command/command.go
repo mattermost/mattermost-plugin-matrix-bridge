@@ -737,10 +737,8 @@ func (c *Handler) executeListMappingsCommand(args *model.CommandArgs) *model.Com
 	return ephemeral(b.String())
 }
 
-// executeStatusCommand implements /matrix status: every server's enabled state and live
-// connection health (probed concurrently by Servers().ProbeHealth under a single
-// deadline). Like every other subcommand it is System Admin only (gated in
-// executeMatrixCommand), and the output carries no secrets.
+// executeStatusCommand implements /matrix status:
+// every server's enabled state and live connection health
 func (c *Handler) executeStatusCommand() *model.CommandResponse {
 	servers, err := c.plugin.Servers().List()
 	if err != nil {
