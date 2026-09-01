@@ -1,0 +1,13 @@
+{
+    "default_server_config": {
+        "m.homeserver": {
+            "base_url": "http://synapse2.localhost:8889",
+            "server_name": "synapse2.localhost"
+        }
+    },
+    "disable_custom_urls": false,
+    "disable_guests": false,
+    "brand": "Element (dev, synapse2)",
+    "default_country_code": "US",
+    "show_labs_settings": true
+}

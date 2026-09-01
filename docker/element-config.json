@@ -1,0 +1,13 @@
+{
+    "default_server_config": {
+        "m.homeserver": {
+            "base_url": "http://localhost:8888",
+            "server_name": "localhost"
+        }
+    },
+    "disable_custom_urls": false,
+    "disable_guests": false,
+    "brand": "Element (dev)",
+    "default_country_code": "US",
+    "show_labs_settings": true
+}

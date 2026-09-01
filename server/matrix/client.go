@@ -310,6 +310,15 @@ func (c *Client) SetServerDomain(domain string) {
 	c.serverDomain = domain
 }
 
+// SetRemoteID updates the shared-channels remote ID this client attributes its
+// created posts/users to. Exposed primarily for tests that must construct a client
+// before a remote ID is minted (e.g. before the plugin registers it for shared
+// channels); production code passes the final remote ID directly to
+// NewClientWithRateLimit / NewClientWithLoggerAndRateLimit instead.
+func (c *Client) SetRemoteID(remoteID string) {
+	c.remoteID = remoteID
+}
+
 // SetServerURL updates the server URL for the client
 func (c *Client) SetServerURL(serverURL string) {
 	c.serverURL = serverURL
@@ -514,6 +523,61 @@ func (c *Client) TestConnection() error {
 	}
 
 	return nil
+}
+
+// KeyServerResponse represents the (partial) response from GET /_matrix/key/v2/server.
+type KeyServerResponse struct {
+	ServerName string `json:"server_name"`
+}
+
+// GetServerNameFromKeyEndpoint queries GET /_matrix/key/v2/server on this client's
+// configured server URL and returns the server_name field. This is a federation
+// endpoint and is unauthenticated - no Application Service token is required (and
+// none may exist yet, since this is used to discover a server's name before it is
+// registered). Callers should treat any error (network, non-200, malformed body,
+// missing/empty server_name) as "discovery unavailable" and fall through to the next
+// resolution step rather than failing outright.
+func (c *Client) GetServerNameFromKeyEndpoint() (string, error) {
+	if c.serverURL == "" {
+		return "", errors.New("matrix client not configured")
+	}
+
+	requestURL := c.serverURL + "/_matrix/key/v2/server"
+
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to create key server request")
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", errors.Wrap(err, "failed to send key server request")
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// This endpoint is unauthenticated and hit before the server is registered, so the
+	// response comes from a homeserver we don't fully trust yet - cap the read instead
+	// of buffering an arbitrarily large body.
+	const maxKeyServerResponseBytes = 1 << 20 // 1 MiB; the real payload is a few KiB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxKeyServerResponseBytes))
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read key server response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("key server endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var response KeyServerResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", errors.Wrap(err, "failed to parse key server response")
+	}
+
+	if response.ServerName == "" {
+		return "", errors.New("key server response missing server_name")
+	}
+
+	return response.ServerName, nil
 }
 
 // JoinRoom joins a Matrix room using either a room ID or room alias.
@@ -1004,8 +1068,7 @@ func (c *Client) CreateRoom(name, topic, serverDomain string, publish bool, matt
 
 	// Add bridge alias for Matrix Application Service filtering
 	if roomAlias != "" {
-		// Create bridge alias with mattermost-bridge- prefix
-		bridgeAlias := "#mattermost-bridge-" + alias + ":" + serverDomain
+		bridgeAlias := CreateBridgeAlias(alias, serverDomain)
 		err = c.AddRoomAlias(response.RoomID, bridgeAlias)
 		if err != nil {
 			c.logger.LogWarn("Failed to add bridge filtering alias", "error", err, "bridge_alias", bridgeAlias, "room_id", response.RoomID)
@@ -1137,6 +1200,14 @@ func (c *Client) extractServerDomain() (string, error) {
 	}
 
 	return serverName, nil
+}
+
+// CreateBridgeAlias builds the bridge filtering alias for a room. The
+// "mattermost-bridge-" prefix must stay in sync with the aliases namespace regex in the
+// Application Service registration (see /matrix server registration), which is what
+// makes the homeserver route these rooms' events to the bridge.
+func CreateBridgeAlias(roomName, serverDomain string) string {
+	return "#mattermost-bridge-" + roomName + ":" + serverDomain
 }
 
 // AddRoomAlias adds an additional alias to an existing Matrix room

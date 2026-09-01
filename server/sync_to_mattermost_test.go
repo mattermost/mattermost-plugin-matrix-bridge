@@ -3,27 +3,31 @@ package main
 import (
 	"testing"
 
+	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/mattermost/mattermost/server/public/pluginapi"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // setupGetPostIDTest creates a test environment for getPostIDFromMatrixEvent tests
-func setupGetPostIDTest(t *testing.T) (*MatrixToMattermostBridge, kvstore.KVStore) {
+func setupGetPostIDTest(t *testing.T) (*MatrixToMattermostBridge, kvstore.KVStore, string) {
 	// Setup plugin with in-memory KV store to avoid mock complexity
 	plugin := setupPluginForTest()
 	plugin.client = pluginapi.NewClient(plugin.API, nil)
 	plugin.kvstore = NewMemoryKVStore()
-	plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-	plugin.initBridges()
+	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
+	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
+	_, mx2m := plugin.testBridges(t, serverID)
 
-	return plugin.matrixToMattermostBridge, plugin.kvstore
+	return mx2m, plugin.kvstore, serverID
 }
 
 // TestGetPostIDFromMatrixEvent_KVStorePath tests the optimized KV store path
 func TestGetPostIDFromMatrixEvent_KVStorePath(t *testing.T) {
-	bridge, store := setupGetPostIDTest(t)
+	bridge, store, serverID := setupGetPostIDTest(t)
 
 	// Test cases for KV store path
 	testCases := []struct {
@@ -68,7 +72,7 @@ func TestGetPostIDFromMatrixEvent_KVStorePath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Setup: Store mapping if needed
 			if tc.shouldStore {
-				mappingKey := kvstore.BuildMatrixEventPostKey(tc.eventID)
+				mappingKey := kvstore.BuildMatrixEventPostKey(serverID, tc.eventID)
 				err := store.Set(mappingKey, []byte(tc.storedPostID))
 				assert.NoError(t, err)
 			}
@@ -84,12 +88,12 @@ func TestGetPostIDFromMatrixEvent_KVStorePath(t *testing.T) {
 
 // TestGetPostIDFromMatrixEvent_MixedEventTypes tests both paths work together
 func TestGetPostIDFromMatrixEvent_MixedEventTypes(t *testing.T) {
-	bridge, store := setupGetPostIDTest(t)
+	bridge, store, serverID := setupGetPostIDTest(t)
 
 	// Test: Matrix-originated event (should use KV store)
 	matrixEventID := "$matrix_originated_event"
 	matrixPostID := "post_matrix_123"
-	mappingKey := kvstore.BuildMatrixEventPostKey(matrixEventID)
+	mappingKey := kvstore.BuildMatrixEventPostKey(serverID, matrixEventID)
 
 	err := store.Set(mappingKey, []byte(matrixPostID))
 	assert.NoError(t, err)
@@ -101,9 +105,10 @@ func TestGetPostIDFromMatrixEvent_MixedEventTypes(t *testing.T) {
 	mattermostEventID := "$mattermost_originated_event"
 
 	// Verify no KV mapping exists
-	mappingKey2 := kvstore.BuildMatrixEventPostKey(mattermostEventID)
-	_, err = store.Get(mappingKey2)
-	assert.Error(t, err, "Should not have KV mapping for Mattermost event")
+	mappingKey2 := kvstore.BuildMatrixEventPostKey(serverID, mattermostEventID)
+	mappedPostID, err := store.Get(mappingKey2)
+	assert.NoError(t, err)
+	assert.Empty(t, mappedPostID, "Should not have KV mapping for Mattermost event")
 
 	result2 := bridge.getPostIDFromMatrixEvent(mattermostEventID, "channel_123")
 	assert.Equal(t, "", result2, "Mattermost-originated event should fall back to Matrix API")
@@ -111,11 +116,11 @@ func TestGetPostIDFromMatrixEvent_MixedEventTypes(t *testing.T) {
 
 // TestGetPostIDFromMatrixEvent_KVStoreUpdates tests KV store updates
 func TestGetPostIDFromMatrixEvent_KVStoreUpdates(t *testing.T) {
-	bridge, store := setupGetPostIDTest(t)
+	bridge, store, serverID := setupGetPostIDTest(t)
 
 	eventID := "$matrix_event_update"
 	channelID := "channel_123"
-	mappingKey := kvstore.BuildMatrixEventPostKey(eventID)
+	mappingKey := kvstore.BuildMatrixEventPostKey(serverID, eventID)
 
 	// Initially no mapping
 	result1 := bridge.getPostIDFromMatrixEvent(eventID, channelID)
@@ -142,7 +147,7 @@ func TestGetPostIDFromMatrixEvent_KVStoreUpdates(t *testing.T) {
 
 // TestGetPostIDFromMatrixEvent_EdgeCases tests edge cases
 func TestGetPostIDFromMatrixEvent_EdgeCases(t *testing.T) {
-	bridge, store := setupGetPostIDTest(t)
+	bridge, store, serverID := setupGetPostIDTest(t)
 
 	// Test empty event ID
 	result1 := bridge.getPostIDFromMatrixEvent("", "channel_123")
@@ -152,7 +157,7 @@ func TestGetPostIDFromMatrixEvent_EdgeCases(t *testing.T) {
 	eventID := "$event_with_empty_channel"
 	expectedPostID := "post_123"
 
-	mappingKey := kvstore.BuildMatrixEventPostKey(eventID)
+	mappingKey := kvstore.BuildMatrixEventPostKey(serverID, eventID)
 	err := store.Set(mappingKey, []byte(expectedPostID))
 	assert.NoError(t, err)
 
@@ -162,18 +167,62 @@ func TestGetPostIDFromMatrixEvent_EdgeCases(t *testing.T) {
 
 // TestGetPostIDFromMatrixEvent_MatrixAPIFallback tests the Matrix API fallback path
 func TestGetPostIDFromMatrixEvent_MatrixAPIFallback(t *testing.T) {
-	bridge, store := setupGetPostIDTest(t)
+	bridge, store, serverID := setupGetPostIDTest(t)
 
 	// Test with no KV store mapping (should fall back to Matrix API)
 	eventID := "$mattermost_event_123"
 	channelID := "channel_123"
 
 	// Verify no KV mapping exists
-	mappingKey := kvstore.BuildMatrixEventPostKey(eventID)
-	_, err := store.Get(mappingKey)
-	assert.Error(t, err, "Should not have KV store mapping")
+	mappingKey := kvstore.BuildMatrixEventPostKey(serverID, eventID)
+	mappedValue, err := store.Get(mappingKey)
+	assert.NoError(t, err)
+	assert.Empty(t, mappedValue, "Should not have KV store mapping")
 
 	// Call function - should fall back to Matrix API and return empty (since we don't have a real Matrix server)
 	result := bridge.getPostIDFromMatrixEvent(eventID, channelID)
 	assert.Equal(t, "", result, "Should return empty when Matrix API fallback fails")
+}
+
+// TestSyncMatrixMessageSkipsAlreadySyncedEvent pins the idempotency guard that makes a
+// homeserver transaction retry safe. Application service transactions are redelivered
+// whole when any event in them fails, so an event that already produced a post must not
+// produce a second one - none of the sync handlers are otherwise idempotent.
+func TestSyncMatrixMessageSkipsAlreadySyncedEvent(t *testing.T) {
+	t.Run("an event with a stored post mapping is skipped without creating a post", func(t *testing.T) {
+		bridge, store, serverID := setupGetPostIDTest(t)
+		api := bridge.API.(*plugintest.API)
+		mockAnyLogCalls(api)
+
+		const eventID = "$already-synced"
+		require.NoError(t, store.Set(kvstore.BuildMatrixEventPostKey(serverID, eventID), []byte("post123")))
+
+		event := MatrixEvent{
+			EventID: eventID,
+			Sender:  "@alice:matrix.example.com",
+			Content: map[string]any{"msgtype": "m.text", "body": "hello"},
+		}
+		require.NoError(t, bridge.syncMatrixMessageToMattermost(event, "channel1"))
+
+		api.AssertNotCalled(t, "CreatePost", mock.Anything)
+	})
+
+	t.Run("a KV read failure aborts rather than re-posting the event", func(t *testing.T) {
+		bridge, store, serverID := setupGetPostIDTest(t)
+		api := bridge.API.(*plugintest.API)
+		mockAnyLogCalls(api)
+
+		const eventID = "$read-fails"
+		bridge.kvstore = &erroringKVStore{KVStore: store, errOnGetKey: kvstore.BuildMatrixEventPostKey(serverID, eventID)}
+
+		event := MatrixEvent{
+			EventID: eventID,
+			Sender:  "@alice:matrix.example.com",
+			Content: map[string]any{"msgtype": "m.text", "body": "hello"},
+		}
+		err := bridge.syncMatrixMessageToMattermost(event, "channel1")
+
+		require.Error(t, err, "an unreadable guard must fail the event so the homeserver retries, not fall through to CreatePost")
+		api.AssertNotCalled(t, "CreatePost", mock.Anything)
+	})
 }

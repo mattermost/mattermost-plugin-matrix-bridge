@@ -15,6 +15,7 @@ func TestCreateTransactionLogger_NoFilespec(t *testing.T) {
 	logger, err := CreateTransactionLogger()
 
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = logger.Logr().Shutdown() })
 	assert.NotNil(t, logger.Logr())
 }
 
@@ -26,6 +27,7 @@ func TestCreateTransactionLogger_AbsolutePath(t *testing.T) {
 	logger, err := CreateTransactionLogger()
 
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = logger.Logr().Shutdown() })
 	assert.NotNil(t, logger.Logr())
 	_, statErr := os.Stat(filepath.Join(dir, "sub"))
 	assert.NoError(t, statErr, "subdirectory should have been created")
@@ -43,6 +45,7 @@ func TestCreateTransactionLogger_RelativePath(t *testing.T) {
 	logger, err := CreateTransactionLogger()
 
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = logger.Logr().Shutdown() })
 	assert.NotNil(t, logger.Logr())
 	_, statErr := os.Stat(filepath.Join(dir, "logs"))
 	assert.NoError(t, statErr, "relative subdirectory should have been created")
@@ -61,6 +64,7 @@ func TestCreateTransactionLogger_BareFilename(t *testing.T) {
 	logger, err := CreateTransactionLogger()
 
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = logger.Logr().Shutdown() })
 	assert.NotNil(t, logger.Logr())
 }
 

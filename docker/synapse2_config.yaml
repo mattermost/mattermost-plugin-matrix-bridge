@@ -1,6 +1,6 @@
-server_name: "localhost"
+server_name: "synapse2.localhost"
 pid_file: /data/homeserver.pid
-public_baseurl: http://localhost:8888/
+public_baseurl: http://synapse2.localhost:8889/
 
 listeners:
     - port: 8008
@@ -17,7 +17,7 @@ database:
         user: synapse
         password: synapse
         database: synapse
-        host: postgres
+        host: postgres2
         port: 5432
         cp_min: 5
         cp_max: 10
@@ -59,7 +59,7 @@ enable_registration_without_verification: true
 suppress_key_server_warning: true
 
 room_list_publication_rules:
-    - user_id: "@_mattermost_bridge:localhost"
+    - user_id: "@_mattermost_bridge:synapse2.localhost"
       action: allow
     - user_id: "*"
       action: deny

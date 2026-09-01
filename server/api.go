@@ -2,12 +2,30 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
+	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 )
+
+// contextKey is a private type for context keys defined by this package, to avoid
+// collisions with keys defined in other packages.
+type contextKey string
+
+// contextKeyServerID is the context key under which MatrixAuthorizationRequired stores
+// the resolved serverID for downstream handlers.
+const contextKeyServerID contextKey = "matrix_server_id"
+
+// serverIDFromContext retrieves the serverID resolved by MatrixAuthorizationRequired.
+func serverIDFromContext(ctx context.Context) (string, bool) {
+	serverID, ok := ctx.Value(contextKeyServerID).(string)
+	return serverID, ok
+}
 
 // ServeHTTP demonstrates a plugin that handles HTTP requests by greeting the world.
 // The root URL is currently <siteUrl>/plugins/com.mattermost.plugin-starter-template/api/v1/. Replace com.mattermost.plugin-starter-template with the plugin ID.
@@ -23,6 +41,7 @@ func (p *Plugin) ServeHTTP(_ *plugin.Context, w http.ResponseWriter, r *http.Req
 	apiRouter := router.PathPrefix("/api/v1").Subrouter()
 	apiRouter.Use(p.MattermostAuthorizationRequired)
 	apiRouter.HandleFunc("/hello", p.HelloWorld).Methods(http.MethodGet)
+	apiRouter.HandleFunc(autocompleteServersPath, p.handleServerAutocomplete).Methods(http.MethodGet)
 
 	router.ServeHTTP(w, r)
 }
@@ -40,36 +59,119 @@ func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler
 	})
 }
 
-// MatrixAuthorizationRequired is a middleware that requires valid Matrix hs_token authentication.
+// MatrixAuthorizationRequired is a middleware that requires a bearer token matching one
+// registered server's hs_token. It compares against EVERY server without an early
+// return (so the comparison cost doesn't leak which, if any, server matched via
+// timing), using subtle.ConstantTimeCompare. Entries with an empty HSToken are skipped
+// so an empty presented token can never match one. The matched server must also be
+// enabled. On success, the resolved serverID is injected into the request context for
+// downstream handlers.
+//
+// Reads the per-node server-config cache maintained by initMatrixClients rather than the
+// KV store directly, so this genuinely hot path (every inbound Matrix webhook) does not
+// pay for a KV read plus a full-registry unmarshal on every request. Disabling or
+// removing a server takes effect as soon as that cache is rebuilt - the same point at
+// which it already takes effect for outbound routing - so this does not change
+// cache-invalidation timing. Falls back to a direct KV read only when the cache has
+// never been built yet (e.g. OnConfigurationChange firing before OnActivate has run),
+// matching getServers' existing error handling for that case.
 func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		config := p.getConfiguration()
-
-		// Check if sync is enabled
-		if !config.EnableSync {
-			p.logger.LogDebug("Matrix webhook received but sync is disabled")
-			http.Error(w, "Sync disabled", http.StatusServiceUnavailable)
-			return
-		}
-
-		// Verify hs_token in Authorization header
 		authHeader := r.Header.Get("Authorization")
-		expectedToken := "Bearer " + config.MatrixHSToken
+		presented := []byte(authHeader)
 
-		if config.MatrixHSToken == "" {
-			p.logger.LogWarn("Matrix webhook received but hs_token not configured")
-			http.Error(w, "Matrix not configured", http.StatusServiceUnavailable)
-			return
+		servers, ok := p.cachedServerConfigs()
+		if !ok {
+			var err error
+			servers, err = p.getServers()
+			if err != nil {
+				p.logger.LogError("Failed to read servers config for Matrix webhook authorization", "error", err)
+				http.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
 		}
 
-		if subtle.ConstantTimeCompare([]byte(authHeader), []byte(expectedToken)) != 1 {
-			p.logger.LogWarn("Matrix webhook authentication failed - bearer token mismatch")
+		var matched *serverAuthMatch
+		for _, s := range servers {
+			if s.HSToken == "" {
+				continue
+			}
+
+			expected := []byte("Bearer " + s.HSToken)
+			if subtle.ConstantTimeCompare(presented, expected) == 1 {
+				m := serverAuthMatch{serverID: s.ServerID, enabled: s.Enabled}
+				matched = &m
+				// Deliberately no early return: every entry is compared, so the
+				// response timing does not reveal which token (if any) matched.
+			}
+		}
+
+		if matched == nil {
+			p.logger.LogWarn("Matrix webhook authentication failed - no server's hs_token matched")
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		if !matched.enabled {
+			p.logger.LogDebug("Matrix webhook received for a disabled server", "server_id", matched.serverID)
+			http.Error(w, "Server disabled", http.StatusServiceUnavailable)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), contextKeyServerID, matched.serverID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// serverAuthMatch holds the outcome of matching a presented hs_token against the
+// registry, deferred until after the full constant-time scan completes.
+type serverAuthMatch struct {
+	serverID string
+	enabled  bool
+}
+
+// autocompleteServersPath is the apiRouter-relative path serving the slash-command
+// autocomplete list of registered Matrix servers. The command package builds its
+// FetchURL from this (see command.ServerAutocompleteURL), so the route and the URL
+// advertised to the webapp cannot drift apart.
+const autocompleteServersPath = "/autocomplete/servers"
+
+// handleServerAutocomplete serves the dynamic autocomplete list for arguments that take a
+// server_id, so admins can pick a server instead of copying an opaque 26-character ID.
+//
+// MattermostAuthorizationRequired only proves the caller is logged in; server IDs are
+// admin-only information, so this additionally requires PermissionManageSystem - the same
+// gate the /matrix commands themselves use.
+//
+// An empty list is returned (rather than an error) whenever there is nothing to suggest,
+// including when the client cache has not been built yet. Autocomplete then shows no
+// suggestions, which degrades better than surfacing an error while someone is typing.
+func (p *Plugin) handleServerAutocomplete(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("Mattermost-User-ID")
+	if !p.API.HasPermissionTo(userID, model.PermissionManageSystem) {
+		http.Error(w, "Not authorized", http.StatusForbidden)
+		return
+	}
+
+	servers, _ := p.cachedServerConfigs()
+
+	items := make([]model.AutocompleteListItem, 0, len(servers))
+	for _, s := range servers {
+		state := "disabled"
+		if s.Enabled {
+			state = "enabled"
+		}
+		items = append(items, model.AutocompleteListItem{
+			Item:     s.ServerID,
+			Hint:     s.ServerName,
+			HelpText: fmt.Sprintf("%s (%s)", s.ServerURL, state),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(items); err != nil {
+		p.logger.LogError("Failed to encode server autocomplete list", "error", err)
+	}
 }
 
 // HelloWorld handles GET requests to /hello endpoint.

@@ -9,11 +9,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
 
 // TestMatrixMentionProcessing tests mention processing with real Matrix server
 func TestMatrixMentionProcessing(t *testing.T) {
+	skipIfShort(t)
+
 	// Start Matrix container
 	matrixContainer := matrixtest.StartMatrixContainer(t, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(t)
@@ -93,7 +96,9 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Mention Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))
+			mappingData, err := buildSingleChannelMapping(setup.ServerID, freshRoomID)
+			require.NoError(t, err)
+			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData))
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
@@ -115,7 +120,9 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			}
 
 			// Sync post to Matrix
-			err := setup.Plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, setup.ChannelID)
+			bridge, err := setup.Plugin.newMattermostToMatrixBridge(setup.ServerID)
+			require.NoError(t, err)
+			err = bridge.SyncPostToMatrix(post, setup.ChannelID)
 			require.NoError(t, err)
 
 			// Wait for Matrix to process with polling
@@ -135,7 +142,7 @@ func TestMatrixMentionProcessing(t *testing.T) {
 			}
 
 			// Validate mention structure
-			validator := matrixtest.NewEventValidation(t, matrixContainer.ServerDomain, setup.Plugin.remoteID)
+			validator := matrixtest.NewEventValidation(t, matrixContainer.ServerDomain, setup.RemoteID)
 			validator.ValidateMessageWithMentions(*messageEvent, post, tc.expectedMentions)
 
 			// Verify specific mention details
@@ -159,6 +166,8 @@ func TestMatrixMentionProcessing(t *testing.T) {
 
 // TestMatrixMentionEdgeCases tests mention processing edge cases
 func TestMatrixMentionEdgeCases(t *testing.T) {
+	skipIfShort(t)
+
 	// Start Matrix container
 	matrixContainer := matrixtest.StartMatrixContainer(t, matrixtest.DefaultMatrixConfig())
 	defer matrixContainer.Cleanup(t)
@@ -293,7 +302,9 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			freshRoomID := matrixContainer.CreateRoom(t, "Edge Case Room - "+tc.name)
 
 			// Update KV store mapping for this fresh room
-			_ = setup.Plugin.kvstore.Set("channel_mapping_"+setup.ChannelID, []byte(freshRoomID))
+			mappingData, err := buildSingleChannelMapping(setup.ServerID, freshRoomID)
+			require.NoError(t, err)
+			require.NoError(t, setup.Plugin.kvstore.Set(kvstore.BuildChannelMappingKey(setup.ChannelID), mappingData))
 
 			// Clear previous mock expectations
 			clearMockExpectations(setup.API)
@@ -314,7 +325,9 @@ func TestMatrixMentionEdgeCases(t *testing.T) {
 			}
 
 			// Sync post to Matrix
-			err := setup.Plugin.mattermostToMatrixBridge.SyncPostToMatrix(post, setup.ChannelID)
+			bridge, err := setup.Plugin.newMattermostToMatrixBridge(setup.ServerID)
+			require.NoError(t, err)
+			err = bridge.SyncPostToMatrix(post, setup.ChannelID)
 			require.NoError(t, err)
 
 			// Wait for processing with polling

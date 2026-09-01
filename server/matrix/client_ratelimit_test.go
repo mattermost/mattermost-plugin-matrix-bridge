@@ -434,3 +434,8 @@ func BenchmarkClient_SendMessage_WithRateLimit(b *testing.B) {
 		_, _ = client.SendMessage(req)
 	}
 }
+
+func TestCreateBridgeAlias(t *testing.T) {
+	assert.Equal(t, "#mattermost-bridge-my-room:example.com", CreateBridgeAlias("my-room", "example.com"))
+	assert.Equal(t, "#mattermost-bridge-my-room:localhost:8008", CreateBridgeAlias("my-room", "localhost:8008"))
+}

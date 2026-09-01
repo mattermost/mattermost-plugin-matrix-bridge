@@ -1,17 +1,20 @@
 package main
 
 import (
-	"net/url"
 	"regexp"
 	"strings"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-// getGhostUser retrieves the Matrix ghost user ID for a Mattermost user if it exists
-func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
-	ghostUserKey := "ghost_user_" + mattermostUserID
+// getGhostUser retrieves the Matrix ghost user ID for a Mattermost user on a specific
+// Matrix server, if it exists.
+func (p *Plugin) getGhostUser(serverID, mattermostUserID string) (string, bool) {
+	ghostUserKey := kvstore.BuildGhostUserKey(serverID, mattermostUserID)
 	ghostUserIDBytes, err := p.kvstore.Get(ghostUserKey)
 	if err == nil && len(ghostUserIDBytes) > 0 {
 		return string(ghostUserIDBytes), true
@@ -19,32 +22,10 @@ func (p *Plugin) getGhostUser(mattermostUserID string) (string, bool) {
 	return "", false
 }
 
-// extractServerDomain extracts the hostname from a Matrix server URL
-func extractServerDomain(logger Logger, serverURL string) string {
-	if serverURL == "" {
-		return "unknown"
-	}
-
-	parsedURL, err := url.Parse(serverURL)
-	if err != nil {
-		logger.LogWarn("Failed to parse Matrix server URL", "url", serverURL, "error", err)
-		return "unknown"
-	}
-
-	hostname := parsedURL.Hostname()
-	if hostname == "" {
-		logger.LogWarn("Could not extract hostname from Matrix server URL", "url", serverURL)
-		return "unknown"
-	}
-
-	// Replace dots and colons to make it safe for use in property keys
-	return strings.ReplaceAll(strings.ReplaceAll(hostname, ".", "_"), ":", "_")
-}
-
 // findAndDeleteFileMessage finds and deletes file attachment messages that are replies to the main post
-func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, postEventID string) error {
+func (p *Plugin) findAndDeleteFileMessage(client *matrix.Client, matrixRoomID, ghostUserID, filename, postEventID string) error {
 	// Get all reply messages to the main post event
-	relations, err := p.matrixClient.GetEventRelationsAsUser(matrixRoomID, postEventID, ghostUserID)
+	relations, err := client.GetEventRelationsAsUser(matrixRoomID, postEventID, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to get event relations from Matrix")
 	}
@@ -114,7 +95,7 @@ func (p *Plugin) findAndDeleteFileMessage(matrixRoomID, ghostUserID, filename, p
 	}
 
 	// Redact the file message
-	_, err = p.matrixClient.RedactEventAsGhost(matrixRoomID, fileEventID, ghostUserID)
+	_, err = client.RedactEventAsGhost(matrixRoomID, fileEventID, ghostUserID)
 	if err != nil {
 		return errors.Wrap(err, "failed to redact file message in Matrix")
 	}

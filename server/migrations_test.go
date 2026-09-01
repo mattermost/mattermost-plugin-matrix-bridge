@@ -4,497 +4,202 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
+type faultyKVStore struct {
+	kvstore.KVStore
+	getErr    map[string]error
+	deleteErr map[string]error
+	listErr   error
+}
+
+func (f *faultyKVStore) Get(key string) ([]byte, error) {
+	if err := f.getErr[key]; err != nil {
+		return nil, err
+	}
+	return f.KVStore.Get(key)
+}
+
+func (f *faultyKVStore) Delete(key string) error {
+	if err := f.deleteErr[key]; err != nil {
+		return err
+	}
+	return f.KVStore.Delete(key)
+}
+
+func (f *faultyKVStore) ListKeys(page, perPage int) ([]string, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.KVStore.ListKeys(page, perPage)
+}
+
+func newFaultyKVStore(inner kvstore.KVStore) *faultyKVStore {
+	return &faultyKVStore{
+		KVStore:   inner,
+		getErr:    map[string]error{},
+		deleteErr: map[string]error{},
+	}
+}
+
+func preMultiServerRecords() map[string][]byte {
+	return map[string][]byte{
+		kvstore.KeyLegacyStoreVersion:            []byte("2"),
+		"matrix_user_@alice:example.com":         []byte("mmuserid1"),
+		"mattermost_user_mmuserid1":              []byte("@alice:example.com"),
+		"channel_mapping_channel1":               []byte("!room:example.com"),
+		"room_mapping_!room:example.com":         []byte("channel1"),
+		"ghost_user_mmuserid1":                   []byte("@_mattermost_mmuserid1:example.com"),
+		"ghost_room_mmuserid1_!room:example.com": []byte("true"),
+		"matrix_event_post_$event1:example.com":  []byte("postid1"),
+		"matrix_reaction_$reaction1:example.com": []byte(`{"emoji":"+1"}`),
+		"dm_mapping_dmchannel1":                  []byte("!dmroom:example.com"),
+		"matrix_dm_mapping_!dmroom:example.com":  []byte("dmchannel1"),
+	}
+}
+
+func seedRecords(t *testing.T, store kvstore.KVStore, records map[string][]byte) {
+	t.Helper()
+	for key, value := range records {
+		require.NoError(t, store.Set(key, value))
+	}
+}
+
+func schemaVersion(t *testing.T, store kvstore.KVStore) string {
+	t.Helper()
+	data, err := store.Get(kvstore.KeySchemaVersion)
+	require.NoError(t, err)
+	return string(data)
+}
+
 func TestRunKVStoreMigrations(t *testing.T) {
-	t.Run("NoMigrationNeeded", func(t *testing.T) {
+	t.Run("fresh install stamps the marker and deletes nothing", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
 
-		// Set current version to target version
-		err := plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte(strconv.Itoa(kvstore.CurrentKVStoreVersion)))
-		assert.NoError(t, err)
+		require.NoError(t, plugin.runKVStoreMigrations())
 
-		// Run migrations
-		err = plugin.runKVStoreMigrations()
-		assert.NoError(t, err)
-
-		// Version should remain the same
-		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.NoError(t, err)
-		version, err := strconv.Atoi(string(versionBytes))
-		assert.NoError(t, err)
-		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
+		assert.Equal(t, strconv.Itoa(kvstore.CurrentKVStoreVersion), schemaVersion(t, plugin.kvstore))
 	})
 
-	t.Run("MigrationFromVersion0", func(t *testing.T) {
+	t.Run("purges every pre-multi-server record and its marker", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
+		records := preMultiServerRecords()
+		seedRecords(t, plugin.kvstore, records)
 
-		// No version key exists (version 0)
-		_, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.Error(t, err) // Should not exist
+		require.NoError(t, plugin.runKVStoreMigrations())
 
-		// Add some test data that would need migration
-		err = plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123"))
-		assert.NoError(t, err)
-		err = plugin.kvstore.Set("channel_mapping_channel456", []byte("!room789:matrix.org"))
-		assert.NoError(t, err)
-
-		// Run migrations
-		err = plugin.runKVStoreMigrations()
-		assert.NoError(t, err)
-
-		// Version should be updated
-		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.NoError(t, err)
-		version, err := strconv.Atoi(string(versionBytes))
-		assert.NoError(t, err)
-		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
-
-		// Reverse mappings should be created
-		userReverseBytes, err := plugin.kvstore.Get("mattermost_user_user123")
-		assert.NoError(t, err)
-		assert.Equal(t, "@alice:matrix.org", string(userReverseBytes))
-
-		channelReverseBytes, err := plugin.kvstore.Get("room_mapping_!room789:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel456", string(channelReverseBytes))
+		for key := range records {
+			value, err := plugin.kvstore.Get(key)
+			require.NoError(t, err)
+			assert.Empty(t, value, "%q must not survive the purge", key)
+		}
+		assert.Equal(t, strconv.Itoa(kvstore.CurrentKVStoreVersion), schemaVersion(t, plugin.kvstore))
 	})
 
-	t.Run("InvalidVersionHandledGracefully", func(t *testing.T) {
+	t.Run("never deletes the server registry", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
+		seedRecords(t, plugin.kvstore, preMultiServerRecords())
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, []byte(`[{"server_id":"abc"}]`)))
 
-		// Set invalid version
-		err := plugin.kvstore.Set(kvstore.KeyStoreVersion, []byte("invalid"))
-		assert.NoError(t, err)
+		require.NoError(t, plugin.runKVStoreMigrations())
 
-		// Should treat as version 0 and run migration
-		err = plugin.runKVStoreMigrations()
-		assert.NoError(t, err)
-
-		// Version should be updated to current
-		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.NoError(t, err)
-		version, err := strconv.Atoi(string(versionBytes))
-		assert.NoError(t, err)
-		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
-	})
-}
-
-func TestMigrateUserMappings(t *testing.T) {
-	t.Run("MigrateMultipleUsers", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-
-		// Add test user mappings
-		testUsers := map[string]string{
-			"matrix_user_@alice:matrix.org": "user123",
-			"matrix_user_@bob:matrix.org":   "user456",
-			"matrix_user_@carol:matrix.org": "user789",
-		}
-
-		for key, value := range testUsers {
-			err := plugin.kvstore.Set(key, []byte(value))
-			assert.NoError(t, err)
-		}
-
-		// Add some non-user keys that should be ignored
-		err := plugin.kvstore.Set("channel_mapping_test", []byte("room123"))
-		assert.NoError(t, err)
-		err = plugin.kvstore.Set("other_key", []byte("other_value"))
-		assert.NoError(t, err)
-
-		// Run user migration
-		_, err = plugin.migrateUserMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Check that reverse mappings were created
-		expectedReverse := map[string]string{
-			"mattermost_user_user123": "@alice:matrix.org",
-			"mattermost_user_user456": "@bob:matrix.org",
-			"mattermost_user_user789": "@carol:matrix.org",
-		}
-
-		for reverseKey, expectedValue := range expectedReverse {
-			valueBytes, err := plugin.kvstore.Get(reverseKey)
-			assert.NoError(t, err)
-			assert.Equal(t, expectedValue, string(valueBytes))
-		}
-
-		// Original mappings should still exist
-		for key, expectedValue := range testUsers {
-			valueBytes, err := plugin.kvstore.Get(key)
-			assert.NoError(t, err)
-			assert.Equal(t, expectedValue, string(valueBytes))
-		}
+		registry, err := plugin.kvstore.Get(kvstore.KeyServersConfig)
+		require.NoError(t, err)
+		assert.Equal(t, `[{"server_id":"abc"}]`, string(registry))
 	})
 
-	t.Run("OverwriteIncorrectReverseMappings", func(t *testing.T) {
+	t.Run("is a no-op once the marker is current", func(t *testing.T) {
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeySchemaVersion, []byte(strconv.Itoa(kvstore.CurrentKVStoreVersion))))
+		live, err := buildSingleChannelMapping("serverA", "!room:example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), live))
 
-		// Add user mapping (source of truth)
-		err := plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123"))
-		assert.NoError(t, err)
+		require.NoError(t, plugin.runKVStoreMigrations())
 
-		// Add incorrect existing reverse mapping
-		err = plugin.kvstore.Set("mattermost_user_user123", []byte("@incorrect:matrix.org"))
-		assert.NoError(t, err)
-
-		// Run migration
-		_, err = plugin.migrateUserMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Incorrect reverse mapping should be corrected based on forward mapping
-		valueBytes, err := plugin.kvstore.Get("mattermost_user_user123")
-		assert.NoError(t, err)
-		assert.Equal(t, "@alice:matrix.org", string(valueBytes))
+		stored, err := plugin.kvstore.Get(kvstore.BuildChannelMappingKey("channel1"))
+		require.NoError(t, err)
+		assert.Equal(t, live, stored, "an already-migrated store must not be purged")
 	})
 
-	t.Run("HandlesPaginationWithManyKeys", func(t *testing.T) {
+	t.Run("a failed delete leaves the marker unset", func(t *testing.T) {
 		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
+		store := newFaultyKVStore(NewMemoryKVStore())
+		plugin.kvstore = store
+		seedRecords(t, store, preMultiServerRecords())
+		store.deleteErr["room_mapping_!room:example.com"] = errors.New("boom")
 
-		// Add more than one batch worth of keys to test pagination
-		// Add user mappings
-		for i := range MigrationBatchSize + 100 {
-			userKey := "matrix_user_@user" + strconv.Itoa(i) + ":matrix.org"
-			mattermostUserID := "user" + strconv.Itoa(i)
-			err := plugin.kvstore.Set(userKey, []byte(mattermostUserID))
-			assert.NoError(t, err)
-		}
-
-		// Add some non-user keys
-		for i := range 50 {
-			otherKey := "other_key_" + strconv.Itoa(i)
-			err := plugin.kvstore.Set(otherKey, []byte("value"+strconv.Itoa(i)))
-			assert.NoError(t, err)
-		}
-
-		// Run migration
-		_, err := plugin.migrateUserMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Verify all reverse mappings were created
-		for i := range MigrationBatchSize + 100 {
-			mattermostUserID := "user" + strconv.Itoa(i)
-			expectedMatrixUserID := "@user" + strconv.Itoa(i) + ":matrix.org"
-
-			reverseKey := kvstore.BuildMattermostUserKey(mattermostUserID)
-			valueBytes, err := plugin.kvstore.Get(reverseKey)
-			assert.NoError(t, err)
-			assert.Equal(t, expectedMatrixUserID, string(valueBytes))
-		}
-	})
-}
-
-func TestMigrateChannelMappings(t *testing.T) {
-	t.Run("MigrateChannelsWithRoomIDs", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-
-		// Add test channel mappings with room IDs
-		testChannels := map[string]string{
-			"channel_mapping_channel123": "!room456:matrix.org",
-			"channel_mapping_channel789": "!room012:matrix.org",
-		}
-
-		for key, value := range testChannels {
-			err := plugin.kvstore.Set(key, []byte(value))
-			assert.NoError(t, err)
-		}
-
-		// Run channel migration
-		_, err := plugin.migrateChannelMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Check that reverse mappings were created
-		expectedReverse := map[string]string{
-			"room_mapping_!room456:matrix.org": "channel123",
-			"room_mapping_!room012:matrix.org": "channel789",
-		}
-
-		for reverseKey, expectedValue := range expectedReverse {
-			valueBytes, err := plugin.kvstore.Get(reverseKey)
-			assert.NoError(t, err)
-			assert.Equal(t, expectedValue, string(valueBytes))
-		}
-	})
-
-	t.Run("MigrateChannelsWithAliases", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		// Use nil Matrix client to simulate alias resolution failure
-		plugin.matrixClient = nil
-
-		// Add test channel mapping with alias
-		err := plugin.kvstore.Set("channel_mapping_channel123", []byte("#test:matrix.org"))
-		assert.NoError(t, err)
-
-		// Run channel migration
-		_, err = plugin.migrateChannelMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Check that alias reverse mapping was created (even without Matrix client)
-		aliasReverseBytes, err := plugin.kvstore.Get("room_mapping_#test:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel123", string(aliasReverseBytes))
-
-		// Room ID mapping should not exist due to nil client
-		_, err = plugin.kvstore.Get("room_mapping_!any:matrix.org")
-		assert.Error(t, err)
-	})
-
-	t.Run("MigrateChannelsWithAliasesAndWorkingClient", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		// Use real Matrix client (though it won't actually resolve without server)
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "https://test.matrix.org", "test_token", "test_remote")
-
-		// Add test channel mapping with alias
-		err := plugin.kvstore.Set("channel_mapping_channel123", []byte("#test:matrix.org"))
-		assert.NoError(t, err)
-
-		// Run channel migration - should not fail even if alias resolution fails
-		_, err = plugin.migrateChannelMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Check that alias reverse mapping was created
-		aliasReverseBytes, err := plugin.kvstore.Get("room_mapping_#test:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel123", string(aliasReverseBytes))
-
-		// Room ID mapping may or may not exist depending on alias resolution success
-		// but migration should complete either way
-	})
-
-	t.Run("OverwriteIncorrectReverseMappings", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-
-		// Add channel mapping (source of truth)
-		err := plugin.kvstore.Set("channel_mapping_channel123", []byte("!room456:matrix.org"))
-		assert.NoError(t, err)
-
-		// Add incorrect existing reverse mapping
-		err = plugin.kvstore.Set("room_mapping_!room456:matrix.org", []byte("incorrect_channel"))
-		assert.NoError(t, err)
-
-		// Run migration
-		_, err = plugin.migrateChannelMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Incorrect reverse mapping should be corrected based on forward mapping
-		valueBytes, err := plugin.kvstore.Get("room_mapping_!room456:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel123", string(valueBytes))
-	})
-
-	t.Run("HandlesPaginationWithManyChannels", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-
-		// Add more than one batch worth of channel mappings to test pagination
-		for i := range MigrationBatchSize + 50 {
-			channelKey := "channel_mapping_channel" + strconv.Itoa(i)
-			roomID := "!room" + strconv.Itoa(i) + ":matrix.org"
-			err := plugin.kvstore.Set(channelKey, []byte(roomID))
-			assert.NoError(t, err)
-		}
-
-		// Run migration
-		_, err := plugin.migrateChannelMappingsWithResults()
-		assert.NoError(t, err)
-
-		// Verify all reverse mappings were created
-		for i := range MigrationBatchSize + 50 {
-			channelID := "channel" + strconv.Itoa(i)
-			roomID := "!room" + strconv.Itoa(i) + ":matrix.org"
-
-			reverseKey := kvstore.BuildRoomMappingKey(roomID)
-			valueBytes, err := plugin.kvstore.Get(reverseKey)
-			assert.NoError(t, err)
-			assert.Equal(t, channelID, string(valueBytes))
-		}
-	})
-}
-
-func TestMigrationIntegration(t *testing.T) {
-	t.Run("FullMigrationScenario", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-
-		// Setup a complete scenario with users, channels, and other keys
-		testData := map[string]string{
-			// User mappings
-			"matrix_user_@alice:matrix.org": "user123",
-			"matrix_user_@bob:matrix.org":   "user456",
-
-			// Channel mappings
-			"channel_mapping_channel789": "!room012:matrix.org",
-			"channel_mapping_channel345": "#public:matrix.org",
-
-			// Other keys (should be ignored)
-			"ghost_user_user123": "@_mattermost_user123:matrix.org",
-			"some_other_key":     "some_value",
-		}
-
-		// DM mappings (will be migrated by version 2 migration)
-		dmTestData := map[string]string{
-			"dm_mapping_dm123": "!dmroom456:matrix.org",
-		}
-
-		for key, value := range testData {
-			err := plugin.kvstore.Set(key, []byte(value))
-			assert.NoError(t, err)
-		}
-
-		for key, value := range dmTestData {
-			err := plugin.kvstore.Set(key, []byte(value))
-			assert.NoError(t, err)
-		}
-
-		// Verify no version key exists initially
-		_, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.Error(t, err)
-
-		// Run full migration
-		err = plugin.runKVStoreMigrations()
-		assert.NoError(t, err)
-
-		// Check version was set
-		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.NoError(t, err)
-		version, err := strconv.Atoi(string(versionBytes))
-		assert.NoError(t, err)
-		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
-
-		// Check user reverse mappings
-		userReverse1, err := plugin.kvstore.Get("mattermost_user_user123")
-		assert.NoError(t, err)
-		assert.Equal(t, "@alice:matrix.org", string(userReverse1))
-
-		userReverse2, err := plugin.kvstore.Get("mattermost_user_user456")
-		assert.NoError(t, err)
-		assert.Equal(t, "@bob:matrix.org", string(userReverse2))
-
-		// Check channel reverse mappings
-		channelReverse1, err := plugin.kvstore.Get("room_mapping_!room012:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel789", string(channelReverse1))
-
-		channelReverse2, err := plugin.kvstore.Get("room_mapping_#public:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel345", string(channelReverse2))
-
-		// Verify original data is unchanged
-		for key, expectedValue := range testData {
-			valueBytes, err := plugin.kvstore.Get(key)
-			assert.NoError(t, err)
-			assert.Equal(t, expectedValue, string(valueBytes))
-		}
-
-		// Verify DM mappings were migrated to unified prefix
-		dmUnifiedBytes, err := plugin.kvstore.Get("channel_mapping_dm123")
-		assert.NoError(t, err)
-		assert.Equal(t, "!dmroom456:matrix.org", string(dmUnifiedBytes))
-
-		// Verify old DM mapping was deleted
-		_, err = plugin.kvstore.Get("dm_mapping_dm123")
-		assert.Error(t, err) // Should be deleted
-
-		// Verify reverse DM mapping was created
-		dmReverseBytes, err := plugin.kvstore.Get("room_mapping_!dmroom456:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "dm123", string(dmReverseBytes))
-
-		otherBytes, err := plugin.kvstore.Get("some_other_key")
-		assert.NoError(t, err)
-		assert.Equal(t, "some_value", string(otherBytes))
-	})
-
-	t.Run("RunMigrationTwiceIsIdempotent", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-
-		// Add test data
-		err := plugin.kvstore.Set("matrix_user_@alice:matrix.org", []byte("user123"))
-		assert.NoError(t, err)
-		err = plugin.kvstore.Set("channel_mapping_channel456", []byte("!room789:matrix.org"))
-		assert.NoError(t, err)
-
-		// Run migration first time
-		err = plugin.runKVStoreMigrations()
-		assert.NoError(t, err)
-
-		// Verify reverse mappings exist
-		userReverse, err := plugin.kvstore.Get("mattermost_user_user123")
-		assert.NoError(t, err)
-		assert.Equal(t, "@alice:matrix.org", string(userReverse))
-
-		channelReverse, err := plugin.kvstore.Get("room_mapping_!room789:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel456", string(channelReverse))
-
-		// Run migration second time
-		err = plugin.runKVStoreMigrations()
-		assert.NoError(t, err)
-
-		// Verify data is unchanged
-		userReverse2, err := plugin.kvstore.Get("mattermost_user_user123")
-		assert.NoError(t, err)
-		assert.Equal(t, "@alice:matrix.org", string(userReverse2))
-
-		channelReverse2, err := plugin.kvstore.Get("room_mapping_!room789:matrix.org")
-		assert.NoError(t, err)
-		assert.Equal(t, "channel456", string(channelReverse2))
-
-		// Version should still be current
-		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.NoError(t, err)
-		version, err := strconv.Atoi(string(versionBytes))
-		assert.NoError(t, err)
-		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
-	})
-
-	t.Run("EmptyKVStoreHandledGracefully", func(t *testing.T) {
-		plugin := setupPluginForTest()
-		plugin.kvstore = NewMemoryKVStore()
-		plugin.logger = &testLogger{t: t}
-		plugin.matrixClient = createMatrixClientWithTestLogger(t, "", "", "")
-
-		// Run migration on empty KV store
 		err := plugin.runKVStoreMigrations()
-		assert.NoError(t, err)
 
-		// Version should be set
-		versionBytes, err := plugin.kvstore.Get(kvstore.KeyStoreVersion)
-		assert.NoError(t, err)
-		version, err := strconv.Atoi(string(versionBytes))
-		assert.NoError(t, err)
-		assert.Equal(t, kvstore.CurrentKVStoreVersion, version)
+		require.Error(t, err)
+		assert.Empty(t, schemaVersion(t, store))
+	})
+
+	t.Run("a failed keyspace scan leaves the marker unset", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		store := newFaultyKVStore(NewMemoryKVStore())
+		plugin.kvstore = store
+		seedRecords(t, store, preMultiServerRecords())
+		store.listErr = errors.New("boom")
+
+		err := plugin.runKVStoreMigrations()
+
+		require.Error(t, err)
+		assert.Empty(t, schemaVersion(t, store))
+	})
+
+	t.Run("an unreadable marker fails instead of purging", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		store := newFaultyKVStore(NewMemoryKVStore())
+		plugin.kvstore = store
+		seedRecords(t, store, preMultiServerRecords())
+		store.getErr[kvstore.KeySchemaVersion] = errors.New("boom")
+
+		err := plugin.runKVStoreMigrations()
+
+		require.Error(t, err)
+		survivor, getErr := store.Get("channel_mapping_channel1")
+		require.NoError(t, getErr)
+		assert.NotEmpty(t, survivor, "a marker that could not be read must not license a purge")
+	})
+
+	t.Run("a non-numeric marker fails instead of purging", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		seedRecords(t, plugin.kvstore, preMultiServerRecords())
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeySchemaVersion, []byte("not-a-number")))
+
+		err := plugin.runKVStoreMigrations()
+
+		require.Error(t, err)
+		survivor, getErr := plugin.kvstore.Get("channel_mapping_channel1")
+		require.NoError(t, getErr)
+		assert.NotEmpty(t, survivor, "an unparseable marker must not license a purge")
+	})
+
+	t.Run("retries the purge after a failed run", func(t *testing.T) {
+		plugin := setupPluginForTest()
+		store := newFaultyKVStore(NewMemoryKVStore())
+		plugin.kvstore = store
+		seedRecords(t, store, preMultiServerRecords())
+		store.deleteErr["room_mapping_!room:example.com"] = errors.New("boom")
+		require.Error(t, plugin.runKVStoreMigrations())
+
+		delete(store.deleteErr, "room_mapping_!room:example.com")
+		require.NoError(t, plugin.runKVStoreMigrations())
+
+		survivor, err := store.Get("room_mapping_!room:example.com")
+		require.NoError(t, err)
+		assert.Empty(t, survivor)
+		assert.Equal(t, strconv.Itoa(kvstore.CurrentKVStoreVersion), schemaVersion(t, store))
 	})
 }

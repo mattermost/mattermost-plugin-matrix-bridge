@@ -75,3 +75,21 @@ func (kv Client) ListKeysWithPrefix(page, perPage int, prefix string) ([]string,
 	}
 	return keys, nil
 }
+
+// SetAtomicWithRetries sets key atomically using compare-and-set semantics, delegating to
+// the pluginapi client. valueFunc's newValue is stored as raw bytes (pluginapi.Set treats a
+// []byte value as opaque, skipping JSON re-encoding), matching how Get/Set already treat
+// values in this package.
+func (kv Client) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error {
+	err := kv.client.KV.SetAtomicWithRetries(key, func(oldValue []byte) (any, error) {
+		newValue, err := valueFunc(oldValue)
+		if err != nil {
+			return nil, err
+		}
+		return newValue, nil
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to set value atomically in KV store")
+	}
+	return nil
+}

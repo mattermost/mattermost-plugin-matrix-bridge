@@ -6,8 +6,10 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 func TestExtractMatrixMessageContent(t *testing.T) {
@@ -758,4 +760,76 @@ func TestBridgeUtils_ExtractMattermostUserIDFromGhost(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// TestBridgeUtilsServerConfigUsesCachedSnapshot pins BridgeUtils.serverConfig to the
+// serverConfigs snapshot cache rather than a live registry read. serverConfig is called
+// several times per synced post or event, so a KV round trip per call is not affordable -
+// see its doc comment.
+func TestBridgeUtilsServerConfigUsesCachedSnapshot(t *testing.T) {
+	newTestPlugin := func(t *testing.T) (*Plugin, string) {
+		t.Helper()
+
+		plugin := setupPluginForTest()
+		plugin.kvstore = NewMemoryKVStore()
+		matrixClient := createMatrixClientWithTestLogger(t, "https://matrix.example.com", "as-token", "")
+		serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
+		return plugin, serverID
+	}
+
+	t.Run("resolves the server without reading the registry key", func(t *testing.T) {
+		plugin, serverID := newTestPlugin(t)
+		setTestServerUsernamePrefix(t, plugin, serverID, "cachedprefix")
+
+		// Failing every read of the registry key is what makes this a real assertion: any
+		// KV round trip left in serverConfig would surface below as an error rather than a
+		// value, whichever bridge helper triggered it.
+		plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.KeyServersConfig}
+
+		m2mx, mx2m := plugin.testBridges(t, serverID)
+
+		prefix, err := m2mx.matrixUsernamePrefix()
+		require.NoError(t, err)
+		assert.Equal(t, "cachedprefix", prefix)
+
+		assert.Equal(t, "matrix.example.com", mx2m.serverDomain())
+
+		propertyKey, err := mx2m.matrixEventIDPropertyKey()
+		require.NoError(t, err)
+		assert.Equal(t, "matrix_event_id_"+sanitizeForEventDomain("matrix.example.com"), propertyKey)
+	})
+
+	t.Run("a snapshot refresh is visible to an already-built bridge", func(t *testing.T) {
+		plugin, serverID := newTestPlugin(t)
+
+		m2mx, _ := plugin.testBridges(t, serverID)
+
+		prefix, err := m2mx.matrixUsernamePrefix()
+		require.NoError(t, err)
+		require.Equal(t, DefaultMatrixUsernamePrefix, prefix)
+
+		// The bridge holds a lookup function, not a ServerConfig copied at build time, so a
+		// registry change that refreshes the snapshot takes effect without rebuilding it.
+		setTestServerUsernamePrefix(t, plugin, serverID, "rotatedprefix")
+
+		prefix, err = m2mx.matrixUsernamePrefix()
+		require.NoError(t, err)
+		assert.Equal(t, "rotatedprefix", prefix)
+	})
+
+	t.Run("falls back to the registry when the snapshot has no entry", func(t *testing.T) {
+		plugin, serverID := newTestPlugin(t)
+		setTestServerUsernamePrefix(t, plugin, serverID, "kvprefix")
+
+		m2mx, _ := plugin.testBridges(t, serverID)
+
+		// Stands in for a node that has not rebuilt its caches yet: serverConfigForRouting
+		// must still answer correctly, from KV, rather than report the server unregistered.
+		// TestDefaultUsernamePrefix covers the same fallback when that KV read itself fails.
+		plugin.serverConfigs = nil
+
+		prefix, err := m2mx.matrixUsernamePrefix()
+		require.NoError(t, err)
+		assert.Equal(t, "kvprefix", prefix)
+	})
 }
