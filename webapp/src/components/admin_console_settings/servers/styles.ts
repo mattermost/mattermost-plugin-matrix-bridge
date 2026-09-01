@@ -10,16 +10,19 @@ import type {CSSProperties} from 'react';
 // file anywhere else (see modal_shell.tsx) - so this stays consistent with that.
 //
 // Colors mirror Mattermost's Denim tokens (var(--center-channel-color) etc.).
-// Only the base custom properties are defined at runtime; the "-75"/"-64"/"-16"/
-// "-12"/"-8" opacity variants used throughout the design are not, so those are
-// hardcoded as the equivalent rgba() of --center-channel-color (#3f4350).
+// The "-75"/"-64"/"-16"/"-12"/"-8" opacity variants the design uses are not
+// defined as custom properties, so they are composed from
+// --center-channel-color-rgb, which Mattermost exposes as a bare "r, g, b"
+// triplet for exactly this purpose. The fallback is Denim's #3f4350, used only
+// when the property is absent - a hardcoded rgba() here would instead keep
+// light-theme text and borders on a dark-theme background.
 export const colors = {
-    textMuted: 'rgba(63, 67, 80, 0.75)',
-    textFaint: 'rgba(63, 67, 80, 0.64)',
-    borderFaint: 'rgba(63, 67, 80, 0.08)',
-    border: 'rgba(63, 67, 80, 0.12)',
-    borderStrong: 'rgba(63, 67, 80, 0.16)',
-    hover: 'rgba(63, 67, 80, 0.08)',
+    textMuted: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.75)',
+    textFaint: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.64)',
+    borderFaint: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.08)',
+    border: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.12)',
+    borderStrong: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.16)',
+    hover: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.08)',
     green: '#339970',
     greenBg: 'rgba(51, 153, 112, 0.08)',
     red: 'var(--error-text, #d24b4e)',
