@@ -13,4 +13,20 @@ describe('generateToken', () => {
         const tokens = new Set(Array.from({length: 20}, () => generateToken()));
         expect(tokens.size).toBe(20);
     });
+
+    // The shape assertions above pass just as well for a Math.random token, so
+    // they cannot catch a regression back to a predictable generator. These are
+    // bearer credentials - pin the source explicitly.
+    it('draws from crypto.getRandomValues, not Math.random', () => {
+        const getRandomValues = jest.spyOn(crypto, 'getRandomValues');
+        const random = jest.spyOn(Math, 'random');
+
+        generateToken();
+
+        expect(getRandomValues).toHaveBeenCalled();
+        expect(random).not.toHaveBeenCalled();
+
+        getRandomValues.mockRestore();
+        random.mockRestore();
+    });
 });
