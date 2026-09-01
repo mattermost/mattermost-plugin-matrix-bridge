@@ -16,7 +16,8 @@ config keys (`matrix_server_url`, `matrix_as_token`, `matrix_hs_token`) that no 
 Give System Admins a first-class System Console surface over the same KV registry: a plugin
 REST API under `/api/v1`, and a custom admin-console section that lists, adds, edits,
 enables/disables, tests and removes homeservers, shows each one's Application Service
-registration, and lists the channels bridged to it (read-only, with unmap).
+registration, and lists the channels bridged to it (read-only - unmapping stays on
+`/matrix unmap`).
 
 Slash commands stay, with unchanged behaviour. Both surfaces must call **one** implementation.
 
@@ -48,8 +49,8 @@ Slash commands stay, with unchanged behaviour. Both surfaces must call **one** i
   joins the room, creates a ghost for the invoking user, adds the bridge alias, syncs every
   channel member, shares the channel and invites that server's remote — all against
   `args.ChannelId`. Driving that from the console needs a channel picker and a
-  channel-context-free rewrite of the flow. `/matrix map` stays the way to create a mapping;
-  the console lists and removes them.
+  channel-context-free rewrite of the flow. `/matrix map`/`/matrix unmap` stay the way to
+  create and clear a mapping; the console only lists them.
 - `/matrix create` (room creation) and `/matrix migrate` equivalents.
 - Lifting one-server-per-channel (backend §6).
 - **i18n.** `webapp/i18n/en.json` is `{}` and no existing component uses `react-intl`. New
@@ -109,7 +110,7 @@ package servers
 // build the registration URL. Package main implements it with a thin adapter; tests use a fake.
 type Host interface {
     MatrixClient(serverID string) *matrix.Client
-    RegisterRemote(serverID string) error
+    RegisterRemoteForSiteURL(siteURL string) (remoteID string, err error)
     UnregisterRemote(remoteID string) error
     RefreshAndBroadcast(reason string) error
     SiteURL() string
@@ -148,6 +149,7 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error)
 func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []string, error) // §3.3
 func (s *Service) Remove(serverID string) (bool, error)
 func (s *Service) SetEnabled(serverID string, enabled bool) error
+func (s *Service) MergeRemoteIDs(remoteIDs map[string]string) error // one write for main's bulk registerForSharedChannels
 
 // Derived views
 func (s *Service) ProbeHealth(servers []kvstore.ServerConfig) map[string]string
@@ -185,9 +187,24 @@ separate adapter type so `Plugin`'s method set does not widen:
 type pluginHost struct{ p *Plugin }
 
 func (h pluginHost) MatrixClient(serverID string) *matrix.Client { return h.p.getMatrixClient(serverID) }
-func (h pluginHost) RegisterRemote(serverID string) error        { return h.p.registerServerForSharedChannels(serverID) }
 func (h pluginHost) RefreshAndBroadcast(reason string) error     { return h.p.refreshServersAndBroadcast(reason) }
 func (h pluginHost) PluginID() string                            { return manifest.Id }
+
+// Registers by SiteURL, not server_id, and hands the remote ID back: Service.Add needs
+// the remote to exist before it writes the entry that stores its ID, so no registered
+// server is ever persisted without one.
+func (h pluginHost) RegisterRemoteForSiteURL(siteURL string) (string, error) {
+    return h.p.doRegisterPluginForSharedChannels(siteURL)
+}
+
+// SiteURL returns "" when unset rather than erroring - the registration URL is built
+// from it, and an empty one is a visibly wrong URL rather than a failed request.
+func (h pluginHost) SiteURL() string {
+    if cfg := h.p.API.GetConfig(); cfg != nil && cfg.ServiceSettings.SiteURL != nil {
+        return *cfg.ServiceSettings.SiteURL
+    }
+    return ""
+}
 
 // UnregisterRemote must convert explicitly: UnregisterPluginRemoteForSharedChannels returns
 // *model.AppError, and returning a nil *AppError as an error yields a NON-nil error interface.
@@ -383,7 +400,10 @@ debug; note it in the client module's comment.
 | `POST`   | `/servers/{server_id}/test`                 | —                   | 200 `servers.Diagnostics`                        |
 | `GET`    | `/servers/{server_id}/registration`         | —                   | 200 `{filename, content}`                      |
 | `GET`    | `/servers/{server_id}/mappings`             | —                   | 200 `{total_count, mappings: [MappingView]}`   |
-| `DELETE` | `/servers/{server_id}/mappings/{channel_id}` | —                   | 200 `{}`                                       |
+| `GET`    | `/autocomplete/servers`                     | —                   | 200 slash-command autocomplete items           |
+
+There is deliberately **no unmap endpoint**. Unmapping is `/matrix unmap` only, so the
+mappings view is read-only (§3.8) and `UnmapChannelFromServer` keeps a single caller.
 
 Errors use one shape — `{"message": "..."}` — with the status from §3.4. Messages from the
 registry are already written for humans (they name the conflicting `server_id`, point at the
@@ -454,15 +474,10 @@ tokens** — log nothing from it, not even at debug level.
 - A DM or group channel has no team; render `team_name: ""` and let the UI label it "Direct
   message".
 - A mapping whose channel no longer exists sets `channel_missing: true` and is still listed —
-  otherwise the admin cannot unmap a deleted channel's stale record.
+  it is the only way the admin can see a stale record exists at all.
 - This is a **full-keyspace scan per request**, so the UI fetches it only when the admin opens a
   server's mappings panel, never as part of the list render, and never on an interval (§3.8).
   This is the only place a mapped-channel count is available at all, via `total_count`.
-
-`DELETE …/mappings/{channel_id}` delegates to `UnmapChannelFromServer`. Its "channel is not
-mapped to server X" maps to 404 and its missing-client error to 503. Note that this call clears
-Matrix room state first and aborts if that fails (`channel_mapping.go:151-153`), so a failure
-genuinely means nothing was changed and the UI can safely say so.
 
 Every mutating handler logs one structured line via `p.logger.LogInfo` naming the action, the
 `server_id` and the acting user ID — and **never** a token value.
@@ -560,7 +575,10 @@ domain comes from the server's `ServerName` instead of being scraped out of a DO
 | `…/servers/remove_server_dialog.tsx`                             | Removal confirm carrying the recovery key                          |
 | `…/servers/test_results_modal.tsx`                               | Diagnostics checklist                                             |
 | `…/servers/registration_modal.tsx`                               | YAML + homeserver config guidance                                  |
-| `…/servers/mappings_panel.tsx`                                   | Per-server bridged-channel list                                   |
+| `…/servers/mappings_panel.tsx`                                   | Per-server bridged-channel list (read-only)                       |
+| `…/servers/modal_shell.tsx`                                      | Shared modal chrome, rendered inline rather than through a portal  |
+| `…/servers/styles.ts`                                            | Shared inline-style objects and theme-derived colors               |
+| `webapp/src/utils/generate_token.ts`                             | Client-side `as_token`/`hs_token` minting via `crypto.getRandomValues` |
 
 The client module:
 
@@ -568,8 +586,13 @@ The client module:
 import {Client4} from 'mattermost-redux/client';
 import manifest from '@/manifest';
 
-const base = () => `${Client4.getPluginRoute(manifest.id)}/api/v1`;
+const baseRoute = () => `${Client4.getUrl()}/plugins/${manifest.id}/api/v1`;
 ```
+
+**Not `Client4.getPluginRoute(id)`.** That resolves to `<url>/api/v4/plugins/<id>` — the
+server's own API for *managing* plugins (install/enable/disable), not where a plugin's
+`ServeHTTP` is mounted. A plugin's routes live at `<url>/plugins/<id>/…`, so the base is built
+from `Client4.getUrl()` directly.
 
 `Client4.doFetch` is `protected` and therefore unusable from plugin code. Use `window.fetch`
 with `Client4.getOptions({method, body})`, which is public and supplies credentials,
@@ -582,11 +605,13 @@ falls back to the status text — never to a silent success.
 
 **Views**
 
-1. **Table** — columns: Name (`server_name`), URL, State, Health, Channels shared (an expander,
-   not a count — see §3.5), actions
-   (Test, Registration, Mappings, Edit, Remove) plus an enable/disable toggle. `server_id` is
-   shown in a copyable monospace cell or on the row's detail, because it is the recovery key and
-   the argument every slash command takes. Empty state explains how to add the first server and
+1. **Table** — columns: Name (`server_name`), URL, a single status pill, Channels shared (an
+   expander, not a count — see §3.5), and a kebab menu (Test connection, View registration,
+   Edit, Remove, Enable/Disable connection). One pill replaces separate State and Health
+   columns: health is probed separately and arrives later, so `enabled` and the health reading
+   are folded into one label rather than shown as two columns that briefly disagree. Channels
+   shared is the row expander itself, not a menu entry. `server_id` is shown in a copyable
+   monospace cell, because it is the recovery key and the argument every slash command takes. Empty state explains how to add the first server and
    notes that bridging a channel is done with `/matrix map` from inside the channel.
 2. **Add** — `server_url`, `as_token`, `hs_token`, optional `username_prefix`; behind an
    "Advanced" disclosure, `server_id` (restore a previously removed server) and `server_name`
@@ -611,9 +636,10 @@ falls back to the status text — never to a silent success.
 7. **Registration** — YAML in a copy box, a download button using the response `filename`, the
    **"copy verbatim, do not append `/_matrix/app/v1`"** warning from backend §3.9, and the
    `room_list_publication_rules` snippet with the domain filled in from `server_name`.
-8. **Mappings** — expandable per row, lazy-loaded on open, paginated, each row offering Unmap
-   behind a confirm that names the channel and the room. A `channel_missing` row is labelled
-   "channel deleted" and can still be unmapped.
+8. **Mappings** — expandable per row, lazy-loaded on open, paginated, and **read-only**: there
+   is no unmap action, because there is no unmap endpoint (§3.5). A `channel_missing` row is
+   labelled "channel deleted" so a stale record is at least visible; clearing it is
+   `/matrix unmap`.
 
 **No auto-polling.** The list and health both cost a keyspace scan or a fanned-out network
 probe. Refresh on mutation and on an explicit Refresh control only.
@@ -654,13 +680,13 @@ following conventional commits.
    onto it, `GET /servers`, `GET /servers/health`.
 4. **Mutating endpoints** — `POST`, `PATCH`, `DELETE`, `PUT …/enabled`, with the §3.4 status
    mapping.
-5. **Diagnostics, registration, mappings endpoints** — including pagination and unmap.
+5. **Diagnostics, registration, mappings endpoints** — including pagination.
 6. **`plugin.json` sections** — §3.6. Verify by hand that `rate_limiting_mode` still renders and
    still saves.
 7. **Webapp foundation** — client module, types, registry typing, section shell, table, health
    fill-in, enable toggle.
 8. **Modals** — add, edit, remove, test, registration.
-9. **Mappings panel** — lazy load, pagination, unmap.
+9. **Mappings panel** — lazy load, pagination.
 10. **Cleanup and docs** — delete the two inert components, README section for managing
     homeservers from the System Console (stating that mapping channels is still
     `/matrix map`, that changes apply without Save, and that the registration YAML must be
@@ -729,21 +755,24 @@ following conventional commits.
   exercised); pagination bounds (`per_page` clamped to 200, `page` beyond the end yields an
   empty list with the true `total_count`); a deleted channel yields `channel_missing: true` and
   is still listed; a DM yields an empty `team_name`.
-- **`DELETE …/mappings/{channel_id}`** — success; not-mapped is 404; a missing client is 503;
-  a failure to clear Matrix room state does **not** remove the mapping (assert it is still
-  readable afterwards).
 
 ### 5.2 Webapp unit tests
 
-`@testing-library/react` is **not** installed — only `@testing-library/jest-dom` is. Add
-`@testing-library/react@12` (the React 17 line) as a devDependency rather than writing new
-tests in enzyme.
+`@testing-library/react` is pinned to the React 17 line (`12.1.5`) as a devDependency,
+alongside the `@testing-library/jest-dom` that was already there — new tests use it rather
+than enzyme.
 
-- **Client module** — builds URLs from `Client4.getPluginRoute(manifest.id)`; sends
-  `Client4.getOptions`-derived headers; throws an `Error` carrying `message` from a non-2xx JSON
+jsdom 16 exposes no global `crypto`, which every supported browser has, so `tests/setup.tsx`
+backs it with Node's Web Crypto for the token-minting code.
+
+- **Client module** — builds URLs from `Client4.getUrl()` + `/plugins/<id>/api/v1`, never
+  `Client4.getPluginRoute` (§3.8); sends `Client4.getOptions`-derived headers; throws an `Error` carrying `message` from a non-2xx JSON
   body, and falls back to status text for a non-JSON body.
-- **Table** — renders name/URL/state/health and the "Channels shared" expander; the enable
-  toggle rolls back its optimistic state when the request fails.
+- **Table** — renders name/URL/status pill and the "Channels shared" expander; a disabled
+  server with a stale healthy reading still reads Disabled; the enable toggle rolls back its
+  optimistic state when the request fails; rows stay on screen while a refresh is in flight
+  (blanking them unmounts the row mid-toggle), while the first load with no rows yet still
+  shows the loading message.
 - **Add form** — omits empty optional fields from the request; surfaces a 409 message verbatim.
 - **Edit form** — blank token inputs are **omitted** from the PATCH body (the regression that
   would otherwise clear a token); the `server_name` change is blocked until the confirm is
@@ -753,7 +782,13 @@ tests in enzyme.
 - **Registration modal** — content is rendered verbatim and includes no `_matrix/app/v1`; the
   `room_list_publication_rules` snippet interpolates `server_name`.
 - **Mappings panel** — does not fetch until opened; paginates; a `channel_missing` row is
-  labelled and still unmappable.
+  labelled as deleted and offers no unmap action.
+- **Add/Edit forms** — Enter is ignored while a submission is already in flight, so a held
+  key cannot send a duplicate write.
+- **Token minting** — `generateToken` produces a v4 UUID drawn from `crypto.getRandomValues`,
+  never `Math.random` (these are bearer credentials).
+- **Section** — enabling a server re-probes health, so a row whose stored reading is
+  "disabled" stops showing Disabled once it is enabled again.
 - **Section registration** — `index.tsx` registers `matrix_servers` and no longer registers
   `registration_download` or `homeserver_config`.
 
@@ -767,7 +802,8 @@ tests in enzyme.
   first is injected by the console and the other two follow the `sections` array; a future
   section must not be inserted above the servers one.
 - A full add → install registration on the homeserver → test → `/matrix map` → mappings panel
-  shows the channel → unmap round trip against the dev Synapse (`docs/local-development.md`).
+  shows the channel → `/matrix unmap` round trip against the dev Synapse
+  (`docs/local-development.md`).
 - Token rotation: `PATCH` a new `as_token`/`hs_token`, confirm inbound and outbound both keep
   working without a plugin restart (this is what `Host.RefreshAndBroadcast` buys).
 
