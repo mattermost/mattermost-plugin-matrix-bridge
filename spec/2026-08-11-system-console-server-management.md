@@ -626,7 +626,7 @@ and pressing Save will appear to be what worked.
 ### 3.9 Slash commands keep working
 
 No command behaviour changes. After the §3.2 move, `command.Handler` calls
-`c.plugin.Servers()` for the registry, health probe, mapping counts, identifier resolution,
+`c.plugin.Servers()` for the registry, health probe, identifier resolution,
 registration YAML and diagnostics, and formats the results as it does today. Every existing
 command test must pass **unmodified** — if one needs editing, the move changed behaviour and
 that is a bug in this step.

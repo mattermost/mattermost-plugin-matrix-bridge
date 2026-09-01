@@ -88,8 +88,9 @@ equivalent `/matrix server ...` commands and pass a `server_id` explicitly - see
 Per-homeserver connection settings (URL, tokens, discovered server name, username
 prefix, enabled state) live in a KV-backed registry, managed from the System Console's
 **Matrix homeservers** section (see below) or through `/matrix server` slash commands -
-both are equivalent, full-featured surfaces over the same registry. The one setting
-that lives in ordinary plugin configuration instead is:
+both read and write the same registry. The console covers server management; mapping a
+channel to a room is slash-command only (`/matrix map`, `/matrix unmap`). The one
+setting that lives in ordinary plugin configuration instead is:
 
 | Setting             | Description                                                       |
 | -------------------- | ------------------------------------------------------------------ |
@@ -98,25 +99,24 @@ that lives in ordinary plugin configuration instead is:
 ## Managing homeservers from the System Console
 
 **System Console → Plugins → Mattermost bridge for Matrix → Matrix homeservers** lists
-every registered server with its state, live health, and mapped-channel count, and lets
-you add, edit, test, enable/disable and remove servers, view a server's Application
-Service registration YAML, and see (and unmap) the channels bridged to it.
+every registered server with its state and live health, and lets you add, edit, test,
+enable/disable and remove servers, view a server's Application Service registration
+YAML, and expand **Channels shared** to see the channels bridged to it.
 
 A few things that are true here but easy to assume otherwise:
 
 - **Changes in this section apply immediately over the network** - there is no
   relationship to the Save button at the bottom of the page, which only applies to
   ordinary settings (like Matrix Rate Limiting) elsewhere on the same page.
-- **Mapping a new channel to a server is still `/matrix map` (or `/matrix server map`),
-  run from inside that channel.** The console only lists and removes existing mappings -
-  it has no channel picker.
+- **Mapping and unmapping channels is slash-command only** - `/matrix map` and
+  `/matrix unmap` (or `/matrix server map`/`unmap`), run from inside the channel. The
+  console's **Channels shared** list is read-only: no channel picker, no unmap action.
 - **The registration YAML must be installed on the homeserver verbatim.** Do not append
   `/_matrix/app/v1` to its `url:` line - the homeserver appends that path itself, and
   doing so anyway breaks inbound sync for that server in a way that's easy to miss,
   since outbound sync keeps working.
 - Removing a server keeps its channel mappings and ghost users; the dialog shows the
-  `server_id` and the exact command to restore it later. A server migrated from a
-  pre-multi-server install can't be removed at all - disable it instead.
+  `server_id` and the exact command to restore it later.
 
 ## Multiple homeservers
 

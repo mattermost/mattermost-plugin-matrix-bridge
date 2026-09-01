@@ -15,12 +15,13 @@ Docker Compose.
 
 ## Prerequisites
 
-1. Install the plugin. Homeservers can be managed either with the `/matrix server`
+1. Install the plugin. Homeservers can be registered either with the `/matrix server`
    slash commands or from **System Console → Plugins → Mattermost bridge for Matrix →
-   Matrix homeservers** (both System Admin only, both equivalent - the steps below use
-   the slash commands, since that's the fastest path from a terminal, but "Add Matrix
-   server" in the console does the same thing and can open the registration YAML for
-   you immediately afterward).
+   Matrix homeservers** (both System Admin only - the steps below use the slash
+   commands, since that's the fastest path from a terminal, but "Add Matrix server" in
+   the console registers the same entry and can open the registration YAML for you
+   immediately afterward). Mapping a channel to a room has no console equivalent - that
+   is always `/matrix map`.
 2. Register the homeserver with the plugin, choosing your own Application Service and
    homeserver tokens (any strings; keep them secret):
 
