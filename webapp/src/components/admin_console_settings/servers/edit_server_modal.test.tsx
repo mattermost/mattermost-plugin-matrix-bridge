@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {render, screen, fireEvent, waitFor} from '@testing-library/react';
+import {render, screen, fireEvent, waitFor, act} from '@testing-library/react';
 import React from 'react';
 
 import EditServerModal from './edit_server_modal';
@@ -161,5 +161,38 @@ describe('EditServerModal', () => {
         fireEvent.click(screen.getByRole('button', {name: 'Save'}));
 
         await screen.findByText('The username prefix only applies going forward.');
+    });
+
+    // The footer button is disabled while the request is in flight, but the
+    // hand-wired Enter handler is not a button and had no such guard.
+    it('ignores a second Enter while the first request is in flight', async () => {
+        const server = buildServer();
+        let resolveUpdate: (v: Awaited<ReturnType<typeof client.updateServer>>) => void = () => {};
+        mockedClient.updateServer.mockImplementation(() => new Promise((resolve) => {
+            resolveUpdate = resolve;
+        }));
+
+        render(
+            <EditServerModal
+                server={server}
+                onClose={jest.fn()}
+                onUpdated={jest.fn()}
+            />,
+        );
+
+        const url = screen.getByLabelText('Homeserver URL');
+
+        fireEvent.keyDown(url, {key: 'Enter'});
+        await waitFor(() => expect(mockedClient.updateServer).toHaveBeenCalledTimes(1));
+
+        fireEvent.keyDown(url, {key: 'Enter'});
+        fireEvent.keyDown(url, {key: 'Enter'});
+        expect(mockedClient.updateServer).toHaveBeenCalledTimes(1);
+
+        // Settle inside act so the resulting setSubmitting(false) is not an
+        // unwrapped update.
+        await act(async () => {
+            resolveUpdate({server, warnings: []});
+        });
     });
 });

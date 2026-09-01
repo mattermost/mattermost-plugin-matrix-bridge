@@ -134,7 +134,13 @@ const EditServerModal: React.FC<Props> = ({server, onClose, onUpdated}) => {
                     onKeyDown={(e) => {
                         if (e.key === 'Enter' && e.target instanceof HTMLInputElement) {
                             e.preventDefault();
-                            handleSubmit();
+
+                            // The footer buttons are disabled while submitting, but this
+                            // handler is not a button - without the guard, held Enter fires
+                            // a second write request against the same server.
+                            if (!submitting) {
+                                handleSubmit();
+                            }
                         }
                     }}
                 >

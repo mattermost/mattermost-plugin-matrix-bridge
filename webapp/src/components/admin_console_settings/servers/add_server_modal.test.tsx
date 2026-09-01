@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {render, screen, fireEvent, waitFor} from '@testing-library/react';
+import {render, screen, fireEvent, waitFor, act} from '@testing-library/react';
 import React from 'react';
 
 import AddServerModal from './add_server_modal';
@@ -134,5 +134,54 @@ describe('AddServerModal', () => {
         fireEvent.click(screen.getByRole('button', {name: 'Add server'}));
 
         await screen.findByText('a server is already registered at this endpoint (server_id: s1)');
+    });
+
+    // The footer button is disabled while the request is in flight, but the
+    // hand-wired Enter handler is not a button and had no such guard.
+    it('ignores a second Enter while the first request is in flight', async () => {
+        let resolveAdd: (v: Awaited<ReturnType<typeof client.addServer>>) => void = () => {};
+        mockedClient.addServer.mockImplementation(() => new Promise((resolve) => {
+            resolveAdd = resolve;
+        }));
+
+        render(
+            <AddServerModal
+                onClose={jest.fn()}
+                onAdded={jest.fn()}
+                onViewRegistration={jest.fn()}
+            />,
+        );
+
+        const url = screen.getByLabelText('Homeserver URL');
+        fireEvent.change(url, {target: {value: 'https://a.example.com'}});
+        fireEvent.change(screen.getByLabelText('Application Service token'), {target: {value: 'as1'}});
+        fireEvent.change(screen.getByLabelText('Homeserver token'), {target: {value: 'hs1'}});
+
+        fireEvent.keyDown(url, {key: 'Enter'});
+        await waitFor(() => expect(mockedClient.addServer).toHaveBeenCalledTimes(1));
+
+        fireEvent.keyDown(url, {key: 'Enter'});
+        fireEvent.keyDown(url, {key: 'Enter'});
+        expect(mockedClient.addServer).toHaveBeenCalledTimes(1);
+
+        // Settle inside act so the resulting setSubmitting(false) is not an
+        // unwrapped update.
+        await act(async () => {
+            resolveAdd({
+                server: {
+                    server_id: 's1',
+                    server_url: 'https://a.example.com',
+                    server_name: 'a.example.com',
+                    endpoint: 'a.example.com:443',
+                    event_domain: 'a_example_com_443',
+                    username_prefix: 'matrix',
+                    enabled: true,
+                    remote_id: 'remote1',
+                    has_as_token: true,
+                    has_hs_token: true,
+                },
+                warnings: [],
+            });
+        });
     });
 });
