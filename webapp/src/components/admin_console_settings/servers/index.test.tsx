@@ -64,14 +64,7 @@ describe('MatrixServersSection', () => {
         // Twice each: once on mount, once after the mutation.
         expect(mockedClient.getServersHealth).toHaveBeenCalledTimes(2);
 
-        // Settle the row's remaining post-mutation state.
-        //
-        // This emits React's "state update on an unmounted component" warning,
-        // which is pre-existing and unrelated to the health re-probe: refresh()
-        // sets `loading`, and ServerTable swaps every row for a "Loading Matrix
-        // servers…" message while it is true, so each toggle unmounts the row
-        // that is still awaiting its own handleToggle. The warning goes away by
-        // keeping the rows mounted across a refresh, not by changing this test.
+        // Settle the row's remaining post-mutation state before teardown.
         await act(async () => {});
     });
 });

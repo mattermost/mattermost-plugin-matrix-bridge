@@ -113,6 +113,48 @@ describe('ServerTable', () => {
         expect(screen.queryByText('Active')).not.toBeInTheDocument();
     });
 
+    // Every mutation refreshes the list, which sets `loading`. Blanking the table
+    // for a refresh flickers it and unmounts each row mid-flight - including the
+    // row whose own enable/disable is still awaiting that refresh.
+    it('keeps rows on screen while a refresh is in flight', () => {
+        render(
+            <ServerTable
+                servers={[buildServer()]}
+                health={{server1: 'healthy'}}
+                loading={true}
+                expandedServerId={null}
+                onToggleExpand={noop}
+                onToggleEnabled={asyncNoop}
+                onEdit={noop}
+                onRemove={noop}
+                onTest={noop}
+                onRegistration={noop}
+            />,
+        );
+
+        expect(screen.getByText('matrix.example.com')).toBeInTheDocument();
+        expect(screen.queryByText('Loading Matrix servers…')).not.toBeInTheDocument();
+    });
+
+    it('shows the loading message on the very first load, before any row exists', () => {
+        render(
+            <ServerTable
+                servers={[]}
+                health={{}}
+                loading={true}
+                expandedServerId={null}
+                onToggleExpand={noop}
+                onToggleEnabled={asyncNoop}
+                onEdit={noop}
+                onRemove={noop}
+                onTest={noop}
+                onRegistration={noop}
+            />,
+        );
+
+        expect(screen.getByText('Loading Matrix servers…')).toBeInTheDocument();
+    });
+
     it('shows an empty-state message when there are no servers', () => {
         render(
             <ServerTable
