@@ -123,24 +123,6 @@ func TestHandleListServers(t *testing.T) {
 		require.Len(t, body.Servers, 1)
 		assert.True(t, body.Servers[0].HasASToken)
 		assert.True(t, body.Servers[0].HasHSToken)
-		assert.False(t, body.Servers[0].IsMigrated)
-	})
-
-	t.Run("is_migrated is true exactly for SiteURL empty", func(t *testing.T) {
-		plugin := newTestPluginForAPI(t)
-		entry := kvstore.ServerConfig{ServerID: "legacy1", ServerName: "legacy.example.com", SiteURL: ""}
-		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{entry})
-		require.NoError(t, err)
-		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
-
-		req := httptest.NewRequest(http.MethodGet, "/servers", nil)
-		rec := httptest.NewRecorder()
-		plugin.handleListServers(rec, req)
-
-		var body listServersResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		require.Len(t, body.Servers, 1)
-		assert.True(t, body.Servers[0].IsMigrated)
 	})
 
 	// The list render must cost one registry read and nothing else. Failing every
@@ -403,20 +385,6 @@ func TestHandleRemoveServer(t *testing.T) {
 		assert.Equal(t, "s1", body.ServerID)
 		assert.Contains(t, body.RecoveryCommand, "s1")
 		assert.Contains(t, body.RecoveryCommand, "--server-id")
-	})
-
-	t.Run("a migrated entry is 409", func(t *testing.T) {
-		plugin := newTestPluginForAPI(t)
-		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
-			{ServerID: "legacy1", ServerName: "legacy.example.com", SiteURL: ""},
-		})
-		require.NoError(t, err)
-		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
-
-		req := jsonRequest(t, http.MethodDelete, "/servers/legacy1", nil, map[string]string{"server_id": "legacy1"})
-		rec := httptest.NewRecorder()
-		plugin.handleRemoveServer(rec, req)
-		assert.Equal(t, http.StatusConflict, rec.Code)
 	})
 
 	t.Run("an unknown ID is 404", func(t *testing.T) {

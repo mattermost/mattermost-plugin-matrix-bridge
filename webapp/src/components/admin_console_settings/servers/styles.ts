@@ -106,11 +106,6 @@ export const serverIdStyle: CSSProperties = {
     display: 'block',
 };
 
-export const migratedTagStyle: CSSProperties = {
-    fontSize: '12px',
-    color: colors.textMuted,
-};
-
 export const metaStyle: CSSProperties = {
     display: 'flex',
     alignItems: 'center',

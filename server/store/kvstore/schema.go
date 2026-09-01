@@ -2,7 +2,6 @@ package kvstore
 
 import (
 	"encoding/json"
-	"strings"
 
 	"github.com/pkg/errors"
 )
@@ -34,7 +33,10 @@ var ErrChannelAlreadyMapped = errors.New("channel is already mapped to another M
 // currently limits it to at most one entry (see maxServersPerChannel).
 type ChannelServerMapping struct {
 	ServerID string `json:"server_id"`
-	RoomID   string `json:"room_id"` // room ID or alias on that server
+	RoomID   string `json:"room_id"` // resolved room ID, or the raw identifier if it could not be resolved
+	// Alias is the room alias the mapping was created from, empty when the caller
+	// supplied a room ID.
+	Alias string `json:"alias,omitempty"`
 }
 
 // ParseServersConfig parses the JSON array stored under KeyServersConfig.
@@ -87,27 +89,22 @@ func MarshalChannelServerMappings(m []ChannelServerMapping) ([]byte, error) {
 	return data, nil
 }
 
-// BuildSingleChannelMapping builds the stored value for a channel mapped to exactly
-// one server. Used by the v3 migration to convert the legacy bare-room-ID value.
-func BuildSingleChannelMapping(serverID, roomID string) ([]byte, error) {
-	return MarshalChannelServerMappings([]ChannelServerMapping{{ServerID: serverID, RoomID: roomID}})
-}
-
-// UpsertChannelServerMapping returns a copy of m with serverID's entry set to roomID,
-// preserving every other server's entry. If serverID is not present it is appended.
-func UpsertChannelServerMapping(m []ChannelServerMapping, serverID, roomID string) []ChannelServerMapping {
+// UpsertChannelServerMapping returns a copy of m with entry replacing the one for
+// entry.ServerID, preserving every other server's entry. If that server is not present
+// the entry is appended.
+func UpsertChannelServerMapping(m []ChannelServerMapping, entry ChannelServerMapping) []ChannelServerMapping {
 	result := make([]ChannelServerMapping, 0, len(m)+1)
 	found := false
-	for _, entry := range m {
-		if entry.ServerID == serverID {
-			result = append(result, ChannelServerMapping{ServerID: serverID, RoomID: roomID})
+	for _, existing := range m {
+		if existing.ServerID == entry.ServerID {
+			result = append(result, entry)
 			found = true
 			continue
 		}
-		result = append(result, entry)
+		result = append(result, existing)
 	}
 	if !found {
-		result = append(result, ChannelServerMapping{ServerID: serverID, RoomID: roomID})
+		result = append(result, entry)
 	}
 	return result
 }
@@ -162,6 +159,17 @@ func RoomIDForServer(m []ChannelServerMapping, serverID string) string {
 	return ""
 }
 
+// ChannelMappingForServer returns serverID's whole entry, so callers that need more
+// than the room ID (the alias, for reverse-key cleanup) do not have to rescan.
+func ChannelMappingForServer(m []ChannelServerMapping, serverID string) (ChannelServerMapping, bool) {
+	for _, entry := range m {
+		if entry.ServerID == serverID {
+			return entry, true
+		}
+	}
+	return ChannelServerMapping{}, false
+}
+
 // MappedServerIDs returns every server ID a channel is mapped to.
 func MappedServerIDs(m []ChannelServerMapping) []string {
 	ids := make([]string, 0, len(m))
@@ -169,17 +177,4 @@ func MappedServerIDs(m []ChannelServerMapping) []string {
 		ids = append(ids, entry.ServerID)
 	}
 	return ids
-}
-
-// isPlausibleRoomIdentifier reports whether s looks like a Matrix room ID or alias
-// (starts with '!' or '#'). Used by the v3 migration to distinguish a legacy bare
-// room identifier from garbage that should be skipped rather than persisted.
-func isPlausibleRoomIdentifier(s string) bool {
-	return strings.HasPrefix(s, "!") || strings.HasPrefix(s, "#")
-}
-
-// IsPlausibleRoomIdentifier is the exported form of isPlausibleRoomIdentifier, for
-// use by the migration code in the main package.
-func IsPlausibleRoomIdentifier(s string) bool {
-	return isPlausibleRoomIdentifier(s)
 }

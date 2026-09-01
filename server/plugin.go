@@ -516,28 +516,6 @@ func (p *Plugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermost
 	return bridge.GetMatrixUserIDFromMattermostUser(mattermostUserID)
 }
 
-// RunKVStoreMigrations exposes migration functionality to command handlers
-func (p *Plugin) RunKVStoreMigrations() error {
-	return p.runKVStoreMigrations()
-}
-
-// RunKVStoreMigrationsWithResults exposes migration functionality to command handlers and returns detailed results
-func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, error) {
-	result, err := p.runKVStoreMigrationsWithResults()
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert from internal MigrationResult to command.MigrationResult
-	return &command.MigrationResult{
-		UserMappingsCreated:      result.UserMappingsCreated,
-		ChannelMappingsCreated:   result.ChannelMappingsCreated,
-		RoomMappingsCreated:      result.RoomMappingsCreated,
-		DMMappingsCreated:        result.DMMappingsCreated,
-		ReverseDMMappingsCreated: result.ReverseDMMappingsCreated,
-	}, nil
-}
-
 // serverIDForSyncMsg resolves the single Matrix server an outbound SyncMsg should
 // target. One shared-channels remote is registered per homeserver and the platform
 // invokes the outbound hooks once per invited remote, so this never fans out - it
@@ -553,22 +531,27 @@ func (p *Plugin) RunKVStoreMigrationsWithResults() (*command.MigrationResult, er
 //
 // Resolution:
 //  1. rc == nil || rc.RemoteId == "" -> (defensive; should not happen in production) no-op.
-//  2. rc.RemoteId doesn't match one of our remotes -> refresh the client caches once, in
-//     case this node's remoteToServerID lags a registry mutation made on another node
-//     that hasn't reached this node's cluster event handler yet; a refresh failure is an
-//     operational failure. Still unresolved after the refresh -> genuinely not one of our
-//     remotes, no-op.
+//  2. rc.RemoteId misses this node's remoteToServerID -> ambiguous, since the miss reads
+//     the same whether the remote is not ours or this node's cache lags a registry
+//     mutation made on another node that hasn't reached its cluster event handler yet.
+//     The registry is the source of truth, so it decides: absent there -> genuinely not
+//     one of our remotes, no-op; present -> cache lag, so refresh the client caches to
+//     build this server's client. A registry read or refresh failure is an operational
+//     failure - never conflated with "not ours", which would advance the cursor past
+//     undelivered posts.
 //  3. serverConfigForRouting fails -> operational failure (registry read failure).
 //  4. The resolved server is disabled -> skip. This is the only thing stopping outbound
 //     traffic for a disabled server (§3.11) - its remote stays registered and invited,
 //     so the hooks keep firing, and this check is what makes that a no-op.
 //  5. getChannelServerMappings fails -> operational failure (KV read/parse failure).
-//  6. Membership (not equality) against channelID's mappings: mapped to this server ->
-//     use it; mapped but not to this server -> skip (the remote is still invited but
-//     its server is no longer mapped, do not relay its traffic elsewhere); unmapped ->
-//     isChannelDirect fails -> operational failure; unmapped and the channel is a DM ->
-//     use this server anyway, so the DM room can be auto-created on it; unmapped and not
-//     a DM -> skip.
+//  6. Membership (not equality) against channelID's mappings, counting only mappings
+//     whose server is still registered - a removed server leaves its entry behind, and
+//     treating that as "owned elsewhere" would strand the channel forever: mapped to
+//     this server -> use it; mapped to another registered server -> skip (that remote is
+//     still invited but its server is no longer mapped, do not relay its traffic
+//     elsewhere); unmapped, or mapped only to removed servers -> isChannelDirect fails
+//     -> operational failure; and the channel is a DM -> use this server anyway, so the
+//     DM room can be auto-created on it; and not a DM -> skip.
 func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (serverID string, shouldSync bool, err error) {
 	if rc == nil || rc.RemoteId == "" {
 		p.logger.LogWarn("SyncMsg received without a usable RemoteCluster; skipping")
@@ -577,14 +560,20 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 
 	serverID, ok := p.serverIDForRemoteID(rc.RemoteId)
 	if !ok {
-		if refreshErr := p.initMatrixClients(); refreshErr != nil {
-			return "", false, errors.Wrap(refreshErr, "refresh Matrix client cache")
+		// Read from the store in case this server was just handled by another node,
+		// since that's the source of truth.
+		registeredServerID, err := p.registeredServerIDForRemote(rc.RemoteId)
+		if err != nil {
+			return "", false, errors.Wrap(err, "read server registry")
 		}
-		serverID, ok = p.serverIDForRemoteID(rc.RemoteId)
-		if !ok {
+		if registeredServerID == "" {
 			p.logger.LogWarn("SyncMsg received for an unrecognized remote; skipping", "remote_id", rc.RemoteId)
 			return "", false, nil
 		}
+		if refreshErr := p.initMatrixClients(); refreshErr != nil {
+			return "", false, errors.Wrap(refreshErr, "refresh Matrix client cache")
+		}
+		serverID = registeredServerID
 	}
 
 	server, err := p.serverConfigForRouting(serverID)
@@ -605,9 +594,19 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 		return serverID, true, nil
 	}
 
-	if len(mappings) > 0 {
-		// Mapped, but to a different server - the remote is still invited, but its
-		// server no longer owns this channel's traffic.
+	// Only a mapping whose server is still registered means "owned by someone else".
+	// Removal leaves a channel's entry behind, so counting stale entries here would
+	// strand the channel permanently: a DM would never auto-create on the replacement
+	// server, and non-DM traffic would be dropped silently rather than read as unmapped.
+	// A registered-but-disabled server still owns its channels - remapping is an
+	// explicit operator action - so only registration is checked, not Enabled.
+	for _, mappedServerID := range kvstore.MappedServerIDs(mappings) {
+		if _, err := p.serverConfigForRouting(mappedServerID); err != nil {
+			p.logger.LogDebug("Ignoring stale channel mapping for unregistered server", "server_id", mappedServerID, "channel_id", channelID)
+			continue
+		}
+		// Mapped to a live server that is not this one - the remote is still invited,
+		// but its server no longer owns this channel's traffic.
 		return "", false, nil
 	}
 

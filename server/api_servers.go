@@ -58,8 +58,6 @@ func statusForServersError(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, servers.ErrEndpointTaken), errors.Is(err, servers.ErrNameTaken), errors.Is(err, servers.ErrIDTaken), errors.Is(err, servers.ErrHSTokenTaken):
 		return http.StatusConflict
-	case errors.Is(err, servers.ErrMigratedImmutable):
-		return http.StatusConflict
 	case errors.Is(err, servers.ErrInvalidInput):
 		return http.StatusBadRequest
 	case errors.Is(err, kvstore.ErrChannelAlreadyMapped):
@@ -95,7 +93,6 @@ type ServerView struct {
 	UsernamePrefix string `json:"username_prefix"`
 	Enabled        bool   `json:"enabled"`
 	RemoteID       string `json:"remote_id"`
-	IsMigrated     bool   `json:"is_migrated"`
 	HasASToken     bool   `json:"has_as_token"`
 	HasHSToken     bool   `json:"has_hs_token"`
 }
@@ -114,7 +111,6 @@ func newServerView(s kvstore.ServerConfig) ServerView {
 		UsernamePrefix: s.UsernamePrefix,
 		Enabled:        s.Enabled,
 		RemoteID:       s.RemoteID,
-		IsMigrated:     s.SiteURL == "",
 		HasASToken:     s.ASToken != "",
 		HasHSToken:     s.HSToken != "",
 	}

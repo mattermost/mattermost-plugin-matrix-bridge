@@ -14,7 +14,6 @@ export interface ServerView {
     username_prefix: string;
     enabled: boolean;
     remote_id: string;
-    is_migrated: boolean;
     has_as_token: boolean;
     has_hs_token: boolean;
 }

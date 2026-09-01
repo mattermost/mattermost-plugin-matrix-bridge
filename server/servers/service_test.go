@@ -492,23 +492,56 @@ func TestAdd(t *testing.T) {
 		assert.NotContains(t, strings.Join(host.Calls(), ","), "RefreshAndBroadcast")
 	})
 
-	t.Run("unregisters the orphan remote when the registry write is rejected", func(t *testing.T) {
-		svc, host, _ := newTestService(t)
-		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", HSToken: "hs1", ServerName: "a.example.com"})
-		require.NoError(t, err)
+	t.Run("rejects a conflicting endpoint without touching the shared-channels remote", func(t *testing.T) {
+		svc, host, kv := newTestService(t)
+		seed := []kvstore.ServerConfig{
+			{ServerID: "existing1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "existing.example.com", SiteURL: "https://a.example.com:443", RemoteID: "remote-existing"},
+		}
+		require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, seed)))
 
-		// Registration now happens before the conflict check, so this add gets as far as
-		// obtaining a remote and is only then rejected - that remote belongs to no entry
-		// and must not be left registered.
-		host.remoteID = "remote-orphan"
-		_, err = svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as2", HSToken: "hs2", ServerName: "second.example.com"})
+		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as2", HSToken: "hs2", ServerName: "second.example.com"})
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrEndpointTaken)
+
+		list, err := svc.List()
+		require.NoError(t, err)
+		require.Len(t, list, 1, "the rejected add must not add a second entry")
+		assert.Equal(t, "remote-existing", list[0].RemoteID, "the existing entry's remote must be left intact")
+
+		// RegisterRemoteForSiteURL is idempotent per SiteURL, so registering here would
+		// hand back remote-existing and the rollback would then unregister a live remote.
+		assert.Empty(t, host.Calls(), "a pre-checked conflict must not reach Host at all")
+	})
+
+	// The pre-check races with concurrent writers, so the in-callback check remains the
+	// authoritative one. The conflict raced here is a server-name collision across two
+	// *different* endpoints: distinct SiteURLs mean the losing add holds a remote of its
+	// own, so rolling it back cannot touch the winner's. (A same-endpoint race is not
+	// covered - see the note on Add's pre-check.)
+	t.Run("unregisters its own remote when a concurrent writer wins a name conflict", func(t *testing.T) {
+		store := newCASConflictKVStore()
+		host := &fakeHost{matrixClients: map[string]*matrix.Client{}, remoteID: "remote-orphan"}
+		svc := New(store, testLogger{}, host)
+
+		// The registry is empty when Add's pre-check reads it; the conflicting entry only
+		// lands between mutate's first read and its write.
+		store.onFirstRead = func(kv kvstore.KVStore) {
+			seed := []kvstore.ServerConfig{
+				{ServerID: "winner1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "shared.example.com", SiteURL: "https://a.example.com:443", RemoteID: "remote-winner"},
+			}
+			require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, seed)))
+		}
+
+		_, err := svc.Add(AddRequest{ServerURL: "https://b.example.com", ASToken: "as2", HSToken: "hs2", ServerName: "shared.example.com"})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNameTaken)
 		assert.Contains(t, host.Calls(), "UnregisterRemote:remote-orphan")
 
 		list, err := svc.List()
 		require.NoError(t, err)
 		require.Len(t, list, 1, "the rejected add must not add a second entry")
+		assert.Equal(t, "winner1", list[0].ServerID)
+		assert.Equal(t, "remote-winner", list[0].RemoteID, "only this call's own remote may be rolled back")
 	})
 
 	t.Run("a RefreshAndBroadcast error is non-fatal", func(t *testing.T) {
@@ -536,23 +569,6 @@ func TestRemove(t *testing.T) {
 		removed, err := svc.Remove("nonexistent")
 		require.NoError(t, err)
 		assert.False(t, removed)
-	})
-
-	t.Run("refuses to remove the migrated entry (SiteURL empty) and leaves it registered", func(t *testing.T) {
-		svc, _, kv := newTestService(t)
-		entry := kvstore.ServerConfig{ServerID: "legacy1", ServerName: "legacy.example.com", SiteURL: ""}
-		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{entry})
-		require.NoError(t, err)
-		require.NoError(t, kv.Set(kvstore.KeyServersConfig, data))
-
-		removed, err := svc.Remove("legacy1")
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrMigratedImmutable)
-		assert.False(t, removed)
-
-		list, err := svc.List()
-		require.NoError(t, err)
-		require.Len(t, list, 1)
 	})
 
 	t.Run("removes an entry but leaves its namespaced keys intact", func(t *testing.T) {
@@ -928,47 +944,6 @@ func mustMarshal(t *testing.T, servers []kvstore.ServerConfig) []byte {
 	data, err := kvstore.MarshalServersConfig(servers)
 	require.NoError(t, err)
 	return data
-}
-
-// --- Seed ---
-
-func TestSeed(t *testing.T) {
-	t.Run("inserts a fresh entry verbatim - no name resolution, no remote registration", func(t *testing.T) {
-		svc, host, _ := newTestService(t)
-		entry := kvstore.ServerConfig{
-			ServerID:    "legacy1",
-			ServerURL:   "https://legacy.example.com",
-			Endpoint:    "legacy.example.com:443",
-			ServerName:  "legacy.example.com",
-			EventDomain: "caller_supplied_domain",
-			SiteURL:     "",
-		}
-		id, err := svc.Seed(entry)
-		require.NoError(t, err)
-		assert.Equal(t, "legacy1", id)
-
-		stored, err := svc.Get("legacy1")
-		require.NoError(t, err)
-		assert.Equal(t, "caller_supplied_domain", stored.EventDomain)
-		assert.Empty(t, stored.SiteURL)
-		assert.Empty(t, host.Calls(), "Seed must not touch Host at all")
-	})
-
-	t.Run("idempotent by endpoint", func(t *testing.T) {
-		svc, _, _ := newTestService(t)
-		entry := kvstore.ServerConfig{ServerID: "legacy1", Endpoint: "legacy.example.com:443"}
-		id1, err := svc.Seed(entry)
-		require.NoError(t, err)
-
-		entry2 := kvstore.ServerConfig{ServerID: "legacy2", Endpoint: "legacy.example.com:443"}
-		id2, err := svc.Seed(entry2)
-		require.NoError(t, err)
-		assert.Equal(t, id1, id2, "a second Seed at the same endpoint must return the already-materialized ID")
-
-		list, err := svc.List()
-		require.NoError(t, err)
-		assert.Len(t, list, 1)
-	})
 }
 
 // --- Typed errors travel through SetAtomicWithRetries ---

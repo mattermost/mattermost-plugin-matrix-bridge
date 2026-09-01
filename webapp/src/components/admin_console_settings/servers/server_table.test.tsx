@@ -18,7 +18,6 @@ function buildServer(overrides: Partial<ServerView> = {}): ServerView {
         username_prefix: 'matrix',
         enabled: true,
         remote_id: 'remote1',
-        is_migrated: false,
         has_as_token: true,
         has_hs_token: true,
         ...overrides,
@@ -53,32 +52,6 @@ describe('ServerTable', () => {
         expect(screen.getByText('https://matrix.example.com')).toBeInTheDocument();
         expect(screen.getByText('Active')).toBeInTheDocument();
         expect(screen.getByText('Channels shared')).toBeInTheDocument();
-    });
-
-    it('disables Remove with an explanation for a migrated server', async () => {
-        render(
-            <ServerTable
-                servers={[buildServer({is_migrated: true})]}
-                health={{}}
-                loading={false}
-                expandedServerId={null}
-                onToggleExpand={noop}
-                onToggleEnabled={asyncNoop}
-                onEdit={noop}
-                onRemove={noop}
-                onTest={noop}
-                onRegistration={noop}
-            />,
-        );
-
-        openActionsMenu('matrix.example.com');
-
-        // The disabled item's own "cannot be removed" title text ends up folded
-        // into its computed accessible name alongside "Remove", so match on
-        // text content directly rather than the role's `name` option.
-        const removeItem = screen.getAllByRole('menuitem').find((item) => item.textContent === 'Remove');
-        expect(removeItem).toBeDisabled();
-        expect(removeItem).toHaveAttribute('title', expect.stringContaining('migrated'));
     });
 
     it('rolls back the enable toggle\'s optimistic state when the request fails', async () => {

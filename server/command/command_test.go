@@ -56,9 +56,6 @@ type mockPlugin struct {
 
 	mapErr   error
 	unmapErr error
-
-	migrationErr    error
-	migrationResult *MigrationResult
 }
 
 func (m *mockPlugin) GetKVStore() kvstore.KVStore { return m.kvstore }
@@ -82,17 +79,6 @@ func (m *mockPlugin) UnmapChannelFromServer(_, _ string) error { return m.unmapE
 func (m *mockPlugin) GetPluginAPI() plugin.API              { return m.pluginAPI }
 func (m *mockPlugin) GetPluginAPIClient() *pluginapi.Client { return m.client }
 func (m *mockPlugin) GetPluginID() string                   { return "com.mattermost.plugin-matrix-bridge" }
-
-func (m *mockPlugin) RunKVStoreMigrations() error { return m.migrationErr }
-func (m *mockPlugin) RunKVStoreMigrationsWithResults() (*MigrationResult, error) {
-	if m.migrationErr != nil {
-		return nil, m.migrationErr
-	}
-	if m.migrationResult != nil {
-		return m.migrationResult, nil
-	}
-	return &MigrationResult{}, nil
-}
 
 // memoryKVStore is a minimal in-memory kvstore.KVStore for command tests that touch
 // keyspace scans (e.g. executeListMappingsCommand).
@@ -492,80 +478,6 @@ func TestExecuteServerGroupUnknownSubcommand(t *testing.T) {
 
 	resp := h.executeServerGroup(&model.CommandArgs{UserId: userID}, []string{"bogus"})
 	assert.Contains(t, resp.Text, "Usage")
-}
-
-// TestExecuteMigrateCommand covers the guards that run before the version marker is
-// reset. Each must fail closed: resetting kv_store_version to "0" and then not
-// completing a migration leaves the marker at 0, and the next activation re-runs
-// v1/v2/v3 unattended against an already-namespaced store.
-func TestExecuteMigrateCommand(t *testing.T) {
-	serverA := kvstore.ServerConfig{ServerID: "serverA"}
-	serverB := kvstore.ServerConfig{ServerID: "serverB"}
-
-	t.Run("refuses with multiple servers", func(t *testing.T) {
-		h, _, _ := newTestHandler(t, serverA, serverB)
-		store := h.kvstore.(*memoryKVStore)
-		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
-		store.setKeys = nil
-
-		resp := h.executeMigrateCommand(&model.CommandArgs{})
-
-		assert.Contains(t, resp.Text, "refuses to run")
-		assert.Empty(t, store.setKeys, "must not write the version marker after refusing")
-		assert.Equal(t, []byte("3"), store.data[kvstore.KeyStoreVersion])
-	})
-
-	t.Run("fails closed when the server list cannot be read", func(t *testing.T) {
-		h, _, _ := newTestHandler(t)
-		store := h.kvstore.(*memoryKVStore)
-		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
-		store.getErr[kvstore.KeyServersConfig] = assert.AnError
-		store.setKeys = nil
-
-		resp := h.executeMigrateCommand(&model.CommandArgs{})
-
-		assert.Contains(t, resp.Text, "Failed to load Matrix servers")
-		assert.Empty(t, store.setKeys, "a KV failure must not skip the multi-server check and reset the marker")
-		assert.Equal(t, []byte("3"), store.data[kvstore.KeyStoreVersion])
-	})
-
-	t.Run("fails closed when the version marker cannot be read", func(t *testing.T) {
-		h, _, _ := newTestHandler(t, serverA)
-		store := h.kvstore.(*memoryKVStore)
-		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
-		store.setKeys = nil
-		store.getErr[kvstore.KeyStoreVersion] = assert.AnError
-
-		resp := h.executeMigrateCommand(&model.CommandArgs{})
-
-		assert.Contains(t, resp.Text, "Failed to read migration version")
-		assert.Empty(t, store.setKeys, "must not reset a marker it could not read")
-	})
-
-	t.Run("reports migration failure after the reset", func(t *testing.T) {
-		h, mp, _ := newTestHandler(t, serverA)
-		mp.migrationErr = assert.AnError
-		store := h.kvstore.(*memoryKVStore)
-		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("3")))
-
-		resp := h.executeMigrateCommand(&model.CommandArgs{})
-
-		assert.Contains(t, resp.Text, "Migration failed")
-		assert.Equal(t, []byte("0"), store.data[kvstore.KeyStoreVersion])
-	})
-
-	t.Run("runs and reports the previous version on success", func(t *testing.T) {
-		h, mp, _ := newTestHandler(t, serverA)
-		mp.migrationResult = &MigrationResult{UserMappingsCreated: 2}
-		store := h.kvstore.(*memoryKVStore)
-		require.NoError(t, store.Set(kvstore.KeyStoreVersion, []byte("2")))
-
-		resp := h.executeMigrateCommand(&model.CommandArgs{})
-
-		assert.Contains(t, resp.Text, "Migration completed successfully")
-		assert.Contains(t, resp.Text, "Reset version: 2")
-		assert.Contains(t, resp.Text, "User reverse mappings created/updated: 2")
-	})
 }
 
 // TestExecuteMatrixCommandAdminGate exercises the dispatcher-level admin gate in

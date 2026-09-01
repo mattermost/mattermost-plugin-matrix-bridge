@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net/url"
 	"regexp"
 	"strings"
 
@@ -21,28 +20,6 @@ func (p *Plugin) getGhostUser(serverID, mattermostUserID string) (string, bool) 
 		return string(ghostUserIDBytes), true
 	}
 	return "", false
-}
-
-// extractServerDomain extracts the hostname from a Matrix server URL
-func extractServerDomain(logger Logger, serverURL string) string {
-	if serverURL == "" {
-		return "unknown"
-	}
-
-	parsedURL, err := url.Parse(serverURL)
-	if err != nil {
-		logger.LogWarn("Failed to parse Matrix server URL", "url", serverURL, "error", err)
-		return "unknown"
-	}
-
-	hostname := parsedURL.Hostname()
-	if hostname == "" {
-		logger.LogWarn("Could not extract hostname from Matrix server URL", "url", serverURL)
-		return "unknown"
-	}
-
-	// Replace dots and colons to make it safe for use in property keys
-	return strings.ReplaceAll(strings.ReplaceAll(hostname, ".", "_"), ":", "_")
 }
 
 // findAndDeleteFileMessage finds and deletes file attachment messages that are replies to the main post

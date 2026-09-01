@@ -160,15 +160,23 @@ re-mapping needed - re-add it with that ID:
 
 This only works if the server is re-added at the **same URL** it originally had -
 re-adding it at a different endpoint leaves pre-existing posts' edit/delete history
-unreachable (the command warns if it detects this). The one server that came from a
-pre-multi-server upgrade (see below) can't be removed at all - `server disable` is the
-supported way to take it out of service.
+unreachable (the command warns if it detects this).
 
-**Upgrading from a single-homeserver install.** Existing installs that configured a
-Matrix server via the old System Console fields are migrated automatically on first
-activation after upgrading: a `/matrix server` entry is seeded from the old
-`matrix_server_url`/tokens, keeping its original shared-channels remote and sync history
-so nothing needs to be re-mapped.
+> [!WARNING]
+> **Upgrading from a single-homeserver install wipes the bridge's stored state.** The
+> multi-server layout is not backward compatible with the old single-homeserver one, so
+> the first activation after upgrading **deletes every stored channel mapping, ghost
+> user, and synced-post record**. The old System Console fields
+> (`matrix_server_url`, tokens, `matrix_server_name`) are not carried over either.
+>
+> After upgrading, set the bridge up again:
+>
+> 1. Register each homeserver with `/matrix server add <url> <as_token> <hs_token>`.
+> 2. Re-map each channel with `/matrix server map <server_id> <room_alias|room_id>`.
+>
+> Matrix rooms and their history are untouched - only the bridge's own bookkeeping is
+> reset. Posts synced before the upgrade stay in place but are no longer linked, so
+> edits and deletions of those posts stop propagating.
 
 ## Development
 

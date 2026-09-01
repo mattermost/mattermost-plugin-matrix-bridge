@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,7 +11,10 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
+	"github.com/mattermost/mattermost/server/public/pluginapi"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
@@ -321,5 +325,170 @@ func TestHandleMatrixTransaction(t *testing.T) {
 		w2 := httptest.NewRecorder()
 		plugin.handleMatrixTransaction(w2, transactionRequest(serverID, txnID, body))
 		assert.Equal(t, http.StatusOK, w2.Result().StatusCode, "the retried transaction must be processed, not dropped as a duplicate")
+	})
+}
+
+// TestIsPermanentEventError pins the classifier that decides between acknowledging an
+// event and asking the homeserver to redeliver it. The sentinel travels up through
+// several errors.Wrap layers before handleMatrixTransaction sees it, so the wrap chain
+// is part of what is under test here.
+func TestIsPermanentEventError(t *testing.T) {
+	t.Run("recognizes the sentinel through the wrap chain it actually arrives in", func(t *testing.T) {
+		// createDMChannelForGhostUser -> handleMatrixInitiatedDM -> processMatrixEvent.
+		err := errors.Wrap(ErrChannelAlreadyMapped, "failed to store channel room mapping")
+		err = errors.Wrap(err, "failed to handle Matrix-initiated DM")
+		err = errors.Wrap(err, "failed to process Matrix event")
+
+		assert.True(t, isPermanentEventError(err))
+	})
+
+	t.Run("treats unrecognized errors as transient", func(t *testing.T) {
+		assert.False(t, isPermanentEventError(errors.New("kv store unavailable")))
+		assert.False(t, isPermanentEventError(errors.Wrap(errors.New("boom"), "failed to read room mapping")))
+		assert.False(t, isPermanentEventError(nil))
+	})
+}
+
+// TestHandleMatrixTransactionPermanentFailure covers the AS-spec hazard that a 503 for a
+// permanently-failing event blocks a homeserver forever: transactions are delivered in
+// order, so the homeserver retries the same txnId indefinitely and every later event
+// queues behind it. A permanent failure must be logged and acknowledged instead.
+func TestHandleMatrixTransactionPermanentFailure(t *testing.T) {
+	const serverDomain = "a.example.com"
+
+	plugin := newTestPluginForTransaction(t)
+	client := createMatrixClientWithTestLogger(t, "https://"+serverDomain, "as", "")
+	serverID, _ := registerTestServer(t, plugin, "https://"+serverDomain, serverDomain, client)
+	plugin.client = pluginapi.NewClient(plugin.API, nil)
+
+	api := plugin.API.(*plugintest.API)
+
+	// A ghost user this bridge created, whose Matrix DM will target a Mattermost channel
+	// that is already mapped to a different live server.
+	mattermostUserID := model.NewId()
+	ghostUserID := "@_mattermost_" + mattermostUserID + ":" + serverDomain
+	matrixUserID := "@alice:" + serverDomain
+	matrixUserMattermostID := model.NewId()
+	dmChannelID := model.NewId()
+
+	require.NoError(t, plugin.kvstore.Set(kvstore.BuildGhostUserKey(serverID, mattermostUserID), []byte(ghostUserID)))
+	require.NoError(t, plugin.kvstore.Set(kvstore.BuildMatrixUserKey(serverID, matrixUserID), []byte(matrixUserMattermostID)))
+
+	// The DM channel already belongs to another live server, so the mapping write at the
+	// end of createDMChannelForGhostUser returns ErrChannelAlreadyMapped - permanently.
+	otherServerID, _ := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", client)
+	_, err := plugin.SetChannelMapping(dmChannelID, kvstore.ChannelServerMapping{ServerID: otherServerID, RoomID: "!other:b.example.com"})
+	require.NoError(t, err)
+
+	api.On("GetUser", mattermostUserID).Return(&model.User{Id: mattermostUserID, Username: "owner"}, nil).Maybe()
+	api.On("GetUser", matrixUserMattermostID).Return(&model.User{Id: matrixUserMattermostID, Username: "alice"}, nil).Maybe()
+	api.On("GetDirectChannel", mattermostUserID, matrixUserMattermostID).Return(&model.Channel{Id: dmChannelID}, nil).Maybe()
+
+	// A second, unrelated room that IS mapped, so the transaction carries a later event
+	// that must still be delivered once the permanent failure is skipped.
+	mappedRoomID := "!mapped:" + serverDomain
+	mappedChannelID := model.NewId()
+	require.NoError(t, plugin.kvstore.Set(kvstore.BuildRoomMappingKey(serverID, mappedRoomID), []byte(mappedChannelID)))
+	require.NoError(t, plugin.kvstore.Set(kvstore.BuildMatrixUserKey(serverID, "@bob:"+serverDomain), []byte(matrixUserMattermostID)))
+
+	// The mapped room is a DM channel, so addUserToChannelTeam short-circuits on type
+	// rather than dragging team membership into this test.
+	api.On("GetChannel", mappedChannelID).Return(&model.Channel{Id: mappedChannelID, Type: model.ChannelTypeDirect}, nil).Maybe()
+
+	createdPost := &model.Post{Id: model.NewId()}
+	api.On("CreatePost", mock.Anything).Return(createdPost, nil).Once()
+
+	stateKey := ghostUserID
+	events := []MatrixEvent{
+		{Type: "m.room.member", EventID: "$dm", RoomID: "!dm:" + serverDomain, Sender: matrixUserID, StateKey: &stateKey, Content: map[string]any{"membership": "join"}},
+		{Type: "m.room.message", EventID: "$later", RoomID: mappedRoomID, Sender: "@bob:" + serverDomain, Content: map[string]any{"msgtype": "m.text", "body": "still delivered"}},
+	}
+	body, err := json.Marshal(MatrixTransaction{Events: events})
+	require.NoError(t, err)
+
+	txnID := "txn-" + model.NewId()
+	w := httptest.NewRecorder()
+	plugin.handleMatrixTransaction(w, transactionRequest(serverID, txnID, string(body)))
+
+	assert.Equal(t, http.StatusOK, w.Result().StatusCode, "a permanently-failing event must be acknowledged, not retried forever")
+
+	transactionsMutex.RLock()
+	_, processed := processedTransactions[transactionKey{serverID: serverID, txnID: txnID}]
+	transactionsMutex.RUnlock()
+	assert.True(t, processed, "the transaction must be recorded so the homeserver stops redelivering it")
+
+	api.AssertCalled(t, "CreatePost", mock.Anything)
+	assert.Empty(t, kvstore.RoomIDForServer(mustParseMappings(t, plugin, dmChannelID), serverID), "the rejected DM must not have been mapped to this server")
+}
+
+func mustParseMappings(t *testing.T, plugin *Plugin, channelID string) []kvstore.ChannelServerMapping {
+	t.Helper()
+	raw, err := plugin.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
+	require.NoError(t, err)
+	mappings, err := kvstore.ParseChannelServerMappings(raw)
+	require.NoError(t, err)
+	return mappings
+}
+
+// TestCreateDMChannelForGhostUserReadFailure pins the distinction between "not our ghost
+// user" and "the ghost user record could not be read". Both used to return ("", nil),
+// which processMatrixEvent reads as an unmapped room - it acknowledges the transaction,
+// the homeserver never redelivers it, and the Matrix-initiated DM is lost for good.
+func TestCreateDMChannelForGhostUserReadFailure(t *testing.T) {
+	const serverDomain = "a.example.com"
+
+	setup := func(t *testing.T) (*Plugin, string, string) {
+		t.Helper()
+		plugin := newTestPluginForTransaction(t)
+		client := createMatrixClientWithTestLogger(t, "https://"+serverDomain, "as", "")
+		serverID, _ := registerTestServer(t, plugin, "https://"+serverDomain, serverDomain, client)
+
+		mattermostUserID := model.NewId()
+		ghostUserID := "@_mattermost_" + mattermostUserID + ":" + serverDomain
+		plugin.kvstore = &erroringKVStore{
+			KVStore:     plugin.kvstore,
+			errOnGetKey: kvstore.BuildGhostUserKey(serverID, mattermostUserID),
+		}
+		return plugin, serverID, ghostUserID
+	}
+
+	t.Run("an unreadable ghost user record is an error, not a rejection", func(t *testing.T) {
+		plugin, serverID, ghostUserID := setup(t)
+
+		stateKey := ghostUserID
+		event := MatrixEvent{
+			Type:     "m.room.member",
+			EventID:  "$dm",
+			RoomID:   "!dm:" + serverDomain,
+			Sender:   "@alice:" + serverDomain,
+			StateKey: &stateKey,
+			Content:  map[string]any{"membership": "join"},
+		}
+
+		channelID, err := plugin.handleMatrixMemberDM(serverID, event)
+
+		require.Error(t, err, "a KV read failure must not be reported as \"not our ghost user\"")
+		assert.Empty(t, channelID)
+	})
+
+	t.Run("the transaction is retried rather than acknowledged", func(t *testing.T) {
+		plugin, serverID, ghostUserID := setup(t)
+
+		body := `{"events":[{"type":"m.room.member","event_id":"$dm","room_id":"!dm:` + serverDomain +
+			`","sender":"@alice:` + serverDomain + `","state_key":"` + ghostUserID +
+			`","content":{"membership":"join"}}]}`
+
+		txnID := "txn-" + model.NewId()
+		w := httptest.NewRecorder()
+		plugin.handleMatrixTransaction(w, transactionRequest(serverID, txnID, body))
+
+		resp := w.Result()
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "a lost DM must be retried, not acknowledged")
+		assert.Equal(t, "5", resp.Header.Get("Retry-After"))
+
+		transactionsMutex.RLock()
+		_, processed := processedTransactions[transactionKey{serverID: serverID, txnID: txnID}]
+		transactionsMutex.RUnlock()
+		assert.False(t, processed, "the transaction must stay unrecorded so the homeserver redelivers it")
 	})
 }

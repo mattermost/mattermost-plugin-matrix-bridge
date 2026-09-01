@@ -354,13 +354,13 @@ func (suite *MultiServerIntegrationTestSuite) TestChannelMappingRejectsSecondSer
 	roomA := suite.containerA.CreateRoom(t, generateUniqueRoomName("Rejection Test Room A"))
 	roomB := suite.containerB.CreateRoom(t, generateUniqueRoomName("Rejection Test Room B"))
 
-	_, err := ts.plugin.SetChannelMapping(channelID, ts.serverIDA, roomA)
+	_, err := ts.plugin.SetChannelMapping(channelID, kvstore.ChannelServerMapping{ServerID: ts.serverIDA, RoomID: roomA})
 	require.NoError(t, err, "mapping the channel to server A must succeed")
 
 	// Attempt to map the SAME channel to server B through the same production choke
 	// point. This must be rejected - the one-server-per-channel policy must not be
 	// weakened or bypassed.
-	_, err = ts.plugin.SetChannelMapping(channelID, ts.serverIDB, roomB)
+	_, err = ts.plugin.SetChannelMapping(channelID, kvstore.ChannelServerMapping{ServerID: ts.serverIDB, RoomID: roomB})
 	require.Error(t, err, "mapping an already-mapped channel to a second live server must fail")
 	assert.True(t, errors.Is(err, ErrChannelAlreadyMapped), "the error must be (or wrap) ErrChannelAlreadyMapped")
 
@@ -428,7 +428,7 @@ func (suite *MultiServerIntegrationTestSuite) TestReAdoptionRoundTrip() {
 	// testUserID on server A.
 	channelID := model.NewId()
 	roomID := suite.containerA.CreateRoom(t, generateUniqueRoomName("Re-adoption Test Room"))
-	_, err = plugin.SetChannelMapping(channelID, serverIDA, roomID)
+	_, err = plugin.SetChannelMapping(channelID, kvstore.ChannelServerMapping{ServerID: serverIDA, RoomID: roomID})
 	require.NoError(t, err)
 
 	m2mxA, err := plugin.newMattermostToMatrixBridge(serverIDA)

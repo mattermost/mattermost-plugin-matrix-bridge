@@ -18,7 +18,6 @@ function buildServer(overrides: Partial<ServerView> = {}): ServerView {
         username_prefix: 'matrix',
         enabled: true,
         remote_id: 'remote1',
-        is_migrated: false,
         has_as_token: true,
         has_hs_token: true,
         ...overrides,
@@ -33,26 +32,10 @@ describe('RemoveServerDialog', () => {
                 server={server}
                 onClose={jest.fn()}
                 onRemoved={jest.fn()}
-                onDisableInstead={jest.fn()}
             />,
         );
 
         expect(screen.getByText('s1')).toBeInTheDocument();
         expect(screen.getByText(/--server-id s1/)).toBeInTheDocument();
-    });
-
-    it('disables removal and offers Disable instead for a migrated server', () => {
-        const server = buildServer({is_migrated: true});
-        render(
-            <RemoveServerDialog
-                server={server}
-                onClose={jest.fn()}
-                onRemoved={jest.fn()}
-                onDisableInstead={jest.fn()}
-            />,
-        );
-
-        expect(screen.queryByRole('button', {name: 'Remove'})).not.toBeInTheDocument();
-        expect(screen.getByRole('button', {name: 'Disable instead'})).toBeInTheDocument();
     });
 });

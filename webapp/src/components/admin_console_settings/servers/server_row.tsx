@@ -11,7 +11,6 @@ import {
     menuItemStyle,
     menuStyle,
     metaStyle,
-    migratedTagStyle,
     mappingsWrapperStyle,
     mutedCellTextStyle,
     nameStyle,
@@ -141,9 +140,6 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
                     >
                         {server.server_id}
                     </button>
-                    {server.is_migrated && (
-                        <div style={migratedTagStyle}>{'Migrated from legacy configuration'}</div>
-                    )}
                 </div>
                 <button
                     type='button'
@@ -236,9 +232,7 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
                                 <button
                                     type='button'
                                     role='menuitem'
-                                    style={menuItemStyle({danger: true, disabled: server.is_migrated})}
-                                    disabled={server.is_migrated}
-                                    title={server.is_migrated ? 'This server was migrated from the legacy configuration and cannot be removed - use Disable connection instead' : undefined}
+                                    style={menuItemStyle({danger: true})}
                                     onClick={() => runAndClose(() => onRemove(server))}
                                 >
                                     <i className='icon icon-trash-can-outline'/>

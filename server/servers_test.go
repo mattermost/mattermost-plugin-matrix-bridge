@@ -71,46 +71,6 @@ func mockAnyLogCalls(api *plugintest.API) {
 	}
 }
 
-func TestMaterializeServerFromLegacyConfig(t *testing.T) {
-	t.Run("fresh install with no legacy URL returns empty, not an error", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		api := plugin.API.(*plugintest.API)
-		api.On("LoadPluginConfiguration", mock.Anything).Return(nil).Maybe()
-
-		id, err := plugin.materializeServerFromLegacyConfig()
-		require.NoError(t, err)
-		assert.Empty(t, id)
-	})
-
-	t.Run("idempotent: a second call with the same endpoint returns the same ID", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		api := plugin.API.(*plugintest.API)
-		// newTestPluginForServers's default LoadPluginConfiguration expectation (via
-		// setupPluginForTest) is registered first and would otherwise shadow this one.
-		clearMockExpectations(api)
-		mockAnyLogCalls(api)
-		api.On("LoadPluginConfiguration", mock.Anything).Run(func(args mock.Arguments) {
-			dest := args.Get(0).(*legacyServerConfig)
-			dest.MatrixServerURL = "https://legacy.example.com"
-			dest.MatrixASToken = "legacy-as"
-			dest.MatrixHSToken = "legacy-hs"
-		}).Return(nil)
-
-		id1, err := plugin.materializeServerFromLegacyConfig()
-		require.NoError(t, err)
-		require.NotEmpty(t, id1)
-
-		id2, err := plugin.materializeServerFromLegacyConfig()
-		require.NoError(t, err)
-		assert.Equal(t, id1, id2)
-
-		servers, err := plugin.servers.List()
-		require.NoError(t, err)
-		require.Len(t, servers, 1)
-		assert.Empty(t, servers[0].SiteURL, "the migrated entry must keep SiteURL empty")
-	})
-}
-
 // TestRegisterForSharedChannelsFailureIsolation covers §5.1's shared-channels remote
 // registration requirement: one server's registration failing must not block the others,
 // and the overall call must still succeed.

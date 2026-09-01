@@ -5,8 +5,8 @@ package kvstore
 // to ensure consistency and avoid key conflicts.
 
 const (
-	// CurrentKVStoreVersion is the current version requiring migrations
-	CurrentKVStoreVersion = 3
+	// CurrentKVStoreVersion is the schema version this build writes and expects.
+	CurrentKVStoreVersion = 1
 
 	// DefaultListKeysBatchSize is the raw-keyspace page size used by callers of
 	// ListAllKeysWithPrefix/ListAllKeysByPrefix that have no reason to page differently.
@@ -44,18 +44,25 @@ const (
 	// Namespaced per server: matrix_reaction_<serverID>_<reactionEventID>
 	KeyPrefixMatrixReaction = "matrix_reaction_"
 
-	// KeyStoreVersion is the key for tracking the current KV store schema version
-	KeyStoreVersion = "kv_store_version"
+	// KeySchemaVersion tracks which schema version the stored records are in. Deliberately
+	// not the pre-multi-server "kv_store_version", which those builds left at 2: a
+	// version-1 baseline would read that as already ahead of current and skip the purge.
+	KeySchemaVersion = "kv_schema_version"
 
-	// KeyPrefixLegacyDMMapping was the old prefix for DM mappings (migrated to channel_mapping_)
-	KeyPrefixLegacyDMMapping = "dm_mapping_"
-	// KeyPrefixLegacyMatrixDMMapping was the old prefix for Matrix DM mappings (migrated to room_mapping_)
+	// KeyLegacyStoreVersion is the pre-multi-server builds' version marker, kept only so
+	// purgeStaleRecords can delete it.
+	KeyLegacyStoreVersion = "kv_store_version"
+
+	// KeyPrefixLegacyDMMapping and KeyPrefixLegacyMatrixDMMapping are pre-unification DM
+	// prefixes no live code reads, kept only so purgeStaleRecords can delete them.
+	KeyPrefixLegacyDMMapping       = "dm_mapping_"
 	KeyPrefixLegacyMatrixDMMapping = "matrix_dm_mapping_"
 )
 
-// NamespacedKeyPrefixes lists every KV prefix that gained a serverID dimension in v3.
-// Used by the v2->v3 migration to rekey the legacy un-namespaced layout.
-var NamespacedKeyPrefixes = []string{ //nolint:revive // exported for use by migrations.go
+// BridgeDataPrefixes lists every KV prefix holding per-bridge records; purgeStaleRecords
+// deletes everything under them. The server registry (KeyServersConfig) is deliberately
+// absent, so it is never in scope for deletion.
+var BridgeDataPrefixes = []string{ //nolint:revive // exported for use by migrations.go
 	KeyPrefixMatrixUser,
 	KeyPrefixMattermostUser,
 	KeyPrefixGhostUser,
@@ -63,11 +70,13 @@ var NamespacedKeyPrefixes = []string{ //nolint:revive // exported for use by mig
 	KeyPrefixMatrixEventPost,
 	KeyPrefixMatrixReaction,
 	KeyPrefixRoomMapping,
+	KeyPrefixChannelMapping,
+	KeyPrefixLegacyDMMapping,
+	KeyPrefixLegacyMatrixDMMapping,
 }
 
 // Helper functions for building KV store keys.
 //
-// The seven prefixes above are namespaced per Matrix server: <prefix><serverID>_<id>.
 // BuildChannelMappingKey stays server-agnostic - the server(s) a channel is bridged to
 // live in the stored value (see ChannelServerMapping), not the key.
 

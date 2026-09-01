@@ -87,11 +87,6 @@ func setupPluginForTest() *Plugin {
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Maybe()
 
-	// Migration code paths call LoadPluginConfiguration to check for legacy flat
-	// configuration; default to "none configured" (a fresh install) unless a test
-	// overrides this expectation.
-	api.On("LoadPluginConfiguration", mock.Anything).Return(nil).Maybe()
-
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.logger = &testLogger{}
@@ -456,12 +451,16 @@ func setupBasicMocks(api *plugintest.API, testUserID string) {
 	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 }
 
+func buildSingleChannelMapping(serverID, roomID string) ([]byte, error) {
+	return kvstore.MarshalChannelServerMappings([]kvstore.ChannelServerMapping{{ServerID: serverID, RoomID: roomID}})
+}
+
 // setupTestKVData sets up initial test data in the KV store
 func setupTestKVData(t *testing.T, kv kvstore.KVStore, serverID, testChannelID, testRoomID string) {
 	t.Helper()
 
 	// Set up channel mapping
-	data, err := kvstore.BuildSingleChannelMapping(serverID, testRoomID)
+	data, err := buildSingleChannelMapping(serverID, testRoomID)
 	require.NoError(t, err)
 	require.NoError(t, kv.Set(kvstore.BuildChannelMappingKey(testChannelID), data))
 
@@ -729,6 +728,31 @@ func (c *casConflictKVStore) SetAtomicWithRetries(key string, valueFunc func(old
 // erroringKVStore wraps a KVStore and fails Get for one specific key, for tests that
 // need to simulate a registry-read failure (e.g. a corrupt or unreachable backing store)
 // without a full hand-written fake.
+// readCountingKVStore wraps a KVStore and counts reads of one key, so a test can assert
+// how many times an operation actually went to the registry rather than a cache.
+type readCountingKVStore struct {
+	kvstore.KVStore
+	countKey string
+
+	mu    sync.Mutex
+	reads int
+}
+
+func (r *readCountingKVStore) Get(key string) ([]byte, error) {
+	if key == r.countKey {
+		r.mu.Lock()
+		r.reads++
+		r.mu.Unlock()
+	}
+	return r.KVStore.Get(key)
+}
+
+func (r *readCountingKVStore) readCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
+}
+
 type erroringKVStore struct {
 	kvstore.KVStore
 	errOnGetKey string

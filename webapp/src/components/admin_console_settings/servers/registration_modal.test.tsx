@@ -22,7 +22,6 @@ const server: ServerView = {
     username_prefix: 'matrix',
     enabled: true,
     remote_id: 'remote1',
-    is_migrated: false,
     has_as_token: true,
     has_hs_token: true,
 };

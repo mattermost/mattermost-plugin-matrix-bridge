@@ -239,15 +239,11 @@ func eventDomainFromEndpoint(endpoint string) string {
 
 // ResolveServerName resolves the domain that will appear in this homeserver's
 // Matrix IDs. Resolution order, first success wins:
-//  1. configuredName, if non-empty (manual override, or the legacy
-//     matrix_server_name when called from the v3 migration).
+//  1. configuredName, if non-empty (the --server-name override).
 //  2. GET <serverURL>/_matrix/key/v2/server's server_name field (best-effort - any
 //     failure falls through rather than erroring).
 //  3. Hostname(serverURL), which always succeeds for a parseable URL, so this
 //     function never fails to produce a non-empty name for a parseable URL.
-//
-// The same function is used by Add and the v3 migration so ghost recognition stays
-// consistent between the two callers.
 func (s *Service) ResolveServerName(serverURL, configuredName string) (string, error) {
 	if configuredName != "" {
 		normalized, err := matrix.NormalizeServerName(configuredName)
@@ -306,6 +302,42 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 	eventDomain := eventDomainFromEndpoint(endpoint)
 	siteURL := "https://" + endpoint
 
+	checkConflicts := func(current []kvstore.ServerConfig) error {
+		for _, existing := range current {
+			if existing.Endpoint == endpoint {
+				return wrapf(ErrEndpointTaken, "a server is already registered at this endpoint (server_id: %s); use `/matrix server remove %s` first", existing.ServerID, existing.ServerID)
+			}
+			if existing.ServerName == resolvedServerName {
+				return wrapf(ErrNameTaken, "server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", resolvedServerName, existing.ServerID)
+			}
+			if req.ServerID != "" && existing.ServerID == req.ServerID {
+				return wrapf(ErrIDTaken, "server ID %s is already registered", req.ServerID)
+			}
+			if req.HSToken != "" && existing.HSToken == req.HSToken {
+				return wrapf(ErrHSTokenTaken, "hs_token conflicts with existing server %s; hs_token must be unique across registered servers", existing.ServerID)
+			}
+		}
+		return nil
+	}
+
+	// Conflicts are checked here as well as inside the mutate callback below.
+	// RegisterRemoteForSiteURL is idempotent per SiteURL, so re-adding an endpoint that is
+	// already registered hands back the *existing* server's RemoteID; without this
+	// pre-check the rollback would unregister that live remote, taking down the existing
+	// server's channel invitations and sync cursors.
+	//
+	// This narrows the window rather than closing it: two concurrent adds for the same
+	// endpoint can both clear the pre-check, both receive the same idempotent RemoteID,
+	// and the CAS loser's rollback then unregisters the winner's live remote. Closing
+	// that needs the registry entry reserved by CAS before the remote is created.
+	existing, err := s.List()
+	if err != nil {
+		return kvstore.ServerConfig{}, err
+	}
+	if err := checkConflicts(existing); err != nil {
+		return kvstore.ServerConfig{}, err
+	}
+
 	// Register the shared-channels remote BEFORE the registry write, so its ID can go
 	// into the entry itself. Registering afterwards would persist a server with an empty
 	// RemoteID whenever the call failed - a registered server that silently syncs
@@ -317,19 +349,9 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 
 	var created kvstore.ServerConfig
 	err = s.mutate(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		for _, existing := range current {
-			if existing.Endpoint == endpoint {
-				return nil, wrapf(ErrEndpointTaken, "a server is already registered at this endpoint (server_id: %s); use `/matrix server remove %s` first", existing.ServerID, existing.ServerID)
-			}
-			if existing.ServerName == resolvedServerName {
-				return nil, wrapf(ErrNameTaken, "server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", resolvedServerName, existing.ServerID)
-			}
-			if req.ServerID != "" && existing.ServerID == req.ServerID {
-				return nil, wrapf(ErrIDTaken, "server ID %s is already registered", req.ServerID)
-			}
-			if req.HSToken != "" && existing.HSToken == req.HSToken {
-				return nil, wrapf(ErrHSTokenTaken, "hs_token conflicts with existing server %s; hs_token must be unique across registered servers", existing.ServerID)
-			}
+		// The authoritative check: only this callback sees the slice the write lands on.
+		if err := checkConflicts(current); err != nil {
+			return nil, err
 		}
 
 		id := req.ServerID
@@ -356,8 +378,9 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 		return append(result, created), nil
 	})
 	if err != nil {
-		// The registry rejected this add (a conflict, or a CAS failure) after the remote
-		// was already created - it belongs to no entry, so it must not be left registered.
+		// The remote was created but belongs to no entry, so it must not be left
+		// registered. Reaching here means a concurrent writer won the race after the
+		// pre-check above passed, or the CAS itself failed.
 		if unregErr := s.host.UnregisterRemote(remoteID); unregErr != nil {
 			s.logger.LogWarn("Failed to unregister shared-channels remote after a rejected add", "remote_id", remoteID, "error", unregErr)
 		}
@@ -399,11 +422,6 @@ func (s *Service) warnIfEventDomainMismatch(serverID, newEventDomain string) {
 // remote. It deletes no other KV records: every namespaced key stays exactly where
 // it was, addressed by a ServerID the caller should print as the recovery key for
 // re-adoption via Add.
-//
-// Refuses to remove an entry whose SiteURL is empty (ErrMigratedImmutable) - that
-// is the migrated legacy server, which resolves to the pre-upgrade
-// plugin_<PluginID> remote and cannot be re-created with the same identity.
-// Disabling it is the supported way to take it out of service.
 func (s *Service) Remove(serverID string) (bool, error) {
 	var removed *kvstore.ServerConfig
 
@@ -418,10 +436,6 @@ func (s *Service) Remove(serverID string) (bool, error) {
 		if idx == -1 {
 			removed = nil
 			return current, nil
-		}
-
-		if current[idx].SiteURL == "" {
-			return nil, wrapf(ErrMigratedImmutable, "this server was migrated from the legacy single-server configuration and cannot be removed; use `/matrix server disable` to take it out of service")
 		}
 
 		entry := current[idx]
@@ -630,33 +644,6 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 	}
 
 	return updated, warnings, nil
-}
-
-// Seed idempotently inserts entry if no existing entry shares its Endpoint,
-// returning the ID that ends up registered at that endpoint (entry.ServerID on a
-// fresh insert, or the existing entry's ID if it was already materialized).
-// Migration-only: unlike Add, it performs no name resolution, no SiteURL
-// derivation, and registers no remote - the caller (main's
-// materializeServerFromLegacyConfig) composes entry itself, deliberately keeping a
-// legacy SiteURL of "" and a master-derived EventDomain.
-func (s *Service) Seed(entry kvstore.ServerConfig) (string, error) {
-	var resultID string
-	err := s.mutate(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		for _, existing := range current {
-			if existing.Endpoint == entry.Endpoint {
-				resultID = existing.ServerID
-				return current, nil
-			}
-		}
-		resultID = entry.ServerID
-		result := make([]kvstore.ServerConfig, len(current), len(current)+1)
-		copy(result, current)
-		return append(result, entry), nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return resultID, nil
 }
 
 // MergeRemoteIDs persists a batch of discovered remote IDs (serverID -> remoteID)

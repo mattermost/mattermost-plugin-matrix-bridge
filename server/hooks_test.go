@@ -61,7 +61,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -76,7 +76,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		_, remoteIDA := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 		serverIDB, _ := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverIDB, "!room:b.example.com")
+		mappingData, err := buildSingleChannelMapping(serverIDB, "!room:b.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -108,11 +108,84 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		assert.False(t, shouldSync)
 	})
 
+	// Removing a server leaves its channel_mapping_ entry behind, so a mapping is only
+	// evidence of ownership while its server is still registered. Counting a dead entry
+	// stranded the channel: RoomIDForServer found nothing for the new server, the stale
+	// entry made it look "mapped elsewhere", and the DM never got auto-created.
+	t.Run("a mapping to a removed server does not block auto-creation on the new server", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		api := plugin.API.(*plugintest.API)
+		api.On("UnregisterPluginRemoteForSharedChannels", mock.Anything).Return(nil).Maybe()
+		api.On("GetChannel", "channel1").Return(&model.Channel{Type: model.ChannelTypeDirect}, nil)
+
+		serverIDA, _ := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		mappingData, err := buildSingleChannelMapping(serverIDA, "!room:a.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		removed, err := plugin.servers.Remove(serverIDA)
+		require.NoError(t, err)
+		require.True(t, removed)
+
+		serverIDB, remoteIDB := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
+
+		// The dead entry for A is still on the channel.
+		mappings, err := plugin.getChannelServerMappings("channel1")
+		require.NoError(t, err)
+		require.Len(t, mappings, 1)
+		require.Equal(t, serverIDA, mappings[0].ServerID)
+
+		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteIDB})
+		require.NoError(t, err)
+		assert.True(t, shouldSync, "a channel holding only a dead mapping must read as unmapped, not as owned by another server")
+		assert.Equal(t, serverIDB, got)
+	})
+
+	t.Run("a mapping to an unregistered server falls through to the unmapped path", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetChannel", "channel1").Return(&model.Channel{Type: model.ChannelTypeOpen}, nil)
+
+		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+
+		mappingData, err := buildSingleChannelMapping(model.NewId(), "!room:gone.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.False(t, shouldSync)
+		// Reaching the channel-type lookup is what proves the stale entry was ignored -
+		// the "mapped elsewhere" branch returns before it.
+		api.AssertCalled(t, "GetChannel", "channel1")
+	})
+
+	// Only registration is checked, not Enabled: a disabled server still owns its
+	// channels, and remapping them is an explicit operator action.
+	t.Run("a mapping to a registered but disabled server still counts as owned", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		api := plugin.API.(*plugintest.API)
+
+		_, remoteIDA := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		serverIDB, _ := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
+
+		mappingData, err := buildSingleChannelMapping(serverIDB, "!room:b.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		require.NoError(t, plugin.servers.SetEnabled(serverIDB, false))
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteIDA})
+		require.NoError(t, err)
+		assert.False(t, shouldSync, "a disabled server's mapping must not be treated as stale")
+		api.AssertNotCalled(t, "GetChannel", "channel1")
+	})
+
 	t.Run("disabled server is skipped even when mapped to it", func(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -129,11 +202,11 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		serverIDB, remoteIDB := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
 		require.NoError(t, plugin.servers.SetEnabled(serverIDB, false))
 
-		mappingA, err := kvstore.BuildSingleChannelMapping(serverIDA, "!room:a.example.com")
+		mappingA, err := buildSingleChannelMapping(serverIDA, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channelA"), mappingA))
 
-		mappingB, err := kvstore.BuildSingleChannelMapping(serverIDB, "!room:b.example.com")
+		mappingB, err := buildSingleChannelMapping(serverIDB, "!room:b.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channelB"), mappingB))
 
@@ -182,7 +255,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 
-		mappingData, err := kvstore.BuildSingleChannelMapping(serverID, "!room:a.example.com")
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
@@ -194,6 +267,64 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		require.NoError(t, err)
 		assert.True(t, shouldSync, "a stale remote cache must be refreshed from the registry before giving up")
+		assert.Equal(t, serverID, got)
+	})
+
+	// initMatrixClients is a full registry read plus a client per registered server, run
+	// under a mutex that serializes every other rebuild. A remote that will never resolve
+	// - a server whose unregister failed, or a remote that was never ours - must never
+	// pay for it, since the registry read alone already proves the remote is not ours.
+	t.Run("an unresolvable remote is settled by a registry read, never a client rebuild", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		serverID, _ := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+
+		counter := &readCountingKVStore{KVStore: plugin.kvstore, countKey: kvstore.KeyServersConfig}
+		plugin.kvstore = counter
+		// The registry read on this path goes through servers.Service, which holds the
+		// store it was built with - rewire it so the counter sees that read.
+		plugin.servers = servers.New(counter, pluginLogger{plugin}, pluginHost{plugin})
+
+		for range 5 {
+			_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: "never-ours"})
+			require.NoError(t, err)
+			assert.False(t, shouldSync)
+		}
+
+		assert.Equal(t, 5, counter.readCount(), "each message may read the registry once and no more")
+		// registerTestServer seeds a nil client; only a rebuild would construct a real one.
+		assert.Nil(t, plugin.matrixClients[serverID], "no message may trigger a client rebuild")
+	})
+
+	// A remote found absent from the registry is re-checked against the registry on its
+	// very next message, so a server registered moments later is picked up immediately.
+	// Nothing caches the "absent" answer, so no window exists in which its traffic is
+	// silently dropped.
+	t.Run("a remote registered after a skip resolves on its next message", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		// Hide the server from the registry so the first message finds nothing to resolve.
+		servers, err := plugin.servers.List()
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, []byte("[]")))
+		require.NoError(t, plugin.initMatrixClients())
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		require.False(t, shouldSync)
+
+		// Put it back in the registry only - no cluster event, no rebuild on this node.
+		restored, err := kvstore.MarshalServersConfig(servers)
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, restored))
+
+		got, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.NoError(t, err)
+		assert.True(t, shouldSync, "the registry read must pick the server up without a cluster event")
 		assert.Equal(t, serverID, got)
 	})
 
@@ -320,8 +451,8 @@ func TestUserHasJoinedChannelPerServerEnablement(t *testing.T) {
 	require.NoError(t, plugin.kvstore.Set(kvstore.BuildGhostUserKey(serverIDB, userID), []byte("@_mattermost_"+userID+":b.example.com")))
 
 	channelID := model.NewId()
-	mappings := kvstore.UpsertChannelServerMapping(nil, serverIDA, "!room:a.example.com")
-	mappings = kvstore.UpsertChannelServerMapping(mappings, serverIDB, "!room:b.example.com")
+	mappings := kvstore.UpsertChannelServerMapping(nil, kvstore.ChannelServerMapping{ServerID: serverIDA, RoomID: "!room:a.example.com"})
+	mappings = kvstore.UpsertChannelServerMapping(mappings, kvstore.ChannelServerMapping{ServerID: serverIDB, RoomID: "!room:b.example.com"})
 	mappingData, err := kvstore.MarshalChannelServerMappings(mappings)
 	require.NoError(t, err)
 	require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingData))

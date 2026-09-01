@@ -162,6 +162,10 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	// Process each event in the transaction.
 	for _, event := range transaction.Events {
 		if err := p.processMatrixEvent(serverID, event); err != nil {
+			if isPermanentEventError(err) {
+				p.logger.LogError("Skipping Matrix event that cannot succeed on retry", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "server_id", serverID, "txn_id", txnID)
+				continue
+			}
 			p.logger.LogError("Failed to process Matrix event", "error", err, "event_id", event.EventID, "event_type", event.Type, "room_id", event.RoomID, "server_id", serverID, "txn_id", txnID)
 			w.Header().Set("Retry-After", "5")
 			http.Error(w, "Transaction processing failed", http.StatusServiceUnavailable)
@@ -187,6 +191,12 @@ func (p *Plugin) handleMatrixTransaction(w http.ResponseWriter, r *http.Request)
 	if _, err := w.Write([]byte("{}")); err != nil {
 		p.logger.LogWarn("Failed to write webhook response", "error", err)
 	}
+}
+
+// isPermanentEventError reports whether err will fail identically on every redelivery of
+// the same event, making an acknowledgement better than an endless retry.
+func isPermanentEventError(err error) bool {
+	return errors.Is(err, ErrChannelAlreadyMapped)
 }
 
 // processMatrixEvent routes a single Matrix event, received on serverID, to the
@@ -409,7 +419,10 @@ func (p *Plugin) createDMChannelForGhostUser(serverID, roomID, ghostUserID, matr
 	// Verify that this ghost user exists in our KV store (meaning we created it)
 	ghostUserKey := kvstore.BuildGhostUserKey(serverID, mattermostUserID)
 	ghostUserData, err := p.kvstore.Get(ghostUserKey)
-	if err != nil || len(ghostUserData) == 0 {
+	if err != nil {
+		return "", errors.Wrap(err, "failed to read ghost user record")
+	}
+	if len(ghostUserData) == 0 {
 		p.logger.LogDebug("Rejecting DM creation for unrecognized ghost user", "ghost_user_id", ghostUserID, "mattermost_user_id", mattermostUserID, "server_id", serverID)
 		return "", nil // Not our ghost user - reject silently
 	}

@@ -16,14 +16,12 @@ interface Props {
     server: ServerView;
     onClose: () => void;
     onRemoved: () => void | Promise<void>;
-    onDisableInstead: () => void;
 }
 
 // RemoveServerDialog surfaces the server_id as the recovery key and the exact
 // restore command, since Service.Remove keeps every KV record and an admin who
-// loses the ID loses the cheap path back. is_migrated servers can't be removed at
-// all - the dialog explains why and offers Disable instead.
-const RemoveServerDialog: React.FC<Props> = ({server, onClose, onRemoved, onDisableInstead}) => {
+// loses the ID loses the cheap path back.
+const RemoveServerDialog: React.FC<Props> = ({server, onClose, onRemoved}) => {
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -67,36 +65,6 @@ const RemoveServerDialog: React.FC<Props> = ({server, onClose, onRemoved, onDisa
             >
                 <p>{'Channel mappings and ghost users for this server were kept, not deleted. To restore it:'}</p>
                 <pre>{recoveryCommand}</pre>
-            </ModalShell>
-        );
-    }
-
-    if (server.is_migrated) {
-        return (
-            <ModalShell
-                title='Cannot remove this server'
-                onClose={onClose}
-                footer={
-                    <>
-                        <button
-                            type='button'
-                            className='btn btn-tertiary'
-                            onClick={onClose}
-                        >
-                            {'Cancel'}
-                        </button>
-                        <button
-                            type='button'
-                            className='btn btn-primary'
-                            onClick={onDisableInstead}
-                        >
-                            {'Disable instead'}
-                        </button>
-                    </>
-                }
-            >
-                <p>{'This server was migrated from the legacy single-server configuration and cannot be removed - it has no shared-channels remote identity that could be re-created.'}</p>
-                <p>{'Disable it instead to take it out of service without touching its mappings, ghosts or remote.'}</p>
             </ModalShell>
         );
     }

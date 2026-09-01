@@ -119,7 +119,7 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 	// leaving room_mapping_<serverID>_<oldRoomID> -> channelID in place, and
 	// getChannelIDFromMatrixRoom would then keep routing inbound events from the old
 	// room into a channel that is now bridged to a different one.
-	previousRoomID, err := s.GetMatrixRoomID(channelID)
+	previous, err := s.channelMappingForServer(channelID)
 	if err != nil {
 		return errors.Wrap(err, "failed to read existing channel room mapping")
 	}
@@ -132,13 +132,27 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 		roomID = matrixRoomIdentifier
 	}
 
-	if _, err := s.channelMapper.SetChannelMapping(channelID, s.serverID, roomID); err != nil {
+	// Record the alias the mapping was created from. The room ID cannot be reversed back
+	// into it, so this is the only record of which alias reverse key exists, and both
+	// UnmapChannelFromServer and the re-map cleanup below need it.
+	var alias string
+	if strings.HasPrefix(matrixRoomIdentifier, "#") && roomID != matrixRoomIdentifier {
+		alias = matrixRoomIdentifier
+	}
+
+	entry := kvstore.ChannelServerMapping{ServerID: s.serverID, RoomID: roomID, Alias: alias}
+	if _, err := s.channelMapper.SetChannelMapping(channelID, entry); err != nil {
 		return errors.Wrap(err, "failed to store channel room mapping")
 	}
 
-	if previousRoomID != "" && previousRoomID != roomID {
-		if err := s.kvstore.Delete(kvstore.BuildRoomMappingKey(s.serverID, previousRoomID)); err != nil {
-			s.logger.LogWarn("Failed to delete stale reverse room mapping", "channel_id", channelID, "server_id", s.serverID, "old_room_id", previousRoomID, "error", err)
+	if previous.RoomID != "" && previous.RoomID != roomID {
+		if err := s.kvstore.Delete(kvstore.BuildRoomMappingKey(s.serverID, previous.RoomID)); err != nil {
+			s.logger.LogWarn("Failed to delete stale reverse room mapping", "channel_id", channelID, "server_id", s.serverID, "old_room_id", previous.RoomID, "error", err)
+		}
+	}
+	if previous.Alias != "" && previous.Alias != alias {
+		if err := s.kvstore.Delete(kvstore.BuildRoomMappingKey(s.serverID, previous.Alias)); err != nil {
+			s.logger.LogWarn("Failed to delete stale reverse alias mapping", "channel_id", channelID, "server_id", s.serverID, "old_room_alias", previous.Alias, "error", err)
 		}
 	}
 
@@ -149,15 +163,32 @@ func (s *BridgeUtils) setChannelRoomMapping(channelID, matrixRoomIdentifier stri
 
 	// If we started with an alias, also create reverse mapping for the alias
 	// This allows lookups by both alias and room ID
-	if strings.HasPrefix(matrixRoomIdentifier, "#") && roomID != matrixRoomIdentifier {
-		if err := s.kvstore.Set(kvstore.BuildRoomMappingKey(s.serverID, matrixRoomIdentifier), []byte(channelID)); err != nil {
-			s.logger.LogWarn("Failed to create alias reverse mapping", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "error", err)
+	if alias != "" {
+		if err := s.kvstore.Set(kvstore.BuildRoomMappingKey(s.serverID, alias), []byte(channelID)); err != nil {
+			s.logger.LogWarn("Failed to create alias reverse mapping", "channel_id", channelID, "room_alias", alias, "error", err)
 		} else {
-			s.logger.LogDebug("Created reverse mappings for alias", "channel_id", channelID, "room_alias", matrixRoomIdentifier, "room_id", roomID)
+			s.logger.LogDebug("Created reverse mappings for alias", "channel_id", channelID, "room_alias", alias, "room_id", roomID)
 		}
 	}
 
 	return nil
+}
+
+// channelMappingForServer returns this bridge's server's entry for channelID, or the
+// zero value when the channel is not mapped to it. A read failure is propagated: callers
+// clean up reverse keys based on the previous entry, and treating a failed read as
+// "unmapped" would silently skip that cleanup.
+func (s *BridgeUtils) channelMappingForServer(channelID string) (kvstore.ChannelServerMapping, error) {
+	data, err := s.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
+	if err != nil {
+		return kvstore.ChannelServerMapping{}, errors.Wrap(err, "failed to read channel mapping")
+	}
+	mappings, err := kvstore.ParseChannelServerMappings(data)
+	if err != nil {
+		return kvstore.ChannelServerMapping{}, errors.Wrap(err, "failed to parse channel server mapping")
+	}
+	entry, _ := kvstore.ChannelMappingForServer(mappings, s.serverID)
+	return entry, nil
 }
 
 // serverConfig returns this bridge's server's current registry entry, read through

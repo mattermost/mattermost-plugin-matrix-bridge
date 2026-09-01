@@ -30,11 +30,6 @@ var (
 	// hs_token makes which server an inbound transaction is attributed to arbitrary.
 	ErrHSTokenTaken = errors.New("hs_token conflicts with an existing server")
 
-	// ErrMigratedImmutable is returned by Remove for an entry migrated from the
-	// legacy single-server configuration (SiteURL == ""), which cannot be
-	// re-registered with the same shared-channels remote identity.
-	ErrMigratedImmutable = errors.New("server was migrated from the legacy configuration and cannot be removed")
-
 	// ErrInvalidInput is returned for malformed input the registry itself validates
 	// (a malformed server_id, an empty token on Update, etc).
 	ErrInvalidInput = errors.New("invalid server input")

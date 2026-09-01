@@ -32,8 +32,7 @@ Slash commands stay, with unchanged behaviour. Both surfaces must call **one** i
   plugin runtime can do.
 - A plugin REST API for the server registry, System Admin only (§3.5).
 - **`Service.Update`** — a new registry mutation (§3.3). The console needs to rotate a token or
-  fix a URL without remove-then-re-add, which the migrated legacy entry cannot do at all
-  (backend §3.1.1).
+  fix a URL without remove-then-re-add (backend §3.1.1).
 - **Typed sentinel errors** in the new package (§3.4), so the API can answer 404/409/400
   instead of 500-for-everything.
 - `plugin.json` `settings_schema` restructured into `sections` (§3.6) — with the trap that this
@@ -76,7 +75,7 @@ caller of the same reads:
 | `p.getServers`, `p.mutateServers`, `p.serverByID`, `p.serverDomainForID`      | **Move** to `servers.Service` (§3.2).                             |
 | `p.AddServer`, `p.RemoveServer` (`servers.go:139,246`)                         | **Move**; behaviour unchanged, errors typed (§3.4).               |
 | `p.SetServerEnabled` (`plugin.go:555`)                                         | **Move** → `Service.SetEnabled`.                                  |
-| `normalizeServerEndpoint`, `eventDomainFromEndpoint`, `p.resolveServerName`   | **Move**; `ResolveServerName` stays exported (the migration needs the same function — backend §3.8). |
+| `normalizeServerEndpoint`, `eventDomainFromEndpoint`, `p.resolveServerName`   | **Move**; `ResolveServerName` stays exported.                     |
 | `Handler.probeServerHealth` (`command.go:413`)                                | **Move** → `Service.ProbeHealth`.                                 |
 | `Handler.countMappedChannelsPerServer` (`command.go:387`)                      | **Delete.** No surface reports a mapped-channel count any more — see §3.5. |
 | `Handler.resolveServerIDArg` (`command.go:318`)                                | **Move** → `Service.ResolveIdentifier`.                           |
@@ -84,7 +83,6 @@ caller of the same reads:
 | Registration YAML in `executeServerRegistrationCommand` (`command.go:1133`)    | **Move** → `Service.RegistrationYAML`; must never be duplicated.  |
 | `BridgeUtils.serverConfig` (`bridge_utils.go:151-166`)                         | **Delete the inline copy**; delegate to the service (§3.2).       |
 | `DefaultMatrixUsernamePrefix` (`configuration.go:13`)                          | **Move** → `servers.DefaultUsernamePrefix`; 3 use sites.          |
-| `p.materializeServerFromLegacyConfig`, `legacyServerConfig` (`servers.go:324-409`) | **Stay in `main`** — they read the _platform's_ plugin config (§3.2). |
 | `p.cachedServerConfigs` (`plugin.go:301`), `p.getMatrixClient`, `p.remoteIDForServer`, `p.initMatrixClients`, `p.refreshServersAndBroadcast`, `p.registerForSharedChannels` | **Stay in `main`** — per-node caches and platform calls; reached through `Host` (§3.2). |
 | `p.MapChannelToServer`, `p.UnmapChannelFromServer` (`channel_mapping.go`)      | **Stay in `main`** — they need `BridgeUtils` and the remote. Reuse as-is. |
 
@@ -150,7 +148,6 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error)
 func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []string, error) // §3.3
 func (s *Service) Remove(serverID string) (bool, error)
 func (s *Service) SetEnabled(serverID string, enabled bool) error
-func (s *Service) Seed(entry kvstore.ServerConfig) (string, error) // migration only; see below
 
 // Derived views
 func (s *Service) ProbeHealth(servers []kvstore.ServerConfig) map[string]string
@@ -204,18 +201,9 @@ func (h pluginHost) UnregisterRemote(remoteID string) error {
 
 **Construction order matters.** `p.servers = servers.New(p.kvstore, p.logger, pluginHost{p})`
 goes in `OnActivate` immediately after `p.kvstore = kvstore.NewKVStore(p.client)` and **before**
-`p.runKVStoreMigrations()` — the migrations read and seed the registry (backend §3.8). And
-because `OnConfigurationChange` can fire before `OnActivate`, every existing `p.kvstore == nil`
+`p.runKVStoreMigrations()`. And because `OnConfigurationChange` can fire before `OnActivate`, every existing `p.kvstore == nil`
 guard must also cover `p.servers == nil`; `initMatrixClients` in particular now reads
 `p.servers.List()` and would panic on a nil service.
-
-**The migration keeps its own seeding path.** `materializeServerFromLegacyConfig` stays in
-`main` because it calls `p.API.LoadPluginConfiguration` — a platform dependency this package
-must not acquire. It composes the entry itself (preserving the deliberate `SiteURL: ""` and
-master-derived `EventDomain` from backend §3.8) and stores it with `Service.Seed`, which is an
-idempotent insert-if-endpoint-absent and deliberately **not** `Add`: no name resolution, no
-`SiteURL` derivation, no remote registration. It calls `Service.ResolveServerName` directly for
-the name, which is what keeps backend §3.8's "same function as add" property true.
 
 **`BridgeUtils` stops duplicating the read.** `serverConfig()` is a hand-rolled copy of
 `Get` down to the error string. Give `BridgeUtils` a one-method getter — the same pattern it
@@ -271,7 +259,7 @@ returns data, the command renders it, the API marshals it. Regenerate `server/co
 
 `GetMatrixClientForServer`, `GetRemoteIDForServer`, `CreateOrGetGhostUserForServer`,
 `GetMatrixUserIDFromMattermostUserForServer`, `MapChannelToServer`, `UnmapChannelFromServer`,
-`GetKVStore`, `GetPluginAPI`, `GetPluginAPIClient`, `GetPluginID` and the migration methods all
+`GetKVStore`, `GetPluginAPI`, `GetPluginAPIClient` and `GetPluginID` all
 stay on `PluginAccessor` — they are genuinely plugin-runtime concerns, not registry ones.
 
 **This step must change no behaviour.** Every existing test in `server/command` passes
@@ -326,8 +314,6 @@ Implementation notes:
   broadcast; skipping it leaves a rotated token working on one node and failing on the rest.
 - Do **not** re-register or unregister the shared-channels remote. `SiteURL` is unchanged, so
   there is nothing to re-key, and re-registration buys nothing while risking cursors.
-- A migrated entry (`SiteURL == ""`) **is** editable — that is the whole point, since it cannot
-  be removed and re-added. Only `Remove` refuses it.
 
 ### 3.4 Typed errors, so the API can answer with the right status
 
@@ -342,7 +328,6 @@ var (
     ErrEndpointTaken     = errors.New("a server is already registered at this endpoint")
     ErrNameTaken         = errors.New("server name conflicts with an existing server")
     ErrIDTaken           = errors.New("server ID is already registered")
-    ErrMigratedImmutable = errors.New("server was migrated from the legacy configuration and cannot be removed")
     ErrInvalidInput      = errors.New("invalid server input")
 )
 ```
@@ -362,7 +347,6 @@ on the wrap.
 | ------------------------------------------------------ | ------ | -------------------------------------------- |
 | `servers.ErrNotRegistered`                             | 404    |                                              |
 | `servers.ErrEndpointTaken` / `ErrNameTaken` / `ErrIDTaken` | 409    | Message already names the conflicting server. |
-| `servers.ErrMigratedImmutable`                          | 409    | UI offers Disable instead.                   |
 | `servers.ErrInvalidInput`, malformed JSON, bad URL      | 400    |                                              |
 | `kvstore.ErrChannelAlreadyMapped`                      | 409    | Only reachable from a future map endpoint.   |
 | No Matrix client for the server on this node           | 503    | Same meaning as the inbound 503 (backend §3.5). |
@@ -417,14 +401,12 @@ recovery command), so the UI renders them verbatim rather than substituting its 
     "username_prefix": "matrix",
     "enabled": true,
     "remote_id": "xyz…",
-    "is_migrated": false,
     "has_as_token": true,
     "has_hs_token": true
 }
 ```
 
-- `is_migrated` is `SiteURL == ""`. The console uses it to disable Remove and explain why
-  (backend §3.1.1). Do not serialize `SiteURL` itself.
+- Do not serialize `SiteURL` itself.
 - **No mapped-channel count.** Producing one means paging the whole channel-mapping keyspace
   plus a `Get` per mapping, on every list render — the same cost that got it removed from
   `/matrix status`, `/matrix server list` and `/matrix server status`. The count is available
@@ -620,8 +602,7 @@ falls back to the status text — never to a silent success.
 4. **Remove** — shows the `server_id` as the recovery key and the exact restore command
    (`/matrix server add <url> <as_token> <hs_token> --server-id <id>`), because `Service.Remove`
    keeps every KV record (backend §3.1.1) and an admin who loses the ID loses the cheap path
-   back. For `is_migrated` entries the action is disabled with the reason, and the dialog offers
-   Disable instead.
+   back.
 5. **Enable/disable** — applies immediately; optimistic with rollback on failure. The tooltip
    states that disabling stops sync without touching mappings, ghosts or the remote
    (backend §3.11), since that is what makes it the safe alternative to Remove.
@@ -715,19 +696,15 @@ following conventional commits.
   an endpoint colliding with another entry is rejected while re-submitting the entry's _own_
   endpoint succeeds; empty `ASToken`/`HSToken` rejected; empty `UsernamePrefix` resets to the
   default; a `ServerName` colliding with another entry is rejected and a successful change
-  returns a warning; a migrated entry (`SiteURL == ""`) is editable; concurrent edits produce one
-  winner.
+  returns a warning; concurrent edits produce one winner.
 - **Typed errors** — `errors.Is` matches each sentinel after the value has travelled out of the
   CAS callback through `SetAtomicWithRetries`; the message text still contains what the commands
   print today.
-- **`Seed` is not `Add`** — seeding preserves a `SiteURL: ""` and a caller-supplied
-  `EventDomain` verbatim, performs no name resolution and registers no remote; it is idempotent
-  by endpoint. The existing migration tests cover the rest and must pass unmodified.
 - **`SystemAdminRequired`** — a non-admin gets 403 with **no server data in the body** on every
   route including autocomplete; an unauthenticated request gets 401; an admin passes.
 - **`GET /servers`** — zero servers yields `{"servers": []}` with 200, not an error; tokens are
   absent from the body (assert on the raw JSON, not the struct); `has_as_token`/`has_hs_token`
-  reflect the stored values; `is_migrated` is true exactly for `SiteURL == ""`; the list renders
+  reflect the stored values; the list renders
   with **every** keyspace scan failing, which is what pins it to one registry read and no
   per-server scan.
 - **`POST /servers`** — happy path returns 201 and the created view; duplicate endpoint, name
@@ -735,8 +712,8 @@ following conventional commits.
   URL and a malformed body return 400; a `server_id` re-adoption is passed through verbatim.
 - **`PATCH`** — partial updates apply; unknown `server_id` is 404; conflicts are 409; warnings
   are present in the body.
-- **`DELETE`** — success returns the `server_id` and a recovery command containing it; a
-  migrated entry is 409; an unknown ID is 404.
+- **`DELETE`** — success returns the `server_id` and a recovery command containing it; an
+  unknown ID is 404.
 - **`PUT …/enabled`** — flips the flag both ways, 404 for unknown, and asserts
   `RegisterPluginForSharedChannels` / `InviteRemoteToChannel` are **not** called (backend §3.11).
 - **`GET /servers/health`** — reports `disabled` for a disabled server without probing it,
@@ -765,9 +742,8 @@ tests in enzyme.
 - **Client module** — builds URLs from `Client4.getPluginRoute(manifest.id)`; sends
   `Client4.getOptions`-derived headers; throws an `Error` carrying `message` from a non-2xx JSON
   body, and falls back to status text for a non-JSON body.
-- **Table** — renders name/URL/state/health and the "Channels shared" expander; Remove disabled
-  with an explanation for `is_migrated`; the enable toggle rolls back its optimistic state when
-  the request fails.
+- **Table** — renders name/URL/state/health and the "Channels shared" expander; the enable
+  toggle rolls back its optimistic state when the request fails.
 - **Add form** — omits empty optional fields from the request; surfaces a 409 message verbatim.
 - **Edit form** — blank token inputs are **omitted** from the PATCH body (the regression that
   would otherwise clear a token); the `server_name` change is blocked until the confirm is

@@ -123,22 +123,13 @@ const MatrixServersSection: React.FC<Props> = (_props) => {
                     onUpdated={refresh}
                 />
             )}
-            {modal.type === 'remove' && (() => {
-                const removingServer = modal.server;
-                return (
-                    <RemoveServerDialog
-                        server={removingServer}
-                        onClose={closeModal}
-                        onRemoved={refresh}
-                        onDisableInstead={() => {
-                            closeModal();
-                            handleToggleEnabled(removingServer, false).catch(() => {
-                                // handleToggleEnabled already surfaced the error via actionError.
-                            });
-                        }}
-                    />
-                );
-            })()}
+            {modal.type === 'remove' && (
+                <RemoveServerDialog
+                    server={modal.server}
+                    onClose={closeModal}
+                    onRemoved={refresh}
+                />
+            )}
             {modal.type === 'test' && (
                 <TestResultsModal
                     server={modal.server}
