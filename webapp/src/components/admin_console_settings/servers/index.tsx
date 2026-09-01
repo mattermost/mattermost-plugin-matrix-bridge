@@ -53,6 +53,11 @@ const MatrixServersSection: React.FC<Props> = (_props) => {
             await client.setServerEnabled(server.server_id, enabled);
             setActionError(null);
             await refresh();
+
+            // The stored health of a disabled server is "disabled", and pillFor
+            // reads that ahead of `enabled` - so without a re-probe the row still
+            // says Disabled after a successful enable.
+            await refreshHealth();
         } catch (e) {
             setActionError(e instanceof Error ? e.message : String(e));
             throw e;
