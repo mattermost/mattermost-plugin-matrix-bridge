@@ -20,8 +20,10 @@ Docker Compose.
    Matrix homeservers** (both System Admin only - the steps below use the slash
    commands, since that's the fastest path from a terminal, but "Add Matrix server" in
    the console registers the same entry and can open the registration YAML for you
-   immediately afterward). Mapping a channel to a room has no console equivalent - that
-   is always `/matrix map`.
+   immediately afterward). Mapping a channel to a room has no console equivalent: it is
+   `/matrix map` while exactly one server is registered, and
+   `/matrix server map <server_id> <room_alias|room_id>` once a second one is (see
+   "Connecting a channel to a room on the second server" below).
 2. Register the homeserver with the plugin, choosing your own Application Service and
    homeserver tokens (any strings; keep them secret):
 

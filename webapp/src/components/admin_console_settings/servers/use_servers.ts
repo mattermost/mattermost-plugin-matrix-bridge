@@ -34,6 +34,12 @@ export default function useServers(): UseServersResult {
     // response from the LATEST call is allowed to land in state.
     const refreshRequestID = useRef(0);
 
+    // The same guard for health, tracked separately because the two are fetched
+    // independently. A probe round fans out over the network and the server bounds
+    // it at 8s, so overlapping rounds are considerably more likely here than for
+    // the list - and every mutation now triggers one.
+    const healthRequestID = useRef(0);
+
     const refresh = useCallback(async () => {
         const requestID = ++refreshRequestID.current;
         setLoading(true);
@@ -57,8 +63,12 @@ export default function useServers(): UseServersResult {
     }, []);
 
     const refreshHealth = useCallback(async () => {
+        const requestID = ++healthRequestID.current;
         try {
             const resp = await client.getServersHealth();
+            if (requestID !== healthRequestID.current) {
+                return;
+            }
             setHealth(resp.health);
         } catch (e) {
             // Health is supplementary - a failed probe round leaves the table's

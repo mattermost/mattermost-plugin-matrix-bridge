@@ -67,4 +67,35 @@ describe('MatrixServersSection', () => {
         // Settle the row's remaining post-mutation state before teardown.
         await act(async () => {});
     });
+
+    // Health probes fan out over the network and the server bounds a round at 8s, so
+    // two rounds overlap easily - every mutation starts one. Without a request-ID
+    // guard the slower, older round lands last and overwrites the newer readings.
+    it('ignores a health round that resolves after a newer one', async () => {
+        mockedClient.listServers.mockResolvedValue({servers: [buildServer()]});
+        mockedClient.setServerEnabled.mockResolvedValue({server: buildServer()});
+
+        const resolvers: Array<(v: {health: Record<string, string>}) => void> = [];
+        mockedClient.getServersHealth.mockImplementation(() => new Promise((resolve) => {
+            resolvers.push(resolve);
+        }));
+
+        render(<MatrixServersSection/>);
+        await waitFor(() => expect(resolvers).toHaveLength(1));
+
+        // A second round starts before the first has resolved.
+        fireEvent.click(screen.getByRole('button', {name: 'Refresh'}));
+        await waitFor(() => expect(resolvers).toHaveLength(2));
+
+        // The NEWER round resolves first, then the older one - out of order.
+        await act(async () => {
+            resolvers[1]({health: {server1: 'healthy'}});
+        });
+        await act(async () => {
+            resolvers[0]({health: {server1: 'unhealthy'}});
+        });
+
+        expect(await screen.findByText('Active')).toBeInTheDocument();
+        expect(screen.queryByText('Unhealthy')).not.toBeInTheDocument();
+    });
 });
