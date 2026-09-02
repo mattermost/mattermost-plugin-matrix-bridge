@@ -138,9 +138,9 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                     if (e.key === 'Enter' && e.target instanceof HTMLInputElement) {
                         e.preventDefault();
 
-                        // The footer buttons are disabled while submitting, but this
-                        // handler is not a button - without the guard, held Enter fires
-                        // a second write request against the same server.
+                        // Enter is a submit path of its own, so it needs the guard the footer
+                        // buttons get from `disabled`: held down, it would otherwise send a
+                        // second write request against the same server.
                         if (!submitting) {
                             handleSubmit();
                         }

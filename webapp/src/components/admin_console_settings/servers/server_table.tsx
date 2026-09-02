@@ -33,10 +33,10 @@ const ServerTable: React.FC<Props> = ({
     onTest,
     onRegistration,
 }) => {
-    // Only stand in for the table when there is nothing to stand in for. Every
-    // mutation refreshes the list, and replacing rows that are already on screen
-    // with this message flickers the whole table and unmounts each row - including
-    // the one whose own toggle is still awaiting the refresh it triggered.
+    // Stands in for the table only when there is nothing to stand in for. Rows
+    // already on screen stay mounted through a refresh - every mutation triggers
+    // one, and swapping them for this message would flicker the table and unmount
+    // the row whose own toggle is still awaiting that refresh.
     if (loading && servers.length === 0) {
         return (
             <p

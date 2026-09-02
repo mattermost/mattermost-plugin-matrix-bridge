@@ -13,9 +13,9 @@ import type {CSSProperties} from 'react';
 // The "-75"/"-64"/"-16"/"-12"/"-8" opacity variants the design uses are not
 // defined as custom properties, so they are composed from
 // --center-channel-color-rgb, which Mattermost exposes as a bare "r, g, b"
-// triplet for exactly this purpose. The fallback is Denim's #3f4350, used only
-// when the property is absent - a hardcoded rgba() here would instead keep
-// light-theme text and borders on a dark-theme background.
+// triplet for exactly this purpose. The fallback is Denim's #3f4350, and applies
+// only when the property is absent; composing from the property is what keeps
+// text and borders legible on a dark theme.
 export const colors = {
     textMuted: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.75)',
     textFaint: 'rgba(var(--center-channel-color-rgb, 63, 67, 80), 0.64)',
