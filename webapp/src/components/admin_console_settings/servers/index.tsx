@@ -36,28 +36,37 @@ type ModalState =
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const MatrixServersSection: React.FC<Props> = (_props) => {
-    const {servers, health, loading, error, refresh, refreshHealth} = useServers();
+    const {servers, health, loading, error, refreshAll} = useServers();
     const [modal, setModal] = useState<ModalState>({type: 'none'});
     const [expandedServerId, setExpandedServerId] = useState<string | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
 
+    // Tracked here rather than reusing the hook's `loading`, which covers the list
+    // fetch only: a refresh is not done until its health probe is, and that is the
+    // slow half (the server bounds a round at 8s). Without this the button frees up
+    // while the probe is still running and a second click starts a redundant round.
+    const [refreshing, setRefreshing] = useState(false);
+
     const closeModal = () => setModal({type: 'none'});
 
-    const handleRefresh = () => {
-        refresh();
-        refreshHealth();
+    const handleRefresh = async () => {
+        setRefreshing(true);
+        try {
+            await refreshAll();
+        } finally {
+            setRefreshing(false);
+        }
     };
 
     const handleToggleEnabled = async (server: ServerView, enabled: boolean) => {
         try {
             await client.setServerEnabled(server.server_id, enabled);
             setActionError(null);
-            await refresh();
 
-            // The stored health of a disabled server is "disabled", and pillFor
-            // reads that ahead of `enabled` - so without a re-probe the row still
-            // says Disabled after a successful enable.
-            await refreshHealth();
+            // Health is re-probed alongside the list because pillFor reads a
+            // "disabled" health reading ahead of the `enabled` flag: the flag alone
+            // changing leaves the row still showing Disabled.
+            await refreshAll();
         } catch (e) {
             setActionError(e instanceof Error ? e.message : String(e));
             throw e;
@@ -84,10 +93,11 @@ const MatrixServersSection: React.FC<Props> = (_props) => {
                             type='button'
                             className='btn btn-tertiary'
                             title='Refresh the list and health status'
+                            disabled={refreshing}
                             onClick={handleRefresh}
                         >
                             <i className='icon icon-refresh'/>
-                            {'Refresh'}
+                            {refreshing ? 'Refreshing…' : 'Refresh'}
                         </button>
                         <button
                             type='button'
@@ -117,7 +127,7 @@ const MatrixServersSection: React.FC<Props> = (_props) => {
             {modal.type === 'add' && (
                 <AddServerModal
                     onClose={closeModal}
-                    onAdded={refresh}
+                    onAdded={refreshAll}
                     onViewRegistration={(server) => setModal({type: 'registration', server})}
                 />
             )}
@@ -125,14 +135,14 @@ const MatrixServersSection: React.FC<Props> = (_props) => {
                 <EditServerModal
                     server={modal.server}
                     onClose={closeModal}
-                    onUpdated={refresh}
+                    onUpdated={refreshAll}
                 />
             )}
             {modal.type === 'remove' && (
                 <RemoveServerDialog
                     server={modal.server}
                     onClose={closeModal}
-                    onRemoved={refresh}
+                    onRemoved={refreshAll}
                 />
             )}
             {modal.type === 'test' && (

@@ -98,4 +98,57 @@ describe('MatrixServersSection', () => {
         expect(await screen.findByText('Active')).toBeInTheDocument();
         expect(screen.queryByText('Unhealthy')).not.toBeInTheDocument();
     });
+
+    // Only enable/disable re-probed health before; add, edit and remove refreshed
+    // the list alone, leaving a new server with no reading at all - which pillFor
+    // renders as a green "Active" pill.
+    it('re-probes health after an add, not just after a toggle', async () => {
+        mockedClient.listServers.mockResolvedValue({servers: [buildServer()]});
+        mockedClient.getServersHealth.mockResolvedValue({health: {server1: 'healthy'}});
+        mockedClient.addServer.mockResolvedValue({
+            server: buildServer({server_id: 'server2'}),
+            warnings: [],
+        });
+
+        render(<MatrixServersSection/>);
+        await waitFor(() => expect(mockedClient.getServersHealth).toHaveBeenCalledTimes(1));
+
+        fireEvent.click(screen.getByRole('button', {name: /Add a connection/}));
+        fireEvent.change(screen.getByLabelText('Homeserver URL'), {target: {value: 'https://b.example.com'}});
+        fireEvent.change(screen.getByLabelText('Application Service token'), {target: {value: 'as1'}});
+        fireEvent.change(screen.getByLabelText('Homeserver token'), {target: {value: 'hs1'}});
+        fireEvent.click(screen.getByRole('button', {name: 'Add server'}));
+
+        await waitFor(() => expect(mockedClient.getServersHealth).toHaveBeenCalledTimes(2));
+    });
+
+    // The table keeps its rows during a refresh now, so the button is the only
+    // thing that can show a round is running.
+    it('disables Refresh until the health probe finishes, not just the list fetch', async () => {
+        mockedClient.listServers.mockResolvedValue({servers: [buildServer()]});
+
+        let resolveHealth: (v: {health: Record<string, string>}) => void = () => {};
+        mockedClient.getServersHealth.mockResolvedValueOnce({health: {server1: 'healthy'}});
+
+        render(<MatrixServersSection/>);
+        const button = await screen.findByRole('button', {name: /Refresh/});
+        await waitFor(() => expect(button).not.toBeDisabled());
+
+        // The next round's probe is held open.
+        mockedClient.getServersHealth.mockImplementationOnce(() => new Promise((resolve) => {
+            resolveHealth = resolve;
+        }));
+
+        fireEvent.click(button);
+
+        // The list has resolved by now; the probe has not.
+        await waitFor(() => expect(mockedClient.listServers).toHaveBeenCalledTimes(2));
+        expect(screen.getByRole('button', {name: /Refreshing/})).toBeDisabled();
+
+        await act(async () => {
+            resolveHealth({health: {server1: 'healthy'}});
+        });
+
+        await waitFor(() => expect(screen.getByRole('button', {name: /Refresh$/})).not.toBeDisabled());
+    });
 });

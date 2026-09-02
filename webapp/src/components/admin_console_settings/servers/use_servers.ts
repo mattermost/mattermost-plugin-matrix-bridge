@@ -16,9 +16,12 @@ export interface UseServersResult {
     loading: boolean;
     error: string | null;
 
-    // refresh re-fetches the list (a fresh KV read server-side) - call after any
-    // mutation. refreshHealth re-probes health separately, since probing costs up
-    // to several seconds; neither is polled automatically (§3.8: "No auto-polling").
+    // refreshAll is what a mutation wants: the list and the health readings are
+    // both stale afterwards, and a row's pill is derived from the two together.
+    // refresh and refreshHealth are exposed for the mount sequence, which fetches
+    // the list first so rows appear without waiting on a probe round. Nothing is
+    // polled automatically (§3.8: "No auto-polling").
+    refreshAll: () => Promise<void>;
     refresh: () => Promise<void>;
     refreshHealth: () => Promise<void>;
 }
@@ -36,8 +39,8 @@ export default function useServers(): UseServersResult {
 
     // The same guard for health, tracked separately because the two are fetched
     // independently. A probe round fans out over the network and the server bounds
-    // it at 8s, so overlapping rounds are considerably more likely here than for
-    // the list - and every mutation now triggers one.
+    // it at 8s, so rounds overlap far more readily than list fetches do - every
+    // mutation starts one, as does the Refresh button.
     const healthRequestID = useRef(0);
 
     const refresh = useCallback(async () => {
@@ -77,6 +80,14 @@ export default function useServers(): UseServersResult {
         }
     }, []);
 
+    // Concurrent, not sequential: the two reads are independent, and a row reads
+    // health by server_id rather than by position in the list, so neither result
+    // depends on the other having landed. Awaiting them in series would add a
+    // probe round (up to 8s) to the time a mutation's controls stay disabled.
+    const refreshAll = useCallback(async () => {
+        await Promise.all([refresh(), refreshHealth()]);
+    }, [refresh, refreshHealth]);
+
     useEffect(() => {
         let mounted = true;
         (async () => {
@@ -95,5 +106,5 @@ export default function useServers(): UseServersResult {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    return {servers, health, loading, error, refresh, refreshHealth};
+    return {servers, health, loading, error, refreshAll, refresh, refreshHealth};
 }
