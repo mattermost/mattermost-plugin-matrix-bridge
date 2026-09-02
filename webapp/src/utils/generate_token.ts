@@ -8,10 +8,10 @@
 // tokens into the server-management API) - an admin who is used to that
 // Regenerate button sees the same token format here.
 //
-// The randomness comes from crypto.getRandomValues, not Math.random: these
-// values are used verbatim as the as_token/hs_token bearer credentials that
-// authenticate the homeserver against this bridge, so they must not come from a
-// predictable generator.
+// The randomness comes from crypto.getRandomValues, not Math.random: these are
+// the bearer credentials on both legs of the bridge - hs_token authenticates the
+// homeserver's inbound transactions to us, as_token authenticates our outbound
+// calls to it - so neither may come from a predictable generator.
 export function generateToken(): string {
     const bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);

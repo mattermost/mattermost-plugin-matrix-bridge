@@ -16,14 +16,12 @@ export interface UseServersResult {
     loading: boolean;
     error: string | null;
 
-    // refreshAll is what a mutation wants: the list and the health readings are
-    // both stale afterwards, and a row's pill is derived from the two together.
-    // refresh and refreshHealth are exposed for the mount sequence, which fetches
-    // the list first so rows appear without waiting on a probe round. Nothing is
+    // The single refresh a caller needs: after any mutation both the list and the
+    // health readings are stale, and a row's pill is derived from the two
+    // together, so refreshing one without the other leaves the pill disagreeing
+    // with the registry. The halves stay private for that reason. Nothing is
     // polled automatically (§3.8: "No auto-polling").
     refreshAll: () => Promise<void>;
-    refresh: () => Promise<void>;
-    refreshHealth: () => Promise<void>;
 }
 
 export default function useServers(): UseServersResult {
@@ -106,5 +104,5 @@ export default function useServers(): UseServersResult {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    return {servers, health, loading, error, refreshAll, refresh, refreshHealth};
+    return {servers, health, loading, error, refreshAll};
 }
