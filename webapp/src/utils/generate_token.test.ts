@@ -4,6 +4,13 @@
 import {generateToken} from './generate_token';
 
 describe('generateToken', () => {
+    // jest's clearMocks only calls mockClear, which leaves a spy's replacement
+    // implementation in place, and restoreMocks is not set - so a spy that outlives
+    // a failing assertion would leak into every test after it.
+    afterEach(() => {
+        jest.restoreAllMocks();
+    });
+
     it('produces an RFC-4122 v4 UUID', () => {
         const token = generateToken();
         expect(token).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
@@ -25,8 +32,5 @@ describe('generateToken', () => {
 
         expect(getRandomValues).toHaveBeenCalled();
         expect(random).not.toHaveBeenCalled();
-
-        getRandomValues.mockRestore();
-        random.mockRestore();
     });
 });
