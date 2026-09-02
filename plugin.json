@@ -19,35 +19,49 @@
         "bundle_path": "webapp/dist/main.js"
     },
     "settings_schema": {
-        "header": "Matrix homeservers are managed with the /matrix server slash command (add, remove, map, unmap, enable, disable) rather than here. Run /matrix server for details.",
+        "header": "Matrix homeservers are managed in the section below, or with the /matrix server slash command.",
         "footer": "For more information, see the [Matrix specification](https://spec.matrix.org/v1.14/)",
-        "settings": [
+        "sections": [
             {
-                "key": "rate_limiting_mode",
-                "display_name": "Matrix Rate Limiting",
-                "type": "dropdown",
-                "help_text": "Controls how aggressively the bridge sends requests to your Matrix server to prevent rate limiting.",
-                "default": "automatic",
-                "options": [
+                "key": "matrix_servers",
+                "title": "Matrix homeservers",
+                "subtitle": "Add, test and manage the homeservers this bridge connects to. Changes in this section apply immediately and do not require Save.",
+                "custom": true,
+                "fallback": false,
+                "settings": []
+            },
+            {
+                "key": "advanced",
+                "title": "Advanced",
+                "settings": [
                     {
-                        "display_name": "Disabled - No rate limiting (maximum performance, risk of 429 errors)",
-                        "value": "disabled"
-                    },
-                    {
-                        "display_name": "Relaxed - Light throttling (fast, suitable for dedicated Matrix servers)",
-                        "value": "relaxed"
-                    },
-                    {
-                        "display_name": "Automatic - Balanced throttling (good performance with safety) [Recommended]",
-                        "value": "automatic"
-                    },
-                    {
-                        "display_name": "Conservative - Heavy throttling (safest, matches Synapse defaults exactly)",
-                        "value": "conservative"
-                    },
-                    {
-                        "display_name": "Restricted - Maximum throttling (slowest, for shared/limited Matrix servers)",
-                        "value": "restricted"
+                        "key": "rate_limiting_mode",
+                        "display_name": "Matrix Rate Limiting",
+                        "type": "dropdown",
+                        "help_text": "Controls how aggressively the bridge sends requests to your Matrix server to prevent rate limiting.",
+                        "default": "automatic",
+                        "options": [
+                            {
+                                "display_name": "Disabled - No rate limiting (maximum performance, risk of 429 errors)",
+                                "value": "disabled"
+                            },
+                            {
+                                "display_name": "Relaxed - Light throttling (fast, suitable for dedicated Matrix servers)",
+                                "value": "relaxed"
+                            },
+                            {
+                                "display_name": "Automatic - Balanced throttling (good performance with safety) [Recommended]",
+                                "value": "automatic"
+                            },
+                            {
+                                "display_name": "Conservative - Heavy throttling (safest, matches Synapse defaults exactly)",
+                                "value": "conservative"
+                            },
+                            {
+                                "display_name": "Restricted - Maximum throttling (slowest, for shared/limited Matrix servers)",
+                                "value": "restricted"
+                            }
+                        ]
                     }
                 ]
             }

@@ -12,15 +12,24 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
 // newTestPluginForAPI returns a Plugin with an in-memory KV store, ready for
-// api.go/MatrixAuthorizationRequired tests.
+// api.go/MatrixAuthorizationRequired and the System Console REST API's tests.
+// Every registry mutation ends in Host.RefreshAndBroadcast, which rebuilds real
+// matrix.Client instances (logging their rate-limit configuration) and broadcasts a
+// cluster event - mockAnyLogCalls and PublishPluginClusterEvent cover that plumbing
+// so individual tests don't have to.
 func newTestPluginForAPI(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+	api := plugin.API.(*plugintest.API)
+	mockAnyLogCalls(api)
+	api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
 	return plugin
 }
 
@@ -144,6 +153,7 @@ func TestMatrixAuthorizationRequired(t *testing.T) {
 	t.Run("registry read failure returns 500", func(t *testing.T) {
 		plugin := newTestPluginForAPI(t)
 		plugin.kvstore = &erroringKVStore{KVStore: NewMemoryKVStore(), errOnGetKey: kvstore.KeyServersConfig}
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 		var ran bool
 		var gotServerID string
@@ -173,7 +183,7 @@ func TestMatrixAuthorizationRequiredCacheRefresh(t *testing.T) {
 
 	t.Run("disabling a server stops its token from authorizing further requests", func(t *testing.T) {
 		plugin := newTestPluginForAddServer(t)
-		serverID, err := plugin.AddServer("https://a.example.com", "as1", "hs-a", "", "", "a.example.com")
+		serverID, err := addTestServer(plugin, "https://a.example.com", "as1", "hs-a", "", "", "a.example.com")
 		require.NoError(t, err)
 
 		handler := plugin.MatrixAuthorizationRequired(finalHandler(new(bool), new(string)))
@@ -182,7 +192,7 @@ func TestMatrixAuthorizationRequiredCacheRefresh(t *testing.T) {
 		handler.ServeHTTP(w, newAuthRequest("hs-a"))
 		require.Equal(t, http.StatusOK, w.Result().StatusCode, "token must work while the server is enabled")
 
-		require.NoError(t, plugin.SetServerEnabled(serverID, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverID, false))
 
 		w = httptest.NewRecorder()
 		handler.ServeHTTP(w, newAuthRequest("hs-a"))
@@ -191,9 +201,9 @@ func TestMatrixAuthorizationRequiredCacheRefresh(t *testing.T) {
 
 	t.Run("removing a server stops its token from authorizing further requests", func(t *testing.T) {
 		plugin := newTestPluginForAddServer(t)
-		_, err := plugin.AddServer("https://a.example.com", "as1", "hs-a", "", "", "a.example.com")
+		_, err := addTestServer(plugin, "https://a.example.com", "as1", "hs-a", "", "", "a.example.com")
 		require.NoError(t, err)
-		serverID2, err := plugin.AddServer("https://b.example.com", "as2", "hs-b", "", "", "b.example.com")
+		serverID2, err := addTestServer(plugin, "https://b.example.com", "as2", "hs-b", "", "", "b.example.com")
 		require.NoError(t, err)
 
 		handler := plugin.MatrixAuthorizationRequired(finalHandler(new(bool), new(string)))
@@ -202,7 +212,7 @@ func TestMatrixAuthorizationRequiredCacheRefresh(t *testing.T) {
 		handler.ServeHTTP(w, newAuthRequest("hs-b"))
 		require.Equal(t, http.StatusOK, w.Result().StatusCode)
 
-		removed, err := plugin.RemoveServer(serverID2)
+		removed, err := plugin.servers.Remove(serverID2)
 		require.NoError(t, err)
 		require.True(t, removed)
 
@@ -223,27 +233,32 @@ func TestMatrixAuthorizationRequiredCacheRefresh(t *testing.T) {
 func TestHandleServerAutocomplete(t *testing.T) {
 	userID := "userid1userid1userid1userid"
 
-	newPlugin := func(t *testing.T, admin bool, servers []kvstore.ServerConfig) *Plugin {
+	newPlugin := func(t *testing.T, admin bool, serverList []kvstore.ServerConfig) *Plugin {
 		t.Helper()
 		api := &plugintest.API{}
 		api.On("LogError", mock.Anything, mock.Anything, mock.Anything).Maybe()
 		api.On("HasPermissionTo", userID, model.PermissionManageSystem).Return(admin)
 		plugin := setupPluginForTestWithLogger(t, api)
 		plugin.kvstore = NewMemoryKVStore()
-		plugin.serverConfigs = make(map[string]kvstore.ServerConfig, len(servers))
-		for _, s := range servers {
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
+		plugin.serverConfigs = make(map[string]kvstore.ServerConfig, len(serverList))
+		for _, s := range serverList {
 			plugin.serverConfigs[s.ServerID] = s
 		}
 		return plugin
 	}
 
+	// serve routes through SystemAdminRequired, exactly as ServeHTTP wires this
+	// handler in production - the permission gate now lives there, not inline in
+	// handleServerAutocomplete.
 	serve := func(plugin *Plugin, userID string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/autocomplete/servers", nil)
 		if userID != "" {
 			req.Header.Set("Mattermost-User-ID", userID)
 		}
 		rec := httptest.NewRecorder()
-		plugin.handleServerAutocomplete(rec, req)
+		handler := plugin.SystemAdminRequired(http.HandlerFunc(plugin.handleServerAutocomplete))
+		handler.ServeHTTP(rec, req)
 		return rec
 	}
 

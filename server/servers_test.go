@@ -1,11 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"net/url"
 	"sync"
 	"testing"
 
@@ -15,62 +11,26 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
-func TestNormalizeServerEndpoint(t *testing.T) {
-	tests := []struct {
-		name    string
-		url     string
-		want    string
-		wantErr bool
-	}{
-		{name: "https default port", url: "https://example.com", want: "example.com:443"},
-		{name: "http default port", url: "http://example.com", want: "example.com:80"},
-		{name: "explicit port", url: "https://example.com:8448", want: "example.com:8448"},
-		{name: "uppercase host is lowercased", url: "https://Example.COM", want: "example.com:443"},
-		{name: "trailing slash ignored", url: "https://example.com/", want: "example.com:443"},
-		{name: "missing scheme errors", url: "example.com", wantErr: true},
-		{name: "empty URL errors", url: "", wantErr: true},
-		{name: "missing host errors", url: "https://", wantErr: true},
-		{name: "unsupported scheme errors", url: "ftp://example.com", wantErr: true},
-		{name: "unsupported scheme with explicit port still errors", url: "ftp://example.com:8448", wantErr: true},
-	}
+// This file covers what stays in main after the server/servers move: the legacy
+// migration seeding path (materializeServerFromLegacyConfig, which must keep its
+// platform LoadPluginConfiguration dependency out of the leaf package), the
+// shared-channels remote-registration helpers, and the per-node Matrix client cache
+// (initMatrixClients and friends). Registry reads/mutations/errors themselves are
+// covered by server/servers/service_test.go against a fake Host.
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := normalizeServerEndpoint(tt.url)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-func TestNormalizeServerEndpointDistinguishesPorts(t *testing.T) {
-	endpoint8008, err := normalizeServerEndpoint("http://localhost:8008")
-	require.NoError(t, err)
-	endpoint8009, err := normalizeServerEndpoint("http://localhost:8009")
-	require.NoError(t, err)
-	assert.NotEqual(t, endpoint8008, endpoint8009, "distinct ports must produce distinct endpoints")
-}
-
-func TestEventDomainFromEndpoint(t *testing.T) {
-	assert.Equal(t, "localhost_8008", eventDomainFromEndpoint("localhost:8008"))
-	assert.NotEqual(t, eventDomainFromEndpoint("localhost:8008"), eventDomainFromEndpoint("localhost:8009"),
-		"EventDomain must stay distinct for endpoints that only differ by port")
-}
-
-// newTestPluginForServers returns a Plugin with an in-memory KV store, ready for
-// servers.go tests. The unreachable-server-name-probe URLs used throughout intentionally
-// point at a closed local port so the HTTP client fails fast instead of timing out.
+// newTestPluginForServers returns a Plugin with an in-memory KV store and a wired
+// servers.Service, ready for tests in this file. The unreachable-server-name-probe
+// URLs used throughout intentionally point at a closed local port so the HTTP
+// client fails fast instead of timing out.
 func newTestPluginForServers(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	plugin.configuration = &configuration{}
 	mockAnyLogCalls(plugin.API.(*plugintest.API))
 	return plugin
@@ -78,86 +38,9 @@ func newTestPluginForServers(t *testing.T) *Plugin {
 
 const unreachableURL = "http://127.0.0.1:1"
 
-func TestResolveServerName(t *testing.T) {
-	t.Run("configuredName short-circuits without any HTTP call", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		// NormalizeServerName strips scheme/port/trailing-slash but does not lowercase -
-		// case is preserved verbatim, matching how the value would appear in Matrix IDs.
-		name, err := plugin.resolveServerName(unreachableURL, "Configured.Example.COM")
-		require.NoError(t, err)
-		assert.Equal(t, "Configured.Example.COM", name)
-	})
-
-	t.Run("key server endpoint supplies the name when reachable", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]string{"server_name": "discovered.example.com"})
-		}))
-		defer server.Close()
-
-		plugin := newTestPluginForServers(t)
-		name, err := plugin.resolveServerName(server.URL, "")
-		require.NoError(t, err)
-		assert.Equal(t, "discovered.example.com", name)
-	})
-
-	t.Run("404 falls through to hostname", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-		}))
-		defer server.Close()
-
-		plugin := newTestPluginForServers(t)
-		name, err := plugin.resolveServerName(server.URL, "")
-		require.NoError(t, err)
-
-		parsed, parseErr := url.Parse(server.URL)
-		require.NoError(t, parseErr)
-		assert.Equal(t, parsed.Hostname(), name)
-	})
-
-	t.Run("malformed response body falls through to hostname", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte("not json"))
-		}))
-		defer server.Close()
-
-		plugin := newTestPluginForServers(t)
-		name, err := plugin.resolveServerName(server.URL, "")
-		require.NoError(t, err)
-
-		parsed, parseErr := url.Parse(server.URL)
-		require.NoError(t, parseErr)
-		assert.Equal(t, parsed.Hostname(), name)
-	})
-
-	t.Run("response missing server_name falls through to hostname", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"verify_keys": {}}`))
-		}))
-		defer server.Close()
-
-		plugin := newTestPluginForServers(t)
-		name, err := plugin.resolveServerName(server.URL, "")
-		require.NoError(t, err)
-
-		parsed, parseErr := url.Parse(server.URL)
-		require.NoError(t, parseErr)
-		assert.Equal(t, parsed.Hostname(), name)
-	})
-
-	t.Run("transport error falls through to hostname and never fails for a parseable URL", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		name, err := plugin.resolveServerName(unreachableURL, "")
-		require.NoError(t, err)
-		assert.Equal(t, "127.0.0.1", name)
-	})
-}
-
-// newTestPluginForAddServer additionally mocks the best-effort registerServerForSharedChannels
-// / refreshServersAndBroadcast side effects AddServer triggers, so tests can focus on
-// registry semantics without those calls panicking on an unmocked expectation.
+// newTestPluginForAddServer additionally mocks the shared-channels remote registration
+// and refreshServersAndBroadcast side effects Servers().Add triggers, so tests can focus
+// on registry semantics without those calls panicking on an unmocked expectation.
 func newTestPluginForAddServer(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := newTestPluginForServers(t)
@@ -188,424 +71,6 @@ func mockAnyLogCalls(api *plugintest.API) {
 	}
 }
 
-func TestAddServer(t *testing.T) {
-	t.Run("rejects an endpoint already live in the registry", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-
-		_, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "first.example.com")
-		require.NoError(t, err)
-
-		_, err = plugin.AddServer("https://a.example.com", "as2", "hs2", "", "", "second.example.com")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "already registered")
-	})
-
-	t.Run("rejects a server name that duplicates an existing entry's", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-
-		_, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "shared.example.com")
-		require.NoError(t, err)
-
-		_, err = plugin.AddServer("https://b.example.com", "as2", "hs2", "", "", "shared.example.com")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "conflicts")
-	})
-
-	t.Run("rejects a duplicate non-empty hs_token and leaves the registry unchanged", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-
-		_, err := plugin.AddServer("https://a.example.com", "as1", "shared-hs-token", "", "", "a.example.com")
-		require.NoError(t, err)
-
-		_, err = plugin.AddServer("https://b.example.com", "as2", "shared-hs-token", "", "", "b.example.com")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "hs_token conflicts")
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		require.Len(t, servers, 1, "the rejected registration must not be persisted")
-	})
-
-	t.Run("mints a fresh ID when none is supplied", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
-		require.NoError(t, err)
-		assert.True(t, model.IsValidId(id))
-	})
-
-	t.Run("re-adopts a supplied server ID verbatim", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		priorID := model.NewId()
-
-		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", priorID, "a.example.com")
-		require.NoError(t, err)
-		assert.Equal(t, priorID, id)
-	})
-
-	t.Run("rejects a malformed server ID", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		_, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "not-a-valid-id", "a.example.com")
-		require.Error(t, err)
-	})
-
-	t.Run("rejects a server ID colliding with a live entry", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		id1, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
-		require.NoError(t, err)
-
-		_, err = plugin.AddServer("https://b.example.com", "as2", "hs2", "", id1, "b.example.com")
-		require.Error(t, err)
-	})
-
-	t.Run("registers a remote and refreshes the client caches", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
-		require.NoError(t, err)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		require.Len(t, servers, 1)
-		assert.NotEmpty(t, servers[0].RemoteID, "AddServer must register a shared-channels remote")
-
-		assert.NotNil(t, plugin.getMatrixClient(id), "refreshServersAndBroadcast must rebuild this node's client cache")
-	})
-
-	t.Run("fails without ever writing to the registry when shared-channels registration fails", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		api := plugin.API.(*plugintest.API)
-		api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
-		api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
-		api.On("RegisterPluginForSharedChannels", mock.Anything).Return("", &model.AppError{Message: "registration failed"}).Once()
-		mockAnyLogCalls(api)
-
-		explicitID := model.NewId()
-		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", explicitID, "a.example.com")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to register")
-		assert.Empty(t, id)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		assert.Empty(t, servers, "a server whose shared-channels remote could not be created must never reach the registry")
-		assert.Nil(t, plugin.getMatrixClient(explicitID), "a failed add must never publish a routable client for the server")
-		assert.Empty(t, plugin.remoteToServerID, "a failed add must never publish a remote routing entry for the server")
-
-		api.AssertNotCalled(t, "UnregisterPluginRemoteForSharedChannels", mock.Anything)
-		api.AssertNotCalled(t, "PublishPluginClusterEvent", mock.Anything, mock.Anything)
-		api.AssertExpectations(t)
-	})
-
-	t.Run("rejects a conflicting endpoint without touching the shared-channels remote", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		api := plugin.API.(*plugintest.API)
-
-		seed := []kvstore.ServerConfig{
-			{ServerID: "existing1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "existing.example.com", SiteURL: "https://a.example.com:443", RemoteID: "remote-existing"},
-		}
-		data, err := kvstore.MarshalServersConfig(seed)
-		require.NoError(t, err)
-		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, data))
-
-		id, err := plugin.AddServer("https://a.example.com", "as2", "hs2", "", "", "second.example.com")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "already registered")
-		assert.Empty(t, id)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		require.Len(t, servers, 1, "the rejected add must not add a second entry")
-		assert.Equal(t, "existing1", servers[0].ServerID)
-		assert.Equal(t, "remote-existing", servers[0].RemoteID, "the existing entry's remote must be left intact")
-
-		api.AssertNotCalled(t, "RegisterPluginForSharedChannels", mock.Anything)
-		api.AssertNotCalled(t, "UnregisterPluginRemoteForSharedChannels", mock.Anything)
-		api.AssertNotCalled(t, "PublishPluginClusterEvent", mock.Anything, mock.Anything)
-		api.AssertExpectations(t)
-	})
-
-	// The pre-check races with concurrent writers, so the in-callback check remains the
-	// authoritative one. The conflict raced here is a server-name collision across two
-	// *different* endpoints: distinct SiteURLs mean the losing add holds a remote of its
-	// own, so rolling it back cannot touch the winner's. (A same-endpoint race is not
-	// covered - see the note on AddServer's pre-check.)
-	t.Run("unregisters its own remote when a concurrent writer wins a name conflict", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		store := newCASConflictKVStore()
-		plugin.kvstore = store
-
-		api := plugin.API.(*plugintest.API)
-		api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
-		api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
-		mockAnyLogCalls(api)
-
-		// The registry is empty when AddServer's pre-check reads it; the conflicting entry
-		// only lands between mutateServers' first read and its write.
-		store.onFirstRead = func(kv kvstore.KVStore) {
-			seed := []kvstore.ServerConfig{
-				{ServerID: "winner1", ServerURL: "https://a.example.com", Endpoint: "a.example.com:443", ServerName: "shared.example.com", SiteURL: "https://a.example.com:443", RemoteID: "remote-winner"},
-			}
-			data, marshalErr := kvstore.MarshalServersConfig(seed)
-			require.NoError(t, marshalErr)
-			require.NoError(t, kv.Set(kvstore.KeyServersConfig, data))
-		}
-
-		api.On("RegisterPluginForSharedChannels", mock.Anything).Return("remote-orphan", nil).Once()
-		api.On("UnregisterPluginRemoteForSharedChannels", "remote-orphan").Return(nil).Once()
-
-		id, err := plugin.AddServer("https://b.example.com", "as2", "hs2", "", "", "shared.example.com")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "conflicts")
-		assert.Empty(t, id)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		require.Len(t, servers, 1, "the rejected add must not add a second entry")
-		assert.Equal(t, "winner1", servers[0].ServerID)
-		assert.Equal(t, "remote-winner", servers[0].RemoteID, "only this call's own remote may be rolled back")
-
-		api.AssertExpectations(t)
-	})
-
-	t.Run("EventDomain is derived from the endpoint and stays distinct across ports", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		id1, err := plugin.AddServer("http://localhost:8008", "as1", "hs1", "", "", "localhost8008.example.com")
-		require.NoError(t, err)
-		id2, err := plugin.AddServer("http://localhost:8009", "as2", "hs2", "", "", "localhost8009.example.com")
-		require.NoError(t, err)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-
-		domains := map[string]string{}
-		for _, s := range servers {
-			domains[s.ServerID] = s.EventDomain
-		}
-		assert.NotEqual(t, domains[id1], domains[id2])
-	})
-}
-
-func TestRemoveServer(t *testing.T) {
-	t.Run("unknown ID returns false, not an error", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		removed, err := plugin.RemoveServer("nonexistent")
-		require.NoError(t, err)
-		assert.False(t, removed)
-	})
-
-	t.Run("removes an entry but leaves its namespaced keys and channel mappings intact", func(t *testing.T) {
-		plugin := newTestPluginForAddServer(t)
-		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
-		require.NoError(t, err)
-
-		ghostKey := kvstore.BuildGhostUserKey(id, "mmuser1")
-		require.NoError(t, plugin.kvstore.Set(ghostKey, []byte("@_mattermost_mmuser1:a.example.com")))
-
-		channelID := model.NewId()
-		mappingData, err := buildSingleChannelMapping(id, "!room:a.example.com")
-		require.NoError(t, err)
-		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingData))
-
-		removed, err := plugin.RemoveServer(id)
-		require.NoError(t, err)
-		assert.True(t, removed)
-
-		servers, err := plugin.getServers()
-		require.NoError(t, err)
-		assert.Empty(t, servers)
-
-		val, err := plugin.kvstore.Get(ghostKey)
-		require.NoError(t, err)
-		assert.Equal(t, "@_mattermost_mmuser1:a.example.com", string(val), "namespaced keys must survive removal - this is what re-adoption depends on")
-
-		mappingVal, err := plugin.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
-		require.NoError(t, err)
-		assert.NotEmpty(t, mappingVal, "channel mappings must survive removal")
-	})
-
-	t.Run("survives a failing unregister call", func(t *testing.T) {
-		plugin := newTestPluginForServers(t)
-		api := plugin.API.(*plugintest.API)
-		api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
-		api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
-		api.On("RegisterPluginForSharedChannels", mock.Anything).Return("remote-1", nil).Maybe()
-		api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
-		api.On("UnregisterPluginRemoteForSharedChannels", mock.Anything).Return(&model.AppError{Message: "boom"}).Maybe()
-		mockAnyLogCalls(api)
-
-		id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
-		require.NoError(t, err)
-
-		removed, err := plugin.RemoveServer(id)
-		require.NoError(t, err, "a failing unregister must not fail RemoveServer - the registry write already succeeded")
-		assert.True(t, removed)
-	})
-}
-
-// TestReAdoptionRestoresNamespacedRecords covers §5.1's re-adoption round trip: remove a
-// server, then AddServer with the same ID must make its namespaced ghost-user key and
-// channel mapping reachable again.
-func TestReAdoptionRestoresNamespacedRecords(t *testing.T) {
-	plugin := newTestPluginForAddServer(t)
-
-	id, err := plugin.AddServer("https://a.example.com", "as1", "hs1", "", "", "a.example.com")
-	require.NoError(t, err)
-
-	ghostKey := kvstore.BuildGhostUserKey(id, "mmuser1")
-	require.NoError(t, plugin.kvstore.Set(ghostKey, []byte("@_mattermost_mmuser1:a.example.com")))
-
-	channelID := model.NewId()
-	mappingData, err := buildSingleChannelMapping(id, "!room:a.example.com")
-	require.NoError(t, err)
-	mappingKey := kvstore.BuildChannelMappingKey(channelID)
-	require.NoError(t, plugin.kvstore.Set(mappingKey, mappingData))
-
-	removed, err := plugin.RemoveServer(id)
-	require.NoError(t, err)
-	require.True(t, removed)
-
-	// Re-adopt at the same endpoint with the same ID.
-	reAdoptedID, err := plugin.AddServer("https://a.example.com", "as1-new", "hs1-new", "", id, "a.example.com")
-	require.NoError(t, err)
-	assert.Equal(t, id, reAdoptedID)
-
-	ghostVal, err := plugin.kvstore.Get(ghostKey)
-	require.NoError(t, err)
-	assert.Equal(t, "@_mattermost_mmuser1:a.example.com", string(ghostVal), "ghost-user key must resolve again after re-adoption")
-
-	mappingVal, err := plugin.kvstore.Get(mappingKey)
-	require.NoError(t, err)
-	mappings, err := kvstore.ParseChannelServerMappings(mappingVal)
-	require.NoError(t, err)
-	assert.Equal(t, "!room:a.example.com", kvstore.RoomIDForServer(mappings, id), "channel mapping must resolve again after re-adoption")
-}
-
-// TestMutateServersRetriesOnRealConflict covers §5.1's "mutateServers CAS-retry-under-
-// real-conflict" requirement. MemoryKVStore's SetAtomicWithRetries is a single-shot
-// read-compute-write with no compare-on-write, so it cannot model a genuine lost race;
-// casConflictKVStore can, via a hook that injects a real concurrent write between this
-// call's read and write.
-func TestMutateServersRetriesOnRealConflict(t *testing.T) {
-	plugin := newTestPluginForServers(t)
-	store := newCASConflictKVStore()
-	plugin.kvstore = store
-
-	seed := []kvstore.ServerConfig{
-		{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
-		{ServerID: "serverB", ServerName: "b.example.com", Enabled: true},
-	}
-	data, err := kvstore.MarshalServersConfig(seed)
-	require.NoError(t, err)
-	require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
-
-	// Simulate a concurrent writer disabling serverB between mutateServers' read and
-	// write - a real conflict on the same key, touching a different field.
-	store.onFirstRead = func(kv kvstore.KVStore) {
-		current, getErr := kv.Get(kvstore.KeyServersConfig)
-		require.NoError(t, getErr)
-		servers, parseErr := kvstore.ParseServersConfig(current)
-		require.NoError(t, parseErr)
-		for i := range servers {
-			if servers[i].ServerID == "serverB" {
-				servers[i].Enabled = false
-			}
-		}
-		updated, marshalErr := kvstore.MarshalServersConfig(servers)
-		require.NoError(t, marshalErr)
-		require.NoError(t, kv.Set(kvstore.KeyServersConfig, updated))
-	}
-
-	var mutatorCalls int
-	err = plugin.mutateServers(func(servers []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
-		mutatorCalls++
-		updated := make([]kvstore.ServerConfig, len(servers))
-		copy(updated, servers)
-		for i := range updated {
-			if updated[i].ServerID == "serverA" {
-				updated[i].UsernamePrefix = "renamed"
-			}
-		}
-		return updated, nil
-	})
-	require.NoError(t, err)
-
-	assert.GreaterOrEqual(t, mutatorCalls, 2, "a real conflict must force the mutator to be retried against a fresh read")
-
-	final, err := plugin.getServers()
-	require.NoError(t, err)
-	byID := map[string]kvstore.ServerConfig{}
-	for _, s := range final {
-		byID[s.ServerID] = s
-	}
-	assert.Equal(t, "renamed", byID["serverA"].UsernamePrefix, "this call's own write must still land")
-	assert.False(t, byID["serverB"].Enabled, "the concurrent writer's change must survive, not be clobbered by a stale retry")
-}
-
-// TestSetServerEnabledNotFoundIsDecidedByTheWinningAttempt covers the retry hazard in
-// mutateServers callbacks: the callback may run several times and only the invocation
-// that wins the CAS decides the outcome, so "did I find the server?" must come out of
-// that invocation. A captured flag set on an earlier, discarded invocation would report
-// success for a server that no longer exists by the time the write lands.
-func TestSetServerEnabledNotFoundIsDecidedByTheWinningAttempt(t *testing.T) {
-	plugin := newTestPluginForServers(t)
-	store := newCASConflictKVStore()
-	plugin.kvstore = store
-	// Mocked so that a regression - reporting success and carrying on to the broadcast -
-	// surfaces as this test's own failed assertion rather than an unmocked-call panic.
-	plugin.API.(*plugintest.API).On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
-
-	seed := []kvstore.ServerConfig{
-		{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
-		{ServerID: "serverB", ServerName: "b.example.com", Enabled: true},
-	}
-	data, err := kvstore.MarshalServersConfig(seed)
-	require.NoError(t, err)
-	require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
-
-	// A concurrent RemoveServer deletes serverA between this call's read and write, so
-	// the first callback invocation sees it and the retried one does not.
-	store.onFirstRead = func(kv kvstore.KVStore) {
-		remaining, marshalErr := kvstore.MarshalServersConfig(seed[1:])
-		require.NoError(t, marshalErr)
-		require.NoError(t, kv.Set(kvstore.KeyServersConfig, remaining))
-	}
-
-	err = plugin.SetServerEnabled("serverA", false)
-	require.Error(t, err, "a server removed before the winning retry must not be reported as successfully updated")
-	assert.Contains(t, err.Error(), "server serverA is not registered")
-
-	final, err := plugin.getServers()
-	require.NoError(t, err)
-	require.Len(t, final, 1, "the concurrent removal must stand")
-	assert.Equal(t, "serverB", final[0].ServerID)
-	assert.True(t, final[0].Enabled, "the untouched server must keep its flag")
-}
-
-// TestSetServerEnabledUnknownServerWritesNothing pins the other half of the same design:
-// signalling not-found as a callback error aborts the atomic update, so a typo'd server
-// ID never rewrites the whole registry on its way to returning an error.
-func TestSetServerEnabledUnknownServerWritesNothing(t *testing.T) {
-	plugin := newTestPluginForServers(t)
-	store := &writeCountingKVStore{KVStore: NewMemoryKVStore()}
-	plugin.kvstore = store
-
-	data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
-		{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
-	})
-	require.NoError(t, err)
-	require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
-	store.writes = 0
-
-	err = plugin.SetServerEnabled("nosuchserver", true)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "server nosuchserver is not registered")
-	assert.Zero(t, store.writes, "an unknown server ID must not trigger a registry write")
-
-	final, err := plugin.getServers()
-	require.NoError(t, err)
-	require.Len(t, final, 1)
-	assert.True(t, final[0].Enabled)
-}
-
 // TestRegisterForSharedChannelsFailureIsolation covers §5.1's shared-channels remote
 // registration requirement: one server's registration failing must not block the others,
 // and the overall call must still succeed.
@@ -634,7 +99,7 @@ func TestRegisterForSharedChannelsFailureIsolation(t *testing.T) {
 	err = plugin.registerForSharedChannels()
 	require.NoError(t, err, "one server's registration failure must not fail the overall call")
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 	byID := map[string]kvstore.ServerConfig{}
 	for _, s := range servers {
@@ -670,7 +135,7 @@ func TestRegisterForSharedChannelsSurvivesConcurrentRemoval(t *testing.T) {
 	api.On("RegisterPluginForSharedChannels", mock.MatchedBy(func(opts model.RegisterPluginOpts) bool {
 		return opts.SiteURL == "https://a.example.com"
 	})).Return("remote-a", nil).Run(func(mock.Arguments) {
-		removed, removeErr := plugin.RemoveServer("serverB")
+		removed, removeErr := plugin.servers.Remove("serverB")
 		require.NoError(t, removeErr)
 		require.True(t, removed)
 	})
@@ -681,7 +146,7 @@ func TestRegisterForSharedChannelsSurvivesConcurrentRemoval(t *testing.T) {
 	err = plugin.registerForSharedChannels()
 	require.NoError(t, err)
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 	require.Len(t, servers, 1, "serverB's concurrent removal must survive the merge, not be resurrected by it")
 	assert.Equal(t, "serverA", servers[0].ServerID)
@@ -744,7 +209,7 @@ func TestInitMatrixClientsBuildsServerConfigsCache(t *testing.T) {
 }
 
 // TestInitMatrixClientsNoopsWithNilKVStore covers OnConfigurationChange firing before
-// OnActivate has initialized the store.
+// OnActivate has initialized the store (and, equivalently, before p.servers exists).
 func TestInitMatrixClientsNoopsWithNilKVStore(t *testing.T) {
 	plugin := &Plugin{}
 	plugin.logger = &testLogger{}
@@ -765,6 +230,7 @@ func TestInitMatrixClientsNoopsWithNilKVStore(t *testing.T) {
 func TestInitMatrixClientsReturnsErrorOnRegistryReadFailure(t *testing.T) {
 	plugin := newTestPluginForServers(t)
 	plugin.kvstore = &erroringKVStore{KVStore: NewMemoryKVStore(), errOnGetKey: kvstore.KeyServersConfig}
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 	err := plugin.initMatrixClients()
 	require.Error(t, err)
@@ -772,14 +238,15 @@ func TestInitMatrixClientsReturnsErrorOnRegistryReadFailure(t *testing.T) {
 
 // TestInitMatrixClientsConcurrentRebuildMatchesFinalRegistry covers §5.1's "concurrent
 // rebuild doesn't resurrect a stale snapshot" requirement. initMatrixClientsMu fully
-// serializes each rebuild's read-compute-swap cycle, so many concurrent AddServer calls
+// serializes each rebuild's read-compute-swap cycle, so many concurrent Add calls
 // (each of which ends in refreshServersAndBroadcast -> initMatrixClients) must still
 // leave the client cache exactly matching the final registry - never missing an entry
 // that a later, still-in-flight rebuild would have added, and never holding one from a
 // registry state that no longer exists.
 func TestInitMatrixClientsConcurrentRebuildMatchesFinalRegistry(t *testing.T) {
 	plugin := newTestPluginForServers(t)
-	plugin.kvstore = newCASConflictKVStore() // real CAS semantics - required for concurrent AddServer to not lose registrations
+	plugin.kvstore = newCASConflictKVStore() // real CAS semantics - required for concurrent Add to not lose registrations
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	api := plugin.API.(*plugintest.API)
 	api.On("GetUserByUsername", "mattermost-bridge").Return(nil, &model.AppError{Message: "not found"}).Maybe()
 	api.On("GetUsers", mock.Anything).Return([]*model.User{{Id: model.NewId()}}, nil).Maybe()
@@ -793,18 +260,18 @@ func TestInitMatrixClientsConcurrentRebuildMatchesFinalRegistry(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := plugin.AddServer(fmt.Sprintf("https://server%d.example.com", i), "as", fmt.Sprintf("hs%d", i), "", "", fmt.Sprintf("server%d.example.com", i))
+			_, err := addTestServer(plugin, fmt.Sprintf("https://server%d.example.com", i), "as", fmt.Sprintf("hs%d", i), "", "", fmt.Sprintf("server%d.example.com", i))
 			assert.NoError(t, err)
 		}(i)
 	}
 	wg.Wait()
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 	require.Len(t, servers, n)
 
 	for _, s := range servers {
-		assert.NotNil(t, plugin.getMatrixClient(s.ServerID), "server %s missing from client cache after concurrent AddServer calls - a rebuild resurrected a stale snapshot", s.ServerID)
+		assert.NotNil(t, plugin.getMatrixClient(s.ServerID), "server %s missing from client cache after concurrent Add calls - a rebuild resurrected a stale snapshot", s.ServerID)
 	}
 
 	plugin.matrixClientsLock.RLock()
@@ -821,11 +288,13 @@ func TestServerDomainForIDUsesCachedSnapshot(t *testing.T) {
 
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", nil)
 
 	// Failing every read of the registry key is what makes this a real assertion: a KV
 	// round trip left on this path would surface below as an error, not a domain.
 	plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.KeyServersConfig}
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 	domain, err := plugin.serverDomainForID(serverID)
 	require.NoError(t, err)

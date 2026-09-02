@@ -10,6 +10,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -26,6 +27,13 @@ var (
 	htmlEntityRegex = regexp.MustCompile(`&[a-zA-Z0-9#]+;`)
 )
 
+// ServerGetter is the one-method registry read BridgeUtils needs, the same pattern
+// it already uses for ChannelMapper. Satisfied by *servers.Service in production;
+// keeps this package from depending on the servers package's full method set.
+type ServerGetter interface {
+	Get(serverID string) (kvstore.ServerConfig, error)
+}
+
 // BridgeUtilsConfig contains all dependencies needed for BridgeUtils
 type BridgeUtilsConfig struct {
 	Logger              Logger
@@ -39,11 +47,11 @@ type BridgeUtilsConfig struct {
 	// ChannelMapper is the one choke point for channel<->room mapping writes (see
 	// channel_mapping.go). Always the Plugin itself in production.
 	ChannelMapper ChannelMapper
-	// ServerConfigLookup resolves a registered server's current registry entry - a
-	// function value, not a Plugin reference, to keep BridgeUtils decoupled from the
-	// concrete Plugin type. Always Plugin.serverConfigForRouting in production. When nil,
-	// serverConfig reads straight from KV, for tests that build a BridgeUtils standalone.
-	ServerConfigLookup func(serverID string) (kvstore.ServerConfig, error)
+	// ServerGetter reads this bridge's server's registry entry. Always
+	// routingServerGetter in production (see server/servers_host.go), so the read is
+	// served from Plugin's snapshot cache rather than unmarshalling the whole registry
+	// out of KV on every call - serverConfig runs several times per synced post or event.
+	ServerGetter ServerGetter
 }
 
 // BridgeUtils contains common utilities used by both bridge types. There is one
@@ -59,7 +67,7 @@ type BridgeUtils struct {
 	maxProfileImageSize int64
 	maxFileSize         int64
 	channelMapper       ChannelMapper
-	serverConfigLookup  func(serverID string) (kvstore.ServerConfig, error)
+	serverGetter        ServerGetter
 }
 
 // NewBridgeUtils creates a new BridgeUtils instance
@@ -74,7 +82,7 @@ func NewBridgeUtils(config BridgeUtilsConfig) *BridgeUtils {
 		maxProfileImageSize: config.MaxProfileImageSize,
 		maxFileSize:         config.MaxFileSize,
 		channelMapper:       config.ChannelMapper,
-		serverConfigLookup:  config.ServerConfigLookup,
+		serverGetter:        config.ServerGetter,
 	}
 }
 
@@ -183,50 +191,28 @@ func (s *BridgeUtils) channelMappingForServer(channelID string) (kvstore.Channel
 	return entry, nil
 }
 
-// serverConfig returns this bridge's server's current registry entry, via the injected
-// ServerConfigLookup rather than a KV read: it is called several times per synced post or
-// event, so unmarshalling the whole registry each time is not affordable. A runtime
+// serverConfig returns this bridge's server's current registry entry, read through
+// serverGetter rather than straight from KV: it is called several times per synced post
+// or event, so unmarshalling the whole registry each time is not affordable. A runtime
 // change to e.g. UsernamePrefix is still picked up immediately, since every registry
-// mutation refreshes the snapshot the lookup reads (see initMatrixClients).
+// mutation refreshes the snapshot the getter reads (see initMatrixClients).
 func (s *BridgeUtils) serverConfig() (kvstore.ServerConfig, error) {
-	if s.serverConfigLookup != nil {
-		return s.serverConfigLookup(s.serverID)
-	}
-	return s.serverConfigFromKV()
-}
-
-// serverConfigFromKV reads this bridge's server's registry entry straight from the KV
-// store. Only reached when no ServerConfigLookup was injected - see BridgeUtilsConfig.
-func (s *BridgeUtils) serverConfigFromKV() (kvstore.ServerConfig, error) {
-	data, err := s.kvstore.Get(kvstore.KeyServersConfig)
-	if err != nil {
-		return kvstore.ServerConfig{}, errors.Wrap(err, "failed to read servers config")
-	}
-	servers, err := kvstore.ParseServersConfig(data)
-	if err != nil {
-		return kvstore.ServerConfig{}, err
-	}
-	for _, sv := range servers {
-		if sv.ServerID == s.serverID {
-			return sv, nil
-		}
-	}
-	return kvstore.ServerConfig{}, errors.Errorf("server %s is not registered", s.serverID)
+	return s.serverGetter.Get(s.serverID)
 }
 
 // matrixUsernamePrefix returns this bridge's server's configured username prefix,
-// falling back to DefaultMatrixUsernamePrefix if the server has none set. A non-nil
-// error means the server config could not be read at all - callers should treat this
-// as a failure rather than silently falling back, since a transient read error must
-// never be conflated with "no prefix configured" (that fallback could collide with
-// another server's distinct, correctly-configured prefix).
+// falling back to servers.DefaultUsernamePrefix if the server has none set. A
+// non-nil error means the server config could not be read at all - callers should
+// treat this as a failure rather than silently falling back, since a transient read
+// error must never be conflated with "no prefix configured" (that fallback could
+// collide with another server's distinct, correctly-configured prefix).
 func (s *BridgeUtils) matrixUsernamePrefix() (string, error) {
 	server, err := s.serverConfig()
 	if err != nil {
 		return "", err
 	}
 	if server.UsernamePrefix == "" {
-		return DefaultMatrixUsernamePrefix, nil
+		return servers.DefaultUsernamePrefix, nil
 	}
 	return server.UsernamePrefix, nil
 }

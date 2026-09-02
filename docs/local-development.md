@@ -15,9 +15,15 @@ Docker Compose.
 
 ## Prerequisites
 
-1. Install the plugin. Homeservers are managed entirely with the `/matrix server`
-   slash commands (System Admin only) - there is nothing to configure in System
-   Console for them.
+1. Install the plugin. Homeservers can be registered either with the `/matrix server`
+   slash commands or from **System Console → Plugins → Mattermost bridge for Matrix →
+   Matrix homeservers** (both System Admin only - the steps below use the slash
+   commands, since that's the fastest path from a terminal, but "Add Matrix server" in
+   the console registers the same entry and can open the registration YAML for you
+   immediately afterward). Mapping a channel to a room has no console equivalent: it is
+   `/matrix map` while exactly one server is registered, and
+   `/matrix server map <server_id> <room_alias|room_id>` once a second one is (see
+   "Connecting a channel to a room on the second server" below).
 2. Register the homeserver with the plugin, choosing your own Application Service and
    homeserver tokens (any strings; keep them secret):
 
@@ -36,6 +42,10 @@ Docker Compose.
     ```text
     /matrix server registration
     ```
+
+    (or use the "Registration" action on the server's row in the console, which shows
+    the same YAML with a copy/download button - copy it verbatim, including the `url:`
+    line; do not append `/_matrix/app/v1` to it).
 
 ## Starting the Matrix Synapse Server
 

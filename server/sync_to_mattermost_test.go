@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -18,6 +19,7 @@ func setupGetPostIDTest(t *testing.T) (*MatrixToMattermostBridge, kvstore.KVStor
 	plugin := setupPluginForTest()
 	plugin.client = pluginapi.NewClient(plugin.API, nil)
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
 	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 	_, mx2m := plugin.testBridges(t, serverID)
