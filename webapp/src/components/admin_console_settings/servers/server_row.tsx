@@ -106,15 +106,12 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
         setEnabling(true);
         try {
             await onToggleEnabled(server, next);
-
-            // Success - defer back to server.enabled (via the refreshed prop) instead
-            // of staying pinned to the optimistic value, so a later external change
-            // (e.g. another admin toggling it) is reflected instead of masked.
-            setOptimisticEnabled(null);
-        } catch (e) {
-            // Roll back the optimistic flip - the mutation failed server-side.
-            setOptimisticEnabled(!next);
+        } catch {
+            // Reported by the parent; the row only drops its optimistic value.
         } finally {
+            // Deferring to server.enabled either way keeps the row tracking the
+            // registry; a pinned client-side value would mask every later refresh.
+            setOptimisticEnabled(null);
             setEnabling(false);
         }
     };

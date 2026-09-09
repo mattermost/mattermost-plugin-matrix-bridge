@@ -641,10 +641,12 @@ func renderDiagnostics(diag servers.Diagnostics) string {
 				b.WriteString("\n")
 			}
 		case "appservice":
-			if check.Status == "fail" {
+			// Matched on "ok", not "not fail", so a skip never renders as a pass.
+			switch check.Status {
+			case "fail":
 				b.WriteString("❌ **Application Service:** Permission test failed\n")
 				fmt.Fprintf(&b, "🔍 **Error:** %s\n", check.Detail)
-			} else {
+			case "ok":
 				b.WriteString("✅ **Application Service:** Permissions verified (can query namespace)\n")
 			}
 		}

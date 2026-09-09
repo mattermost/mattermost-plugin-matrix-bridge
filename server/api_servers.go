@@ -305,19 +305,17 @@ func (p *Plugin) handleSetServerEnabled(w http.ResponseWriter, r *http.Request) 
 // handleTestServer implements `POST /servers/{server_id}/test`. A POST, not a
 // GET: it performs real network calls including the Application Service
 // permission probe, and must not be cached by any intermediary. An unregistered
-// server's single failed registry check is surfaced as a 404, matching every
-// other endpoint's not-registered semantics, rather than as a 200 carrying a
-// failed check.
+// server is a 404, matching every other endpoint's not-registered semantics,
+// rather than a 200 carrying a failed registry check.
 func (p *Plugin) handleTestServer(w http.ResponseWriter, r *http.Request) {
 	serverID := mux.Vars(r)["server_id"]
 
-	diag := p.servers.Diagnose(serverID)
-	if len(diag.Checks) == 1 && diag.Checks[0].Key == "registry" && diag.Checks[0].Status == "fail" {
-		writeJSONError(w, http.StatusNotFound, diag.Checks[0].Detail)
+	if _, err := p.servers.Get(serverID); err != nil {
+		p.writeServersError(w, "test server", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, diag)
+	writeJSON(w, http.StatusOK, p.servers.Diagnose(serverID))
 }
 
 // handleServerRegistration implements `GET /servers/{server_id}/registration`.
@@ -437,7 +435,8 @@ func (p *Plugin) handleServerMappings(w http.ResponseWriter, r *http.Request) {
 
 	totalCount := len(views)
 	page, perPage := paginationParams(r)
-	start := min(page*perPage, totalCount)
+	// Clamped before the multiply: an unbounded page overflows to a negative offset.
+	start := min(min(page, totalCount)*perPage, totalCount)
 	end := min(start+perPage, totalCount)
 
 	writeJSON(w, http.StatusOK, map[string]any{

@@ -71,17 +71,25 @@ const FOCUSABLE_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]
 const ModalShell: React.FC<Props> = ({title, onClose, children, footer}) => {
     const dialogRef = useRef<HTMLDivElement>(null);
 
+    // Initial focus: land inside the dialog rather than leaving it on whatever
+    // triggered the open, so screen readers announce it and Tab starts cycling
+    // through its own controls instead of the page behind it. Mount-only: callers
+    // pass a fresh onClose arrow per render, so keying this on it would yank focus
+    // back to the first field whenever the parent re-renders.
+    useEffect(() => {
+        const dialog = dialogRef.current;
+        if (!dialog) {
+            return;
+        }
+        const initial = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)[0];
+        (initial || dialog).focus();
+    }, []);
+
     useEffect(() => {
         const dialog = dialogRef.current;
         if (!dialog) {
             return undefined;
         }
-
-        // Initial focus: land inside the dialog rather than leaving it on
-        // whatever triggered the open, so screen readers announce it and Tab
-        // starts cycling through its own controls instead of the page behind it.
-        const initial = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)[0];
-        (initial || dialog).focus();
 
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Escape') {

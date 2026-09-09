@@ -136,6 +136,55 @@ describe('AddServerModal', () => {
         await screen.findByText('a server is already registered at this endpoint (server_id: s1)');
     });
 
+    // The `required` attributes are inert without a <form>, so the component enforces them.
+    it('keeps the submit path closed until URL and both tokens are filled in', () => {
+        render(
+            <AddServerModal
+                onClose={jest.fn()}
+                onAdded={jest.fn()}
+                onViewRegistration={jest.fn()}
+            />,
+        );
+
+        const url = screen.getByLabelText('Homeserver URL');
+        expect(screen.getByRole('button', {name: 'Add server'})).toBeDisabled();
+
+        fireEvent.change(url, {target: {value: 'https://a.example.com'}});
+        fireEvent.change(screen.getByLabelText('Application Service token'), {target: {value: 'as1'}});
+        expect(screen.getByRole('button', {name: 'Add server'})).toBeDisabled();
+
+        fireEvent.keyDown(url, {key: 'Enter'});
+        expect(mockedClient.addServer).not.toHaveBeenCalled();
+
+        fireEvent.change(screen.getByLabelText('Homeserver token'), {target: {value: 'hs1'}});
+        expect(screen.getByRole('button', {name: 'Add server'})).toBeEnabled();
+    });
+
+    // A focus effect keyed on the parent's fresh onClose arrow used to steal focus here.
+    it('leaves focus where the admin put it when the parent re-renders', () => {
+        const {rerender} = render(
+            <AddServerModal
+                onClose={jest.fn()}
+                onAdded={jest.fn()}
+                onViewRegistration={jest.fn()}
+            />,
+        );
+
+        const hsToken = screen.getByLabelText('Homeserver token');
+        hsToken.focus();
+        expect(document.activeElement).toBe(hsToken);
+
+        rerender(
+            <AddServerModal
+                onClose={jest.fn()}
+                onAdded={jest.fn()}
+                onViewRegistration={jest.fn()}
+            />,
+        );
+
+        expect(document.activeElement).toBe(hsToken);
+    });
+
     // The footer button is disabled while the request is in flight, but the
     // hand-wired Enter handler is not a button and had no such guard.
     it('ignores a second Enter while the first request is in flight', async () => {

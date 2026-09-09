@@ -1,7 +1,7 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
 // See LICENSE.txt for license information.
 
-import {render, screen, fireEvent} from '@testing-library/react';
+import {render, screen, fireEvent, waitFor} from '@testing-library/react';
 import React from 'react';
 
 import ServerRow from './server_row';
@@ -83,5 +83,45 @@ describe('ServerRow channels-shared toggle', () => {
         fireEvent.click(screen.getByRole('button', {name: 'Actions for a.example.com'}));
 
         expect(screen.queryByRole('menuitem', {name: /bridged channels/i})).not.toBeInTheDocument();
+    });
+});
+
+describe('ServerRow enable/disable rollback', () => {
+    it('re-syncs with the registry after a failed toggle instead of pinning the row', async () => {
+        const onToggleEnabled = jest.fn().mockRejectedValue(new Error('nope'));
+        const {rerender} = render(
+            <ServerRow
+                server={server}
+                expanded={false}
+                onToggleExpand={jest.fn()}
+                onToggleEnabled={onToggleEnabled}
+                onEdit={jest.fn()}
+                onRemove={jest.fn()}
+                onTest={jest.fn()}
+                onRegistration={jest.fn()}
+            />,
+        );
+
+        fireEvent.click(screen.getByRole('button', {name: 'Actions for a.example.com'}));
+        fireEvent.click(screen.getByRole('menuitem', {name: 'Disable connection'}));
+
+        await waitFor(() => expect(onToggleEnabled).toHaveBeenCalled());
+        expect(await screen.findByText('Active')).toBeInTheDocument();
+
+        // A later refresh (another admin disabling it) must still reach the row.
+        rerender(
+            <ServerRow
+                server={{...server, enabled: false}}
+                expanded={false}
+                onToggleExpand={jest.fn()}
+                onToggleEnabled={onToggleEnabled}
+                onEdit={jest.fn()}
+                onRemove={jest.fn()}
+                onTest={jest.fn()}
+                onRegistration={jest.fn()}
+            />,
+        );
+
+        expect(await screen.findByText('Disabled')).toBeInTheDocument();
     });
 });

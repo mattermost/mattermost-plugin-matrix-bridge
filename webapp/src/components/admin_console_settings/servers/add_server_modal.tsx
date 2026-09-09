@@ -35,6 +35,9 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
     const [error, setError] = useState<string | null>(null);
     const [created, setCreated] = useState<ServerView | null>(null);
 
+    // The `required` attributes below are inert without a <form>, so enforce them here.
+    const canSubmit = Boolean(serverURL.trim() && asToken.trim() && hsToken.trim());
+
     // Not a form onSubmit handler: see the note above the <div onKeyDown={...}>
     // below for why this section can't use a real <form> element.
     const handleSubmit = async () => {
@@ -113,7 +116,7 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                     <button
                         type='button'
                         className='btn btn-primary'
-                        disabled={submitting}
+                        disabled={submitting || !canSubmit}
                         onClick={handleSubmit}
                     >
                         {submitting ? 'Adding…' : 'Add server'}
@@ -138,10 +141,10 @@ const AddServerModal: React.FC<Props> = ({onClose, onAdded, onViewRegistration})
                     if (e.key === 'Enter' && e.target instanceof HTMLInputElement) {
                         e.preventDefault();
 
-                        // Enter is a submit path of its own, so it needs the guard the footer
-                        // buttons get from `disabled`: held down, it would otherwise send a
+                        // Enter is a submit path of its own, so it needs the guards the footer
+                        // button gets from `disabled`: held down, it would otherwise send a
                         // second write request against the same server.
-                        if (!submitting) {
+                        if (!submitting && canSubmit) {
                             handleSubmit();
                         }
                     }

@@ -95,12 +95,20 @@ type Diagnostics struct {
 	ServerInfo *matrix.ServerInfo `json:"server_info"` // nil when unavailable
 }
 
-// wrapf wraps sentinel with a formatted message, preserving the message text (so
-// command output does not change) while keeping errors.Is(result, sentinel) true
-// even after the error travels out of a CAS callback through
-// kvstore.SetAtomicWithRetries.
+type sentinelError struct {
+	sentinel error
+	message  string
+}
+
+func (e *sentinelError) Error() string { return e.message }
+func (e *sentinelError) Unwrap() error { return e.sentinel }
+
+// wrapf attaches sentinel to a formatted message, so errors.Is(result, sentinel) still
+// matches after the error travels out of a CAS callback through
+// kvstore.SetAtomicWithRetries. Not errors.Wrap or %w: both append the sentinel's own
+// text to messages the slash commands and System Console show admins verbatim.
 func wrapf(sentinel error, format string, args ...any) error {
-	return errors.Wrap(sentinel, fmt.Sprintf(format, args...))
+	return &sentinelError{sentinel: sentinel, message: fmt.Sprintf(format, args...)}
 }
 
 // mutate atomically reads-modifies-writes the server registry via compare-and-set.
@@ -289,6 +297,13 @@ func (s *Service) Add(req AddRequest) (kvstore.ServerConfig, error) {
 		return kvstore.ServerConfig{}, wrapf(ErrInvalidInput, "%q is not a valid server ID", req.ServerID)
 	}
 
+	if req.ASToken == "" {
+		return kvstore.ServerConfig{}, wrapf(ErrInvalidInput, "as_token cannot be empty")
+	}
+	if req.HSToken == "" {
+		return kvstore.ServerConfig{}, wrapf(ErrInvalidInput, "hs_token cannot be empty")
+	}
+
 	resolvedServerName, err := s.ResolveServerName(req.ServerURL, req.ServerName)
 	if err != nil {
 		return kvstore.ServerConfig{}, errors.Wrap(err, "failed to resolve server name")
@@ -422,8 +437,10 @@ func (s *Service) warnIfEventDomainMismatch(serverID, newEventDomain string) {
 // remote. It deletes no other KV records: every namespaced key stays exactly where
 // it was, addressed by a ServerID the caller should print as the recovery key for
 // re-adoption via Add.
+// An unknown server_id is reported as (false, nil), but signalled from the mutator as
+// an error, so it writes nothing at all on the way there (as in SetEnabled).
 func (s *Service) Remove(serverID string) (bool, error) {
-	var removed *kvstore.ServerConfig
+	var removed kvstore.ServerConfig
 
 	err := s.mutate(func(current []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
 		idx := -1
@@ -434,24 +451,21 @@ func (s *Service) Remove(serverID string) (bool, error) {
 			}
 		}
 		if idx == -1 {
-			removed = nil
-			return current, nil
+			return nil, wrapf(ErrNotRegistered, "server %s is not registered", serverID)
 		}
 
-		entry := current[idx]
-		removed = &entry
+		removed = current[idx]
 
 		result := make([]kvstore.ServerConfig, 0, len(current)-1)
 		result = append(result, current[:idx]...)
 		result = append(result, current[idx+1:]...)
 		return result, nil
 	})
+	if errors.Is(err, ErrNotRegistered) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
-	}
-
-	if removed == nil {
-		return false, nil
 	}
 
 	if removed.RemoteID != "" {
@@ -542,10 +556,8 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 			return kvstore.ServerConfig{}, nil, wrapf(ErrInvalidInput, "invalid server URL: %v", normErr)
 		}
 		newServerURL = *u.ServerURL
-		if endpoint != current.Endpoint {
-			newEndpoint = endpoint
-			endpointChanged = true
-		}
+		newEndpoint = endpoint
+		endpointChanged = endpoint != current.Endpoint
 	}
 
 	if u.ASToken != nil && *u.ASToken == "" {
@@ -610,10 +622,18 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 		result := make([]kvstore.ServerConfig, len(list))
 		copy(result, list)
 		entry := result[idx]
-		entry.ServerURL = newServerURL
-		entry.Endpoint = newEndpoint
-		entry.ServerName = newServerName
-		entry.UsernamePrefix = newUsernamePrefix
+		// Only what this caller supplied: the values above come from a pre-CAS read, so
+		// writing them all would clobber a concurrent editor's untouched fields.
+		if u.ServerURL != nil {
+			entry.ServerURL = newServerURL
+			entry.Endpoint = newEndpoint
+		}
+		if u.ServerName != nil {
+			entry.ServerName = newServerName
+		}
+		if u.UsernamePrefix != nil {
+			entry.UsernamePrefix = newUsernamePrefix
+		}
 		if u.ASToken != nil {
 			entry.ASToken = *u.ASToken
 		}
@@ -680,10 +700,13 @@ func (s *Service) Mappings(serverID string) ([]ChannelMapping, error) {
 	for _, key := range keys {
 		data, err := s.kv.Get(key)
 		if err != nil {
+			// Logged, not returned: one bad record must not blank the whole list.
+			s.logger.LogWarn("Skipping unreadable channel mapping record while listing bridged channels", "key", key, "error", err)
 			continue
 		}
 		mappings, err := kvstore.ParseChannelServerMappings(data)
 		if err != nil {
+			s.logger.LogWarn("Skipping corrupt channel mapping record while listing bridged channels", "key", key, "error", err)
 			continue
 		}
 		channelID := strings.TrimPrefix(key, kvstore.KeyPrefixChannelMapping)
@@ -806,11 +829,17 @@ func (s *Service) RegistrationYAML(serverID string) (filename, content string, e
 		return "", "", err
 	}
 
+	// An unset Site URL would render "url: /plugins/<id>": relative, so unreachable.
+	siteURL := strings.TrimSuffix(strings.TrimSpace(s.host.SiteURL()), "/")
+	if siteURL == "" {
+		return "", "", wrapf(ErrInvalidInput, "Mattermost's Site URL is not configured; set it in System Console > Environment > Web Server before generating a registration file")
+	}
+
 	// The registration url is the plugin's base path ONLY. The homeserver appends
 	// the appservice path itself ("/_matrix/app/v1/transactions/{txnId}"), so
 	// including "/_matrix/app/v1" here produces a doubled path that matches no
 	// route and silently breaks all inbound traffic for that server.
-	webhookURL := strings.TrimSuffix(s.host.SiteURL(), "/") + "/plugins/" + s.host.PluginID()
+	webhookURL := siteURL + "/plugins/" + s.host.PluginID()
 
 	content = fmt.Sprintf(`id: mattermost-bridge-%s
 url: %s

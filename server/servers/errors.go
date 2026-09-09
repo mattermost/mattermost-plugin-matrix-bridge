@@ -3,10 +3,9 @@ package servers
 import "errors"
 
 // Sentinel errors returned by the registry. Named without a redundant "servers"
-// prefix since callers always qualify them (servers.ErrNotRegistered). Wrapped with
-// errors.Wrap at their call sites while keeping the original message text, so
-// errors.Is still matches after the error has travelled out of a CAS callback
-// (through kvstore.SetAtomicWithRetries) and command output does not change.
+// prefix since callers always qualify them (servers.ErrNotRegistered). Attached to a
+// call site's message through wrapf, so errors.Is still matches after the error has
+// travelled out of a CAS callback (through kvstore.SetAtomicWithRetries).
 var (
 	// ErrNotRegistered is returned when a lookup or mutation targets a server_id that
 	// is not (or no longer) present in the registry.

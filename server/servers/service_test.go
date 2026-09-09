@@ -317,6 +317,7 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{name: "empty URL errors", url: "", wantErr: true},
 		{name: "missing host errors", url: "https://", wantErr: true},
 		{name: "unsupported scheme errors", url: "ftp://example.com", wantErr: true},
+		{name: "unsupported scheme with explicit port still errors", url: "ftp://example.com:8448", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -457,13 +458,20 @@ func TestAdd(t *testing.T) {
 		require.Len(t, list, 1, "the rejected registration must not be persisted")
 	})
 
-	t.Run("an empty hs_token is not treated as a duplicate", func(t *testing.T) {
-		svc, _, _ := newTestService(t)
-		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", ServerName: "a.example.com"})
-		require.NoError(t, err)
+	t.Run("rejects an empty as_token", func(t *testing.T) {
+		svc, host, _ := newTestService(t)
+		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", HSToken: "hs1", ServerName: "a.example.com"})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.Empty(t, host.Calls(), "a rejected registration must not register a shared-channels remote")
+	})
 
-		_, err = svc.Add(AddRequest{ServerURL: "https://b.example.com", ASToken: "as2", ServerName: "b.example.com"})
-		require.NoError(t, err, "two servers with no hs_token yet must both be registrable")
+	t.Run("rejects an empty hs_token", func(t *testing.T) {
+		svc, host, _ := newTestService(t)
+		_, err := svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as1", ServerName: "a.example.com"})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.Empty(t, host.Calls(), "a rejected registration must not register a shared-channels remote")
 	})
 
 	t.Run("Host is honoured in order: RegisterRemoteForSiteURL then RefreshAndBroadcast", func(t *testing.T) {
@@ -569,6 +577,27 @@ func TestRemove(t *testing.T) {
 		removed, err := svc.Remove("nonexistent")
 		require.NoError(t, err)
 		assert.False(t, removed)
+	})
+
+	t.Run("an unknown ID writes nothing", func(t *testing.T) {
+		store := &writeCountingKVStore{memoryKVStore: newMemoryKVStore()}
+		svc := New(store, testLogger{}, &fakeHost{})
+
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{
+			{ServerID: "serverA", ServerName: "a.example.com", Enabled: true},
+		})
+		require.NoError(t, err)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, data))
+		store.writes = 0
+
+		removed, err := svc.Remove("nosuchserver")
+		require.NoError(t, err)
+		assert.False(t, removed)
+		assert.Zero(t, store.writes, "an unknown server ID must not trigger a registry write")
+
+		final, err := svc.List()
+		require.NoError(t, err)
+		require.Len(t, final, 1)
 	})
 
 	t.Run("removes an entry but leaves its namespaced keys intact", func(t *testing.T) {
@@ -937,6 +966,40 @@ func TestUpdate(t *testing.T) {
 		assert.Equal(t, "as-from-this-call", final.ASToken, "this call's own write must still land")
 		assert.Equal(t, "hs-from-concurrent-writer", final.HSToken, "the concurrent writer's change must survive, not be clobbered by a stale retry")
 	})
+
+	t.Run("a concurrent writer's change to a field this call left nil survives", func(t *testing.T) {
+		store := newCASConflictKVStore()
+		host := &fakeHost{matrixClients: map[string]*matrix.Client{}}
+		svc := New(store, testLogger{}, host)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{baseEntry()})))
+
+		store.onFirstRead = func(kv kvstore.KVStore) {
+			current, getErr := kv.Get(kvstore.KeyServersConfig)
+			require.NoError(t, getErr)
+			list, parseErr := kvstore.ParseServersConfig(current)
+			require.NoError(t, parseErr)
+			for i := range list {
+				if list[i].ServerID == "s1" {
+					list[i].ServerURL = "https://b.example.com"
+					list[i].Endpoint = "b.example.com:443"
+					list[i].ServerName = "b.example.com"
+					list[i].UsernamePrefix = "prefix-from-concurrent-writer"
+				}
+			}
+			require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, list)))
+		}
+
+		_, _, err := svc.Update("s1", Update{ASToken: new("as-from-this-call")})
+		require.NoError(t, err)
+
+		final, err := svc.Get("s1")
+		require.NoError(t, err)
+		assert.Equal(t, "as-from-this-call", final.ASToken, "this call's own write must still land")
+		assert.Equal(t, "https://b.example.com", final.ServerURL)
+		assert.Equal(t, "b.example.com:443", final.Endpoint)
+		assert.Equal(t, "b.example.com", final.ServerName)
+		assert.Equal(t, "prefix-from-concurrent-writer", final.UsernamePrefix)
+	})
 }
 
 func mustMarshal(t *testing.T, servers []kvstore.ServerConfig) []byte {
@@ -1138,6 +1201,21 @@ func TestRegistrationYAML(t *testing.T) {
 		_, _, err := svc.RegistrationYAML("nope")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrNotRegistered)
+	})
+
+	t.Run("an unset Site URL errors instead of rendering a relative url", func(t *testing.T) {
+		svc, host, kv := newTestService(t)
+		host.siteURL = ""
+
+		entry := kvstore.ServerConfig{ServerID: "server1", ServerName: "a.example.com", ASToken: "as", HSToken: "hs"}
+		data, err := kvstore.MarshalServersConfig([]kvstore.ServerConfig{entry})
+		require.NoError(t, err)
+		require.NoError(t, kv.Set(kvstore.KeyServersConfig, data))
+
+		_, _, err = svc.RegistrationYAML("server1")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrInvalidInput)
+		assert.Contains(t, err.Error(), "Site URL")
 	})
 }
 

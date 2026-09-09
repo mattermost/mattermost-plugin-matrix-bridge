@@ -616,6 +616,31 @@ func TestHandleServerMappings(t *testing.T) {
 		assert.Empty(t, body.Mappings)
 	})
 
+	// page*per_page overflowed to a negative offset, which panicked the slice.
+	t.Run("a page number large enough to overflow the offset yields an empty list", func(t *testing.T) {
+		plugin := newTestPluginForAPI(t)
+		seedServerAndMappings(t, plugin)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetChannel", mock.AnythingOfType("string")).Return(&model.Channel{Name: "chan", Type: model.ChannelTypeOpen}, nil)
+
+		mappingData, err := kvstore.MarshalChannelServerMappings([]kvstore.ChannelServerMapping{{ServerID: "s1", RoomID: "!room:example.com"}})
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
+
+		req := jsonRequest(t, http.MethodGet, "/servers/s1/mappings?page=9223372036854775807", nil, map[string]string{"server_id": "s1"})
+		rec := httptest.NewRecorder()
+		plugin.handleServerMappings(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body struct {
+			TotalCount int           `json:"total_count"`
+			Mappings   []MappingView `json:"mappings"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, 1, body.TotalCount)
+		assert.Empty(t, body.Mappings)
+	})
+
 	t.Run("unknown server is 404", func(t *testing.T) {
 		plugin := newTestPluginForAPI(t)
 		req := jsonRequest(t, http.MethodGet, "/servers/nope/mappings", nil, map[string]string{"server_id": "nope"})
