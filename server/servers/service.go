@@ -541,8 +541,9 @@ type Update struct {
 // human-readable warnings for changes that succeeded but have consequences the
 // admin must know about. Validation and name resolution happen before the CAS
 // mutator runs (ResolveServerName performs a network probe, and the callback must
-// stay pure); uniqueness checks run inside it, against the live slice and
-// excluding the entry being edited, so two concurrent edits cannot both win.
+// stay pure); which fields actually change, and the uniqueness checks that follow
+// from that, are decided inside it against the live slice, excluding the entry being
+// edited, so two concurrent edits cannot both win.
 //
 // EventDomain, SiteURL and RemoteID are never touched, even when ServerURL
 // changes: recomputing EventDomain would orphan the matrix_event_id_<domain>
@@ -558,7 +559,6 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 
 	newServerURL := current.ServerURL
 	newEndpoint := current.Endpoint
-	endpointChanged := false
 	if u.ServerURL != nil {
 		endpoint, normErr := NormalizeEndpoint(*u.ServerURL)
 		if normErr != nil {
@@ -566,7 +566,6 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 		}
 		newServerURL = *u.ServerURL
 		newEndpoint = endpoint
-		endpointChanged = endpoint != current.Endpoint
 	}
 
 	if u.ASToken != nil && *u.ASToken == "" {
@@ -575,52 +574,34 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 	if u.HSToken != nil && *u.HSToken == "" {
 		return kvstore.ServerConfig{}, nil, wrapf(ErrInvalidInput, "hs_token cannot be empty")
 	}
-	hsTokenChanged := u.HSToken != nil && *u.HSToken != current.HSToken
 
 	newUsernamePrefix := current.UsernamePrefix
-	usernamePrefixChanged := false
 	if u.UsernamePrefix != nil {
-		resolved := *u.UsernamePrefix
-		if resolved == "" {
-			resolved = DefaultUsernamePrefix
-		}
-		if resolved != current.UsernamePrefix {
-			newUsernamePrefix = resolved
-			usernamePrefixChanged = true
+		newUsernamePrefix = *u.UsernamePrefix
+		if newUsernamePrefix == "" {
+			newUsernamePrefix = DefaultUsernamePrefix
 		}
 	}
 
 	// Resolved through ResolveServerName exactly like Add, against the (possibly
 	// just-updated) URL, so normalization matches add-time behaviour.
 	newServerName := current.ServerName
-	serverNameChanged := false
 	if u.ServerName != nil {
 		resolved, resolveErr := s.ResolveServerName(newServerURL, *u.ServerName)
 		if resolveErr != nil {
 			return kvstore.ServerConfig{}, nil, errors.Wrap(resolveErr, "failed to resolve server name")
 		}
-		if resolved != current.ServerName {
-			newServerName = resolved
-			serverNameChanged = true
-		}
+		newServerName = resolved
 	}
 
 	var updated kvstore.ServerConfig
+	var endpointChanged, serverNameChanged, usernamePrefixChanged bool
 	err = s.mutate(func(list []kvstore.ServerConfig) ([]kvstore.ServerConfig, error) {
 		idx := -1
-		for i, entry := range list {
-			if entry.ServerID == serverID {
+		for i := range list {
+			if list[i].ServerID == serverID {
 				idx = i
-				continue
-			}
-			if endpointChanged && entry.Endpoint == newEndpoint {
-				return nil, wrapf(ErrEndpointTaken, "a server is already registered at this endpoint (server_id: %s); use `/matrix server remove %s` first", entry.ServerID, entry.ServerID)
-			}
-			if serverNameChanged && entry.ServerName == newServerName {
-				return nil, wrapf(ErrNameTaken, "server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", newServerName, entry.ServerID)
-			}
-			if hsTokenChanged && entry.HSToken == *u.HSToken {
-				return nil, wrapf(ErrHSTokenTaken, "hs_token conflicts with existing server %s; hs_token must be unique across registered servers", entry.ServerID)
+				break
 			}
 		}
 		if idx == -1 {
@@ -628,9 +609,34 @@ func (s *Service) Update(serverID string, u Update) (kvstore.ServerConfig, []str
 			return nil, wrapf(ErrNotRegistered, "server %s is not registered", serverID)
 		}
 
+		// What actually changes is measured against the entry this write lands on, not
+		// the pre-CAS read: a concurrent editor may have moved this server off the value
+		// being submitted, leaving another entry free to take it. Deciding from the stale
+		// read would skip the uniqueness check that catches exactly that, and would
+		// report warnings for changes the write did not make.
+		entry := list[idx]
+		endpointChanged = u.ServerURL != nil && newEndpoint != entry.Endpoint
+		serverNameChanged = u.ServerName != nil && newServerName != entry.ServerName
+		usernamePrefixChanged = u.UsernamePrefix != nil && newUsernamePrefix != entry.UsernamePrefix
+		hsTokenChanged := u.HSToken != nil && *u.HSToken != entry.HSToken
+
+		for i := range list {
+			if i == idx {
+				continue
+			}
+			if endpointChanged && list[i].Endpoint == newEndpoint {
+				return nil, wrapf(ErrEndpointTaken, "a server is already registered at this endpoint (server_id: %s); use `/matrix server remove %s` first", list[i].ServerID, list[i].ServerID)
+			}
+			if serverNameChanged && list[i].ServerName == newServerName {
+				return nil, wrapf(ErrNameTaken, "server name %q conflicts with existing server %s; two servers cannot share a Matrix ID domain", newServerName, list[i].ServerID)
+			}
+			if hsTokenChanged && list[i].HSToken == *u.HSToken {
+				return nil, wrapf(ErrHSTokenTaken, "hs_token conflicts with existing server %s; hs_token must be unique across registered servers", list[i].ServerID)
+			}
+		}
+
 		result := make([]kvstore.ServerConfig, len(list))
 		copy(result, list)
-		entry := result[idx]
 		// Only what this caller supplied: the values above come from a pre-CAS read, so
 		// writing them all would clobber a concurrent editor's untouched fields.
 		if u.ServerURL != nil {

@@ -979,6 +979,94 @@ func TestUpdate(t *testing.T) {
 		assert.Equal(t, "hs-from-concurrent-writer", final.HSToken, "the concurrent writer's change must survive, not be clobbered by a stale retry")
 	})
 
+	// Resubmitting a value the entry already held is a no-op against the pre-CAS read,
+	// so deciding "did this change?" there skips the uniqueness check. A concurrent
+	// editor can move the entry off that value in the meantime and let another entry
+	// take it, which is how a duplicate hs_token (ambiguous inbound attribution) or a
+	// duplicate endpoint would reach the registry.
+	t.Run("a value freed by a concurrent editor and taken by another entry is still rejected", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			update   Update
+			sentinel error
+			freed    func(entry *kvstore.ServerConfig)
+			taken    func(entry *kvstore.ServerConfig)
+		}{
+			{
+				name:     "hs_token",
+				update:   Update{HSToken: new("hs1")},
+				sentinel: ErrHSTokenTaken,
+				freed:    func(e *kvstore.ServerConfig) { e.HSToken = "hs-moved-on" },
+				taken:    func(e *kvstore.ServerConfig) { e.HSToken = "hs1" },
+			},
+			{
+				name:     "endpoint",
+				update:   Update{ServerURL: new("https://a.example.com")},
+				sentinel: ErrEndpointTaken,
+				freed: func(e *kvstore.ServerConfig) {
+					e.ServerURL = "https://moved.example.com"
+					e.Endpoint = "moved.example.com:443"
+				},
+				taken: func(e *kvstore.ServerConfig) {
+					e.ServerURL = "https://a.example.com"
+					e.Endpoint = "a.example.com:443"
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				store := newCASConflictKVStore()
+				svc := New(store, testLogger{}, &fakeHost{matrixClients: map[string]*matrix.Client{}})
+				other := kvstore.ServerConfig{
+					ServerID:   "s2",
+					ServerURL:  "https://b.example.com",
+					Endpoint:   "b.example.com:443",
+					ServerName: "b.example.com",
+					HSToken:    "hs2",
+				}
+				require.NoError(t, store.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{baseEntry(), other})))
+
+				store.onFirstRead = func(kv kvstore.KVStore) {
+					current, getErr := kv.Get(kvstore.KeyServersConfig)
+					require.NoError(t, getErr)
+					list, parseErr := kvstore.ParseServersConfig(current)
+					require.NoError(t, parseErr)
+					for i := range list {
+						if list[i].ServerID == "s1" {
+							tc.freed(&list[i])
+						} else {
+							tc.taken(&list[i])
+						}
+					}
+					require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, list)))
+				}
+
+				_, _, err := svc.Update("s1", tc.update)
+				require.Error(t, err)
+				assert.ErrorIs(t, err, tc.sentinel)
+			})
+		}
+	})
+
+	t.Run("a change a concurrent editor already made warns nobody", func(t *testing.T) {
+		store := newCASConflictKVStore()
+		svc := New(store, testLogger{}, &fakeHost{matrixClients: map[string]*matrix.Client{}})
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{baseEntry()})))
+
+		store.onFirstRead = func(kv kvstore.KVStore) {
+			current, getErr := kv.Get(kvstore.KeyServersConfig)
+			require.NoError(t, getErr)
+			list, parseErr := kvstore.ParseServersConfig(current)
+			require.NoError(t, parseErr)
+			list[0].UsernamePrefix = "already-applied"
+			require.NoError(t, kv.Set(kvstore.KeyServersConfig, mustMarshal(t, list)))
+		}
+
+		updated, warnings, err := svc.Update("s1", Update{UsernamePrefix: new("already-applied")})
+		require.NoError(t, err)
+		assert.Equal(t, "already-applied", updated.UsernamePrefix)
+		assert.Empty(t, warnings, "the write changed nothing, so it has no consequence to warn about")
+	})
+
 	t.Run("a concurrent writer's change to a field this call left nil survives", func(t *testing.T) {
 		store := newCASConflictKVStore()
 		host := &fakeHost{matrixClients: map[string]*matrix.Client{}}
