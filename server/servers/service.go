@@ -116,7 +116,7 @@ func wrapf(sentinel error, format string, args ...any) error {
 // invoke it more than once if a concurrent writer wins the race, so it must not
 // perform network or plugin-API calls.
 func (s *Service) mutate(mutator func([]kvstore.ServerConfig) ([]kvstore.ServerConfig, error)) error {
-	return s.kv.SetAtomicWithRetries(kvstore.KeyServersConfig, func(oldValue []byte) ([]byte, error) {
+	err := s.kv.SetAtomicWithRetries(kvstore.KeyServersConfig, func(oldValue []byte) ([]byte, error) {
 		current, err := kvstore.ParseServersConfig(oldValue)
 		if err != nil {
 			return nil, err
@@ -129,6 +129,15 @@ func (s *Service) mutate(mutator func([]kvstore.ServerConfig) ([]kvstore.ServerC
 
 		return kvstore.MarshalServersConfig(updated)
 	})
+
+	// The KV client prefixes a callback's error with "failed to set value atomically in
+	// KV store: valueFunc failed: ", so a mutator's rejection is handed back as itself.
+	// A real KV failure keeps that context.
+	var rejected *sentinelError
+	if errors.As(err, &rejected) {
+		return rejected
+	}
+	return err
 }
 
 // List returns every registered server. A missing registry key is not an error -

@@ -3,6 +3,7 @@ package servers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -208,6 +209,17 @@ func (e *erroringKVStore) SetAtomicWithRetries(key string, valueFunc func([]byte
 		return err
 	}
 	return e.KVStore.SetAtomicWithRetries(key, valueFunc)
+}
+
+// wrappingKVStore reproduces the two prefixes the production KV client puts on a CAS
+// callback's error; every other store here hands it straight back.
+type wrappingKVStore struct{ *memoryKVStore }
+
+func (w *wrappingKVStore) SetAtomicWithRetries(key string, valueFunc func([]byte) ([]byte, error)) error {
+	if err := w.memoryKVStore.SetAtomicWithRetries(key, valueFunc); err != nil {
+		return fmt.Errorf("failed to set value atomically in KV store: %w", fmt.Errorf("valueFunc failed: %w", err))
+	}
+	return nil
 }
 
 // fakeHost is a servers.Host test double that records every call, so tests can
@@ -1019,6 +1031,35 @@ func TestTypedErrorsSurviveCASRoundTrip(t *testing.T) {
 	_, err = svc.Add(AddRequest{ServerURL: "https://a.example.com", ASToken: "as2", HSToken: "hs2", ServerName: "b.example.com"})
 	require.Error(t, err)
 	assert.Truef(t, errors.Is(err, ErrEndpointTaken), "errors.Is must still match ErrEndpointTaken after traveling through SetAtomicWithRetries: %v", err)
+}
+
+func TestRejectionsShedTheKVWrappingOnTheirWayOut(t *testing.T) {
+	newService := func(t *testing.T) (*Service, *wrappingKVStore) {
+		t.Helper()
+		store := &wrappingKVStore{memoryKVStore: newMemoryKVStore()}
+		return New(store, testLogger{}, &fakeHost{}), store
+	}
+
+	t.Run("a mutator's rejection reaches the caller as its own message", func(t *testing.T) {
+		svc, store := newService(t)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, mustMarshal(t, []kvstore.ServerConfig{
+			{ServerID: "s1", ServerName: "a.example.com", Enabled: true},
+		})))
+
+		err := svc.SetEnabled("nosuchserver", true)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrNotRegistered)
+		assert.Equal(t, "server nosuchserver is not registered", err.Error())
+	})
+
+	t.Run("a real KV failure keeps the store's context", func(t *testing.T) {
+		svc, store := newService(t)
+		require.NoError(t, store.Set(kvstore.KeyServersConfig, []byte("not json")))
+
+		err := svc.SetEnabled("s1", true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to set value atomically in KV store")
+	})
 }
 
 // TestMutateRetriesOnRealConflict covers the CAS-retry-under-real-conflict
