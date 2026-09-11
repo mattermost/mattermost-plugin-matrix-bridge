@@ -17,9 +17,25 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
+
+// addTestServer wraps plugin.servers.Add with AddServer's old positional signature,
+// so the many call sites written against it don't all need to spell out an
+// AddRequest literal.
+func addTestServer(plugin *Plugin, serverURL, asToken, hsToken, usernamePrefix, serverID, serverNameOverride string) (string, error) {
+	created, err := plugin.servers.Add(servers.AddRequest{
+		ServerURL:      serverURL,
+		ASToken:        asToken,
+		HSToken:        hsToken,
+		UsernamePrefix: usernamePrefix,
+		ServerID:       serverID,
+		ServerName:     serverNameOverride,
+	})
+	return created.ServerID, err
+}
 
 // testLogger implements Logger interface for testing
 type testLogger struct {
@@ -124,6 +140,7 @@ func setupTestPlugin(t *testing.T, matrixContainer *matrixtest.Container) *TestS
 
 	// Initialize kvstore with in-memory implementation for testing
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 	// Initialize required plugin components
 	plugin.pendingFiles = NewPendingFileTracker()
@@ -207,7 +224,7 @@ func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName stri
 		SiteURL:     "https://" + serverName,
 	}
 
-	existing, err := plugin.getServers()
+	existing, err := plugin.servers.List()
 	if err != nil {
 		t.Fatalf("failed to read existing test servers: %v", err)
 	}
@@ -252,7 +269,7 @@ func registerTestServer(t *testing.T, plugin *Plugin, serverURL, serverName stri
 func setTestServerUsernamePrefix(t *testing.T, plugin *Plugin, serverID, prefix string) {
 	t.Helper()
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 
 	found := false
@@ -297,7 +314,7 @@ func syncTestServerConfigsCache(plugin *Plugin, servers []kvstore.ServerConfig) 
 func setTestServerEnabled(t *testing.T, plugin *Plugin, serverID string, enabled bool) {
 	t.Helper()
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 
 	found := false
@@ -362,6 +379,7 @@ func setupSingleServerTest(t *testing.T, api plugin.API, matrixContainer *matrix
 	p := &Plugin{}
 	p.SetAPI(api)
 	p.kvstore = NewMemoryKVStore()
+	p.servers = servers.New(p.kvstore, pluginLogger{p}, pluginHost{p})
 	p.pendingFiles = NewPendingFileTracker()
 	p.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	p.configuration = &configuration{}
@@ -705,37 +723,6 @@ func (c *casConflictKVStore) SetAtomicWithRetries(key string, valueFunc func(old
 		c.mu.Unlock()
 		return nil
 	}
-}
-
-// writeCountingKVStore wraps a KVStore and counts the writes that actually reach the
-// backing store, so tests can assert that an operation which fails validation costs no
-// registry write at all - a mutator that returns the unchanged slice instead of an error
-// still persists it, and only a write count can tell the two apart.
-type writeCountingKVStore struct {
-	kvstore.KVStore
-	writes int
-}
-
-func (w *writeCountingKVStore) Set(key string, value []byte) error {
-	w.writes++
-	return w.KVStore.Set(key, value)
-}
-
-// SetAtomicWithRetries reimplements the embedded store's single-shot read-compute-write
-// rather than delegating to it: the promoted method would write through the inner store's
-// own Set, bypassing this wrapper's counter and leaving every atomic write uncounted.
-func (w *writeCountingKVStore) SetAtomicWithRetries(key string, valueFunc func(oldValue []byte) (newValue []byte, err error)) error {
-	oldValue, err := w.Get(key)
-	if err != nil {
-		return err
-	}
-
-	newValue, err := valueFunc(oldValue)
-	if err != nil {
-		return err
-	}
-
-	return w.Set(key, newValue)
 }
 
 // erroringKVStore wraps a KVStore and fails Get for one specific key, for tests that

@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -79,6 +80,7 @@ func TestHandleMatrixMemberDM_EarlyExits(t *testing.T) {
 			plugin := &Plugin{}
 			plugin.logger = &testLogger{t: t}
 			plugin.kvstore = NewMemoryKVStore()
+			plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 			serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", nil)
 
 			channelID, err := plugin.handleMatrixMemberDM(serverID, tt.event)
@@ -101,6 +103,7 @@ func TestHandleMatrixMemberDM_SwitchRouting(t *testing.T) {
 		plugin := &Plugin{}
 		plugin.logger = &testLogger{t: t}
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		serverID, _ := registerTestServer(t, plugin, matrixServerURL, serverDomain, nil)
 		return plugin, serverID
 	}
@@ -183,6 +186,7 @@ func newTestPluginForTransaction(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 	logger, err := CreateTransactionLogger()
 	require.NoError(t, err)

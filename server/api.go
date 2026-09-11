@@ -41,7 +41,15 @@ func (p *Plugin) ServeHTTP(_ *plugin.Context, w http.ResponseWriter, r *http.Req
 	apiRouter := router.PathPrefix("/api/v1").Subrouter()
 	apiRouter.Use(p.MattermostAuthorizationRequired)
 	apiRouter.HandleFunc("/hello", p.HelloWorld).Methods(http.MethodGet)
-	apiRouter.HandleFunc(autocompleteServersPath, p.handleServerAutocomplete).Methods(http.MethodGet)
+
+	// System Admin only: the slash-command autocomplete list and the full server
+	// registry management surface used by the System Console. Both need
+	// PermissionManageSystem on top of just being logged in - server IDs, URLs and
+	// token presence are admin-only information.
+	adminRouter := apiRouter.NewRoute().Subrouter()
+	adminRouter.Use(p.SystemAdminRequired)
+	adminRouter.HandleFunc(autocompleteServersPath, p.handleServerAutocomplete).Methods(http.MethodGet)
+	p.registerServersRoutes(adminRouter)
 
 	router.ServeHTTP(w, r)
 }
@@ -52,6 +60,22 @@ func (p *Plugin) MattermostAuthorizationRequired(next http.Handler) http.Handler
 		userID := r.Header.Get("Mattermost-User-ID")
 		if userID == "" {
 			http.Error(w, "Not authorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// SystemAdminRequired is a middleware requiring model.PermissionManageSystem, the
+// same gate the /matrix slash commands themselves use. Layered on top of
+// MattermostAuthorizationRequired, so a request reaching this always already has a
+// Mattermost-User-ID. Never leaks server data in a 403 body.
+func (p *Plugin) SystemAdminRequired(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID := r.Header.Get("Mattermost-User-ID")
+		if !p.API.HasPermissionTo(userID, model.PermissionManageSystem) {
+			writeJSONError(w, http.StatusForbidden, "you must be a System Admin to use this endpoint")
 			return
 		}
 
@@ -83,7 +107,7 @@ func (p *Plugin) MatrixAuthorizationRequired(next http.Handler) http.Handler {
 		servers, ok := p.cachedServerConfigs()
 		if !ok {
 			var err error
-			servers, err = p.getServers()
+			servers, err = p.servers.List()
 			if err != nil {
 				p.logger.LogError("Failed to read servers config for Matrix webhook authorization", "error", err)
 				http.Error(w, "Internal error", http.StatusInternalServerError)
@@ -138,21 +162,13 @@ const autocompleteServersPath = "/autocomplete/servers"
 
 // handleServerAutocomplete serves the dynamic autocomplete list for arguments that take a
 // server_id, so admins can pick a server instead of copying an opaque 26-character ID.
-//
-// MattermostAuthorizationRequired only proves the caller is logged in; server IDs are
-// admin-only information, so this additionally requires PermissionManageSystem - the same
-// gate the /matrix commands themselves use.
+// Registered on adminRouter (SystemAdminRequired) - the permission gate lives there,
+// in exactly one place, rather than duplicated in this handler.
 //
 // An empty list is returned (rather than an error) whenever there is nothing to suggest,
 // including when the client cache has not been built yet. Autocomplete then shows no
 // suggestions, which degrades better than surfacing an error while someone is typing.
-func (p *Plugin) handleServerAutocomplete(w http.ResponseWriter, r *http.Request) {
-	userID := r.Header.Get("Mattermost-User-ID")
-	if !p.API.HasPermissionTo(userID, model.PermissionManageSystem) {
-		http.Error(w, "Not authorized", http.StatusForbidden)
-		return
-	}
-
+func (p *Plugin) handleServerAutocomplete(w http.ResponseWriter, _ *http.Request) {
 	servers, _ := p.cachedServerConfigs()
 
 	items := make([]model.AutocompleteListItem, 0, len(servers))

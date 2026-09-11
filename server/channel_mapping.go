@@ -91,12 +91,12 @@ func (p *Plugin) SetChannelMapping(channelID string, entry kvstore.ChannelServer
 // liveServerIDSet returns the set of currently-registered server IDs, used to filter
 // stale channel-mapping entries out of the maxServersPerChannel count.
 func (p *Plugin) liveServerIDSet() (map[string]bool, error) {
-	servers, err := p.getServers()
+	all, err := p.servers.List()
 	if err != nil {
 		return nil, err
 	}
-	set := make(map[string]bool, len(servers))
-	for _, s := range servers {
+	set := make(map[string]bool, len(all))
+	for _, s := range all {
 		set[s.ServerID] = true
 	}
 	return set, nil

@@ -2212,8 +2212,8 @@ type ServerVersionResponse struct {
 
 // ServerInfo contains server name and version information
 type ServerInfo struct {
-	Name    string
-	Version string
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 // GetServerVersion retrieves the Matrix server version information

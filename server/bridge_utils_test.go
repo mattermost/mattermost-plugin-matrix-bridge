@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -772,6 +773,7 @@ func TestBridgeUtilsServerConfigUsesCachedSnapshot(t *testing.T) {
 
 		plugin := setupPluginForTest()
 		plugin.kvstore = NewMemoryKVStore()
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 		matrixClient := createMatrixClientWithTestLogger(t, "https://matrix.example.com", "as-token", "")
 		serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 		return plugin, serverID
@@ -785,6 +787,7 @@ func TestBridgeUtilsServerConfigUsesCachedSnapshot(t *testing.T) {
 		// KV round trip left in serverConfig would surface below as an error rather than a
 		// value, whichever bridge helper triggered it.
 		plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.KeyServersConfig}
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 		m2mx, mx2m := plugin.testBridges(t, serverID)
 
@@ -806,9 +809,9 @@ func TestBridgeUtilsServerConfigUsesCachedSnapshot(t *testing.T) {
 
 		prefix, err := m2mx.matrixUsernamePrefix()
 		require.NoError(t, err)
-		require.Equal(t, DefaultMatrixUsernamePrefix, prefix)
+		require.Equal(t, servers.DefaultUsernamePrefix, prefix)
 
-		// The bridge holds a lookup function, not a ServerConfig copied at build time, so a
+		// The bridge holds a ServerGetter, not a ServerConfig copied at build time, so a
 		// registry change that refreshes the snapshot takes effect without rebuilding it.
 		setTestServerUsernamePrefix(t, plugin, serverID, "rotatedprefix")
 

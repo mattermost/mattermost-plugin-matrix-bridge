@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -23,6 +24,7 @@ func newTestPluginForHooks(t *testing.T) *Plugin {
 	t.Helper()
 	plugin := setupPluginForTest()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	api := plugin.API.(*plugintest.API)
 	api.On("PublishPluginClusterEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
 	mockAnyLogCalls(api)
@@ -121,7 +123,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
-		removed, err := plugin.RemoveServer(serverIDA)
+		removed, err := plugin.servers.Remove(serverIDA)
 		require.NoError(t, err)
 		require.True(t, removed)
 
@@ -171,7 +173,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
-		require.NoError(t, plugin.SetServerEnabled(serverIDB, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverIDB, false))
 
 		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteIDA})
 		require.NoError(t, err)
@@ -187,7 +189,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
-		require.NoError(t, plugin.SetServerEnabled(serverID, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverID, false))
 
 		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		require.NoError(t, err)
@@ -198,7 +200,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		serverIDA, remoteIDA := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 		serverIDB, remoteIDB := registerTestServer(t, plugin, "https://b.example.com", "b.example.com", nil)
-		require.NoError(t, plugin.SetServerEnabled(serverIDB, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverIDB, false))
 
 		mappingA, err := buildSingleChannelMapping(serverIDA, "!room:a.example.com")
 		require.NoError(t, err)
@@ -278,6 +280,9 @@ func TestServerIDForSyncMsg(t *testing.T) {
 
 		counter := &readCountingKVStore{KVStore: plugin.kvstore, countKey: kvstore.KeyServersConfig}
 		plugin.kvstore = counter
+		// The registry read on this path goes through servers.Service, which holds the
+		// store it was built with - rewire it so the counter sees that read.
+		plugin.servers = servers.New(counter, pluginLogger{plugin}, pluginHost{plugin})
 
 		for range 5 {
 			_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: "never-ours"})
@@ -303,7 +308,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), mappingData))
 
 		// Hide the server from the registry so the first message finds nothing to resolve.
-		servers, err := plugin.getServers()
+		servers, err := plugin.servers.List()
 		require.NoError(t, err)
 		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, []byte("[]")))
 		require.NoError(t, plugin.initMatrixClients())
@@ -328,6 +333,7 @@ func TestServerIDForSyncMsg(t *testing.T) {
 		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 		delete(plugin.remoteToServerID, remoteID)
 		plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.KeyServersConfig}
+		plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 
 		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		require.Error(t, err, "a failed cache refresh must surface as an error, not be conflated with 'not one of our remotes'")
@@ -360,7 +366,7 @@ func TestOnSharedChannelsPing(t *testing.T) {
 		// short-circuit before the client lookup, this would panic/error instead of
 		// returning true.
 		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
-		require.NoError(t, plugin.SetServerEnabled(serverID, false))
+		require.NoError(t, plugin.servers.SetEnabled(serverID, false))
 
 		assert.True(t, plugin.OnSharedChannelsPing(&model.RemoteCluster{RemoteId: remoteID}))
 	})

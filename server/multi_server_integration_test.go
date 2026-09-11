@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
 )
@@ -91,6 +92,7 @@ func (suite *MultiServerIntegrationTestSuite) newTwoServerSetup() *twoServerSetu
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.configuration = &configuration{}
@@ -135,7 +137,7 @@ func (suite *MultiServerIntegrationTestSuite) newTwoServerSetup() *twoServerSetu
 func setServerHSToken(t *testing.T, plugin *Plugin, serverID, hsToken string) {
 	t.Helper()
 
-	servers, err := plugin.getServers()
+	servers, err := plugin.servers.List()
 	require.NoError(t, err)
 
 	found := false
@@ -399,6 +401,7 @@ func (suite *MultiServerIntegrationTestSuite) TestReAdoptionRoundTrip() {
 	plugin := &Plugin{}
 	plugin.SetAPI(api)
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.configuration = &configuration{}
@@ -417,7 +420,7 @@ func (suite *MultiServerIntegrationTestSuite) TestReAdoptionRoundTrip() {
 	setupBasicMocks(api, testUserID)
 
 	// Register server A for real, through the production AddServer path.
-	serverIDA, err := plugin.AddServer(suite.containerA.ServerURL, suite.containerA.ASToken, suite.containerA.HSToken, "", "", suite.containerA.ServerDomain)
+	serverIDA, err := addTestServer(plugin, suite.containerA.ServerURL, suite.containerA.ASToken, suite.containerA.HSToken, "", "", suite.containerA.ServerDomain)
 	require.NoError(t, err)
 	require.NotNil(t, plugin.GetMatrixClientForServer(serverIDA), "AddServer's own refreshServersAndBroadcast must have populated this node's client cache")
 
@@ -446,11 +449,11 @@ func (suite *MultiServerIntegrationTestSuite) TestReAdoptionRoundTrip() {
 	require.NotEmpty(t, ghostUserID, "syncing the post must have created a ghost user for testUserID on server A")
 
 	// Remove the server for real.
-	removed, err := plugin.RemoveServer(serverIDA)
+	removed, err := plugin.servers.Remove(serverIDA)
 	require.NoError(t, err)
 	require.True(t, removed)
 
-	managedAfterRemoval, err := plugin.GetManagedServers()
+	managedAfterRemoval, err := plugin.servers.List()
 	require.NoError(t, err)
 	for _, s := range managedAfterRemoval {
 		assert.NotEqual(t, serverIDA, s.ServerID, "the removed server must not appear in the managed server list")
@@ -466,7 +469,7 @@ func (suite *MultiServerIntegrationTestSuite) TestReAdoptionRoundTrip() {
 	// real /_matrix/key/v2/server discovery AddServer would use for a brand new server -
 	// containerA is a real, running Synapse, so this genuinely re-discovers
 	// "synapse1.local" rather than short-circuiting on a hardcoded name.
-	reAdoptedID, err := plugin.AddServer(suite.containerA.ServerURL, suite.containerA.ASToken, suite.containerA.HSToken, "", serverIDA, "")
+	reAdoptedID, err := addTestServer(plugin, suite.containerA.ServerURL, suite.containerA.ASToken, suite.containerA.HSToken, "", serverIDA, "")
 	require.NoError(t, err)
 	require.Equal(t, serverIDA, reAdoptedID, "AddServer must re-adopt the supplied serverID verbatim")
 

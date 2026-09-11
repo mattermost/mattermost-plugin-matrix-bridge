@@ -7,6 +7,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
 
@@ -19,6 +20,7 @@ func TestDMChannelDetection(t *testing.T) {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
 	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 
@@ -116,6 +118,7 @@ func TestDMRoomMapping(t *testing.T) {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.kvstore = NewMemoryKVStore() // Initialize KV store for tests
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
 	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 

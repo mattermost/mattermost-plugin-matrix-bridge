@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 )
 
 func TestCompareTextContent(t *testing.T) {
@@ -18,6 +19,7 @@ func TestCompareTextContent(t *testing.T) {
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.client = pluginapi.NewClient(plugin.API, nil)
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	matrixClient := createMatrixClientWithTestLogger(t, "", "", "")
 	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 	// Build bridges for testing
@@ -169,6 +171,7 @@ func TestCompareTextContentFileOnly(t *testing.T) {
 	plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
 	plugin.pendingFiles = NewPendingFileTracker()
 	plugin.kvstore = NewMemoryKVStore()
+	plugin.servers = servers.New(plugin.kvstore, pluginLogger{plugin}, pluginHost{plugin})
 	matrixClient := createMatrixClientWithTestLogger(t, "https://matrix.example.com", "as-token", "")
 	serverID, _ := registerTestServer(t, plugin, "https://matrix.example.com", "matrix.example.com", matrixClient)
 	// Build bridges for testing
