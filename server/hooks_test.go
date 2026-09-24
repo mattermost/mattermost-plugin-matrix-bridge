@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -461,4 +463,192 @@ func TestUserHasJoinedChannelPerServerEnablement(t *testing.T) {
 
 	assert.Positive(t, atomic.LoadInt32(&aRequests), "enabled server A must be acted on")
 	assert.Zero(t, atomic.LoadInt32(&bRequests), "disabled server B must never be contacted - this is what would fail if the Enabled check were removed")
+}
+
+// ownRemoteFixture is a plugin with one registered server and one channel mapped to a room on
+// it. Its Matrix stub records every request it receives.
+type ownRemoteFixture struct {
+	plugin    *Plugin
+	api       *plugintest.API
+	serverID  string
+	remoteID  string
+	channelID string
+	rc        *model.RemoteCluster
+	author    *model.User
+
+	mu       sync.Mutex
+	requests []string
+}
+
+const ownRemoteRoomID = "!room:a.example.com"
+
+var ownRemoteEventIDKey = "matrix_event_id_" + sanitizeForEventDomain("a.example.com")
+
+func newOwnRemoteFixture(t *testing.T) *ownRemoteFixture {
+	t.Helper()
+	f := &ownRemoteFixture{}
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.requests = append(f.requests, r.Method+" "+r.URL.Path)
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/send/"), strings.Contains(r.URL.Path, "/redact/"):
+			_, _ = w.Write([]byte(`{"event_id":"$stub"}`))
+		case strings.HasSuffix(r.URL.Path, "/upload"):
+			_, _ = w.Write([]byte(`{"content_uri":"mxc://a.example.com/stub"}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(stub.Close)
+
+	f.plugin = newTestPluginForHooks(t)
+	f.plugin.pendingFiles = NewPendingFileTracker()
+	f.plugin.postTracker = NewPostTracker(DefaultPostTrackerMaxEntries)
+	f.plugin.configuration = &configuration{}
+	f.api = f.plugin.API.(*plugintest.API)
+	f.api.On("UpdatePost", mock.Anything).Return(&model.Post{}, nil).Maybe()
+	f.api.On("GetFile", mock.Anything).Return([]byte("data"), nil).Maybe()
+
+	client := createMatrixClientWithTestLogger(t, stub.URL, "as-token", "")
+	f.serverID, f.remoteID = registerTestServer(t, f.plugin, stub.URL, "a.example.com", client)
+	f.rc = &model.RemoteCluster{RemoteId: f.remoteID}
+
+	f.channelID = model.NewId()
+	mapping, err := buildSingleChannelMapping(f.serverID, ownRemoteRoomID)
+	require.NoError(t, err)
+	require.NoError(t, f.plugin.kvstore.Set(kvstore.BuildChannelMappingKey(f.channelID), mapping))
+
+	// A local author, so the remote-author guards in sync_to_matrix.go can't mask a hook check.
+	f.author = f.userWithGhost(t, nil)
+	return f
+}
+
+// userWithGhost returns a user whose ghost is already registered and joined to the room, so
+// syncing for them makes no ghost setup requests.
+func (f *ownRemoteFixture) userWithGhost(t *testing.T, remoteID *string) *model.User {
+	t.Helper()
+	user := &model.User{Id: model.NewId(), Username: "user" + model.NewId(), RemoteId: remoteID}
+	f.api.On("GetUser", user.Id).Return(user, nil).Maybe()
+	f.api.On("GetProfileImage", user.Id).Return(nil, nil).Maybe()
+	require.NoError(t, f.plugin.kvstore.Set(kvstore.BuildGhostUserKey(f.serverID, user.Id), []byte(f.ghostID(user.Id))))
+	require.NoError(t, f.plugin.kvstore.Set(kvstore.BuildGhostRoomKey(f.serverID, user.Id, ownRemoteRoomID), []byte("joined")))
+	return user
+}
+
+func (f *ownRemoteFixture) ghostID(userID string) string {
+	return "@_mattermost_" + userID + ":a.example.com"
+}
+
+func (f *ownRemoteFixture) post(remoteID *string) *model.Post {
+	return &model.Post{Id: model.NewId(), ChannelId: f.channelID, UserId: f.author.Id, Message: "hello", RemoteId: remoteID}
+}
+
+func (f *ownRemoteFixture) sync(t *testing.T, msg *model.SyncMsg) {
+	t.Helper()
+	msg.ChannelId = f.channelID
+	_, err := f.plugin.OnSharedChannelsSyncMsg(msg, f.rc)
+	require.NoError(t, err)
+}
+
+// requestsTo returns the recorded requests whose method and path contain substr.
+func (f *ownRemoteFixture) requestsTo(substr string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var matched []string
+	for _, request := range f.requests {
+		if strings.Contains(request, substr) {
+			matched = append(matched, request)
+		}
+	}
+	return matched
+}
+
+// TestSharedChannelsHooksSkipOwnRemote proves each own-remote skip, and the remote-user branch,
+// in the shared-channels hooks. On a single server Mattermost core already drops items from the
+// target remote before calling the plugin, so no e2e test can fail when one of these checks is
+// removed. Every skip case has a control showing the same item without the own-remote marker
+// reaches the stub.
+func TestSharedChannelsHooksSkipOwnRemote(t *testing.T) {
+	t.Run("post from own remote is not sent", func(t *testing.T) {
+		f := newOwnRemoteFixture(t)
+
+		f.sync(t, &model.SyncMsg{Posts: []*model.Post{f.post(&f.remoteID)}})
+		assert.Empty(t, f.requestsTo("/send/"))
+
+		f.sync(t, &model.SyncMsg{Posts: []*model.Post{f.post(nil)}})
+		assert.Len(t, f.requestsTo("/send/"), 1, "control: a local post is sent")
+	})
+
+	t.Run("deleted post from own remote is still redacted", func(t *testing.T) {
+		f := newOwnRemoteFixture(t)
+		post := f.post(&f.remoteID)
+		post.DeleteAt = model.GetMillis()
+		post.Props = model.StringInterface{ownRemoteEventIDKey: "$evt"}
+
+		f.sync(t, &model.SyncMsg{Posts: []*model.Post{post}})
+		assert.Len(t, f.requestsTo("/redact/"), 1)
+	})
+
+	t.Run("reaction from own remote is not sent", func(t *testing.T) {
+		f := newOwnRemoteFixture(t)
+		target := f.post(nil)
+		target.Props = model.StringInterface{ownRemoteEventIDKey: "$evt"}
+		f.api.On("GetPost", target.Id).Return(target, nil).Maybe()
+		reaction := func(remoteID *string) *model.Reaction {
+			return &model.Reaction{UserId: f.author.Id, PostId: target.Id, EmojiName: "thumbsup", RemoteId: remoteID}
+		}
+
+		f.sync(t, &model.SyncMsg{Reactions: []*model.Reaction{reaction(&f.remoteID)}})
+		assert.Empty(t, f.requestsTo("/send/"))
+
+		f.sync(t, &model.SyncMsg{Reactions: []*model.Reaction{reaction(nil)}})
+		assert.Len(t, f.requestsTo("/send/m.reaction/"), 1, "control: a local reaction is sent")
+	})
+
+	t.Run("attachment from own remote is not uploaded", func(t *testing.T) {
+		f := newOwnRemoteFixture(t)
+		post := f.post(nil)
+		file := func(remoteID *string) *model.FileInfo {
+			return &model.FileInfo{Id: model.NewId(), Name: "a.txt", MimeType: "text/plain", Size: 4, RemoteId: remoteID}
+		}
+
+		own := file(&f.remoteID)
+		require.NoError(t, f.plugin.OnSharedChannelsAttachmentSyncMsg(own, post, f.rc))
+		assert.Empty(t, f.requestsTo("/upload"))
+		f.api.AssertNotCalled(t, "GetFile", own.Id)
+		assert.Empty(t, f.plugin.pendingFiles.GetFiles(f.serverID, post.Id))
+
+		// The foreign-remote control catches removal of just the isOwnRemoteID term: a nil RemoteId
+		// never gets past fi.RemoteId != nil, so the local control alone can't.
+		otherRemoteID := model.NewId()
+		require.NoError(t, f.plugin.OnSharedChannelsAttachmentSyncMsg(file(nil), post, f.rc))
+		require.NoError(t, f.plugin.OnSharedChannelsAttachmentSyncMsg(file(&otherRemoteID), post, f.rc))
+		assert.Len(t, f.requestsTo("/upload"), 2, "control: attachments not from the plugin's remote are uploaded")
+		assert.Len(t, f.plugin.pendingFiles.GetFiles(f.serverID, post.Id), 2, "control: attachments not from the plugin's remote are pending")
+	})
+
+	t.Run("deleted attachment from own remote is still processed", func(t *testing.T) {
+		f := newOwnRemoteFixture(t)
+		post := f.post(nil)
+		fi := &model.FileInfo{Id: model.NewId(), Name: "a.txt", RemoteId: &f.remoteID, DeleteAt: model.GetMillis()}
+		f.plugin.pendingFiles.AddFile(f.serverID, post.Id, &PendingFile{FileID: fi.Id, Filename: fi.Name, MxcURI: "mxc://a.example.com/stub"})
+
+		require.NoError(t, f.plugin.OnSharedChannelsAttachmentSyncMsg(fi, post, f.rc))
+		assert.Empty(t, f.plugin.pendingFiles.GetFiles(f.serverID, post.Id))
+	})
+
+	t.Run("remote user from this server is not synced as a local user", func(t *testing.T) {
+		f := newOwnRemoteFixture(t)
+		remote := f.userWithGhost(t, &f.remoteID)
+
+		f.sync(t, &model.SyncMsg{Users: map[string]*model.User{remote.Id: remote}})
+		assert.Empty(t, f.requestsTo("/profile/"+f.ghostID(remote.Id)+"/displayname"))
+
+		local := f.userWithGhost(t, nil)
+		f.sync(t, &model.SyncMsg{Users: map[string]*model.User{local.Id: local}})
+		assert.Len(t, f.requestsTo("PUT /_matrix/client/v3/profile/"+f.ghostID(local.Id)+"/displayname"), 1,
+			"control: a local user's ghost gets a display name update")
+	})
 }
