@@ -61,14 +61,14 @@ Three structural limits apply to the `server/` suites:
 
 | Feature | E2E single server | E2E multi server | Notes |
 | --- | --- | --- | --- |
-| Text message sync | ✅ | ✅ | `TestBasicMessageSync`, and `TestSmokeMattermostToMatrix` through the real shared-channels hook; `TestOutboundSyncIsolatedPerServer` checks the post reaches only the mapped server |
-| Markdown → HTML formatting | ✅ | ❌ | `TestMarkdownMessageSync` |
-| @mentions → Matrix pills / `m.mentions` | ✅ | ❌ | `TestMessageWithMentions`, `TestMatrixMentionProcessing`, `TestMatrixMentionEdgeCases`. Multi-server should check that the mention uses the target server's ghost domain |
-| Thread replies | ✅ | ❌ | `TestThreadedMessage`; the parent's Matrix event ID is injected into `Props` by hand |
-| Post edit | ✅ | ❌ | `TestMessageEdit`; event ID in `Props` injected by hand |
-| Post deletion → redaction | ❌ | ❌ | Client only (`RedactEvent`); `deletePostFromMatrix` never runs |
-| Reaction add | ✅ | ❌ | `TestReactionSync` |
-| Reaction removal | ❌ | ❌ | `removeReactionFromMatrix` has no test |
+| Text message sync | ✅ | ✅ | Single: `TestMattermostToMatrixTextMessage` and `TestSmokeMattermostToMatrix`, through the real shared-channels hook. Multi: `TestOutboundSyncIsolatedPerServer` checks the post reaches only the mapped server |
+| Markdown → HTML formatting | ✅ | ❌ | `TestMattermostToMatrixMarkdown`: bold, italic, link, fenced code block; list items stay `- ` lines joined by `<br>` |
+| @mentions → Matrix pills / `m.mentions` | ✅ | ❌ | `TestMattermostToMatrixMentions` (a Mattermost member's ghost and a Matrix-originated user's own ID), plus the mocked-Mattermost `TestMatrixMentionProcessing` and `TestMatrixMentionEdgeCases` in `server/`. Multi-server should check that the mention uses the target server's ghost domain |
+| Thread replies | ✅ | ❌ | `TestMattermostToMatrixThreadReply` |
+| Post edit | ✅ | ❌ | `TestMattermostToMatrixPostEdit` |
+| Post deletion → redaction | ✅ | ❌ | `TestMattermostToMatrixPostDeletion` |
+| Reaction add | ✅ | ❌ | `TestMattermostToMatrixReactionAdd` |
+| Reaction removal | ✅ | ❌ | `TestMattermostToMatrixReactionRemoval` |
 | File attachments | ❌ | ❌ | Client only (`TestMatrixClientWithFiles`). The hook upload + pending-file attach flow (keyed per server) is untested |
 | File attachment deletion | ❌ | ❌ | `deleteFileFromMatrix` has no test |
 | Ghost user creation | ✅ | ⚠️ | `TestGhostUserCreationAndDetection`. Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
