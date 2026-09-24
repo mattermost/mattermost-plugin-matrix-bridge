@@ -500,6 +500,89 @@ func TestMatrixToMattermostDirectMessage(t *testing.T) {
 	})
 }
 
+// The webhook creates posts before it responds, so a wrongly accepted event is visible at once;
+// the window only covers read lag.
+const noPostWindow = 5 * time.Second
+
+func TestMatrixToMattermostWebhookAuth(t *testing.T) {
+	harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+
+	for _, tc := range []struct {
+		name, authHeader string
+	}{
+		{"missing token", ""},
+		{"wrong token", "Bearer wrong-" + model.NewId()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := "unauthorized " + model.NewId()
+			txnID := "e2e-" + model.NewId()
+			status := sendTransaction(t, txnID, tc.authHeader, messageEvent(bridged.RoomID, bridged.MatrixUser.UserID, message))
+			require.Equal(t, http.StatusUnauthorized, status, "status of transaction %s", txnID)
+			harness.RequireNoPost(t, bridged.MattermostClient, bridged.Channel.Id, func(p *model.Post) bool {
+				return p.Message == message
+			}, noPostWindow)
+		})
+	}
+}
+
+func TestMatrixToMattermostTransactionDedupe(t *testing.T) {
+	harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	auth := "Bearer " + harness.HSToken
+	txnID := "e2e-" + model.NewId()
+	firstMessage := "dedupe first " + model.NewId()
+	first := messageEvent(bridged.RoomID, bridged.MatrixUser.UserID, firstMessage)
+
+	require.Equal(t, http.StatusOK, sendTransaction(t, txnID, auth, first), "first delivery of transaction %s", txnID)
+	firstPost := waitForBridgedPost(t, bridged, first["event_id"].(string), func(p *model.Post) bool { return p.Message == firstMessage })
+
+	// The plugin also skips an event ID that already produced a post, so the replay carries a new
+	// event: only the transaction dedupe can stop it.
+	replayMessage := "dedupe replay " + model.NewId()
+	replay := messageEvent(bridged.RoomID, bridged.MatrixUser.UserID, replayMessage)
+	require.Equal(t, http.StatusOK, sendTransaction(t, txnID, auth, replay), "replay of transaction %s with event %s", txnID, replay["event_id"])
+	harness.RequireNoPost(t, bridged.MattermostClient, bridged.Channel.Id, func(p *model.Post) bool {
+		return p.Message == replayMessage
+	}, noPostWindow)
+
+	require.Equal(t, http.StatusOK, sendTransaction(t, txnID, auth, first), "second replay of transaction %s", txnID)
+	harness.RequireNoPost(t, bridged.MattermostClient, bridged.Channel.Id, func(p *model.Post) bool {
+		return p.Message == firstMessage && p.Id != firstPost.Id
+	}, noPostWindow)
+}
+
+// sendTransaction PUTs through the raw HTTP client so no Mattermost session is attached, as with
+// Synapse's own deliveries.
+func sendTransaction(t *testing.T, txnID, authHeader string, events ...map[string]any) int {
+	t.Helper()
+	env := harness.Shared(t)
+	body, err := json.Marshal(map[string]any{"events": events})
+	require.NoError(t, err)
+	endpoint := env.Admin.URL + "/plugins/" + harness.PluginID + "/_matrix/app/v1/transactions/" + url.PathEscape(txnID)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, endpoint, bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	resp, err := env.Admin.HTTPClient.Do(req)
+	require.NoError(t, err, "put transaction %s", txnID)
+	_ = resp.Body.Close()
+	return resp.StatusCode
+}
+
+func messageEvent(roomID, sender, body string) map[string]any {
+	return map[string]any{
+		"type":             "m.room.message",
+		"event_id":         "$e2e-" + model.NewId(),
+		"sender":           sender,
+		"room_id":          roomID,
+		"origin_server_ts": time.Now().UnixMilli(),
+		"content":          map[string]any{"msgtype": "m.text", "body": body},
+	}
+}
+
 func setProfileField(t *testing.T, user *matrixtest.User, field, value string) {
 	t.Helper()
 	path := "/_matrix/client/v3/profile/" + url.PathEscape(user.UserID) + "/" + field
