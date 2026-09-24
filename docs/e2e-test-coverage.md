@@ -69,8 +69,8 @@ Three structural limits apply to the `server/` suites:
 | Post deletion → redaction | ✅ | ❌ | `TestMattermostToMatrixPostDeletion` |
 | Reaction add | ✅ | ❌ | `TestMattermostToMatrixReactionAdd` |
 | Reaction removal | ✅ | ❌ | `TestMattermostToMatrixReactionRemoval` |
-| File attachments | ❌ | ❌ | Client only (`TestMatrixClientWithFiles`). The hook upload + pending-file attach flow (keyed per server) is untested |
-| File attachment deletion | ❌ | ❌ | `deleteFileFromMatrix` has no test |
+| File attachments | ✅ | ❌ | `TestMattermostToMatrixFileAttachments`: a PNG and a text file through `OnSharedChannelsAttachmentSyncMsg`, downloaded byte for byte with filename and mimetype. Multi-server (the pending-file flow is keyed per server) is untested |
+| File attachment deletion | ⚠️ | ❌ | `TestMattermostToMatrixFileAttachmentDeletion`: post deletion redacts file events; `deleteFileFromMatrix` is never reached for an already-synced attachment, because Mattermost doesn't re-sync a deleted one (the removal subtest skips) |
 | Ghost user creation | ✅ | ⚠️ | `TestGhostUserCreationAndDetection`. Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
 | Display name sync (`SyncUserToMatrix`) | ❌ | ❌ | Client only (`SetDisplayName`) |
 | Avatar sync (profile image hook) | ❌ | ❌ | Client only (`UpdateGhostUserAvatar`) |

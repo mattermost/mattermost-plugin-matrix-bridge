@@ -1,6 +1,11 @@
 package e2e
 
 import (
+	"bytes"
+	"image"
+	"image/png"
+	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -153,14 +158,102 @@ func TestMattermostToMatrixReactionRemoval(t *testing.T) {
 	requireRedacted(t, env, bridged.MatrixUser, bridged.RoomID, event.EventID, harness.GhostUserID(bridged.MattermostUser.Id))
 }
 
-// createPost posts message to the bridged channel as its Mattermost user, as a reply when rootID
-// is set.
-func createPost(t *testing.T, bridged *harness.BridgedChannel, message, rootID string) *model.Post {
+func TestMattermostToMatrixFileAttachments(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	id := model.NewId()
+	uploads := []struct {
+		name    string
+		data    []byte
+		msgtype string
+	}{
+		{"image-" + id + ".png", pngImage(t), "m.image"},
+		{"notes-" + id + ".txt", []byte("text attachment " + id), "m.file"},
+	}
+
+	infos := make([]*model.FileInfo, len(uploads))
+	for i, u := range uploads {
+		infos[i] = uploadFile(t, bridged, u.name, u.data)
+	}
+	post := createPost(t, bridged, "files "+id, "", infos[0].Id, infos[1].Id)
+
+	for i, u := range uploads {
+		event := waitForFileEvent(t, env, bridged.RoomID, post.Id, u.name)
+		require.Equal(t, u.msgtype, event.Content["msgtype"], "msgtype of event %s", event.EventID)
+		info, _ := event.Content["info"].(map[string]any)
+		require.Equal(t, infos[i].MimeType, info["mimetype"], "info.mimetype of event %s", event.EventID)
+		require.Equal(t, harness.GhostUserID(bridged.MattermostUser.Id), event.Sender)
+
+		mxcURI, _ := event.Content["url"].(string)
+		data, contentType, filename := downloadMedia(t, env, bridged.MatrixUser, mxcURI)
+		require.Equal(t, u.data, data, "bytes of %s from %s", u.name, mxcURI)
+		require.Equal(t, infos[i].MimeType, contentType, "content type of %s from %s", u.name, mxcURI)
+		require.Equal(t, u.name, filename, "filename of %s", mxcURI)
+	}
+}
+
+func TestMattermostToMatrixFileAttachmentDeletion(t *testing.T) {
+	t.Run("post deletion redacts file events", func(t *testing.T) {
+		env := harness.Shared(t)
+		bridged := harness.NewBridgedChannel(t)
+		name := "delete-" + model.NewId() + ".txt"
+		info := uploadFile(t, bridged, name, []byte("deleted with its post "+name))
+		post := createPost(t, bridged, "post with file "+name, "", info.Id)
+
+		textEvent := waitForPostEvent(t, env, bridged.RoomID, post.Id)
+		fileEvent := waitForFileEvent(t, env, bridged.RoomID, post.Id, name)
+		waitForSyncedPost(t, bridged.MattermostClient, post.Id)
+
+		_, err := bridged.MattermostClient.DeletePost(t.Context(), post.Id)
+		require.NoError(t, err, "delete post %s", post.Id)
+
+		ghost := harness.GhostUserID(bridged.MattermostUser.Id)
+		requireRedacted(t, env, bridged.MatrixUser, bridged.RoomID, fileEvent.EventID, ghost)
+		requireRedacted(t, env, bridged.MatrixUser, bridged.RoomID, textEvent.EventID, ghost)
+	})
+
+	t.Run("attachment removal", func(t *testing.T) {
+		env := harness.Shared(t)
+		bridged := harness.NewBridgedChannel(t)
+		id := model.NewId()
+		kept := uploadFile(t, bridged, "kept-"+id+".txt", []byte("kept "+id))
+		removed := uploadFile(t, bridged, "removed-"+id+".txt", []byte("removed "+id))
+		post := createPost(t, bridged, "post with two files "+id, "", kept.Id, removed.Id)
+
+		removedEvent := waitForFileEvent(t, env, bridged.RoomID, post.Id, removed.Name)
+		waitForSyncedPost(t, bridged.MattermostClient, post.Id)
+
+		fileIDs := model.StringArray{kept.Id}
+		patched, _, err := bridged.MattermostClient.PatchPost(t.Context(), post.Id, &model.PostPatch{FileIds: &fileIDs})
+		require.NoError(t, err, "patch post %s to drop file %s", post.Id, removed.Id)
+		require.Equal(t, fileIDs, patched.FileIds, "file IDs of patched post %s", post.Id)
+
+		// A CollectT keeps the poll from failing the test: not being redacted is the expected outcome.
+		ghost := harness.GhostUserID(bridged.MattermostUser.Id)
+		assert.Eventually(new(assert.CollectT), func() bool {
+			sender, err := redactedBy(env, bridged.MatrixUser, bridged.RoomID, removedEvent.EventID)
+			return err == nil && sender != ""
+		}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval)
+		sender, err := redactedBy(env, bridged.MatrixUser, bridged.RoomID, removedEvent.EventID)
+		require.NoError(t, err, "read file event %s in room %s", removedEvent.EventID, bridged.RoomID)
+		if sender == "" {
+			t.Skip("deleteFileFromMatrix never runs for an already-synced attachment: neither deleting the " +
+				"post nor editing out an attachment bumps the FileInfo's UpdateAt, and Mattermost re-sends an " +
+				"attachment only when LastSyncAt < UpdateAt, so no attachment sync with DeleteAt != 0 arrives")
+		}
+		require.Equal(t, ghost, sender, "redactor of file event %s", removedEvent.EventID)
+	})
+}
+
+// createPost posts message to the bridged channel as its Mattermost user, with fileIDs attached,
+// as a reply when rootID is set.
+func createPost(t *testing.T, bridged *harness.BridgedChannel, message, rootID string, fileIDs ...string) *model.Post {
 	t.Helper()
 	post, _, err := bridged.MattermostClient.CreatePost(t.Context(), &model.Post{
 		ChannelId: bridged.Channel.Id,
 		Message:   message,
 		RootId:    rootID,
+		FileIds:   fileIDs,
 	})
 	require.NoError(t, err, "create post in channel %s", bridged.Channel.Id)
 	return post
@@ -241,17 +334,27 @@ func waitForSyncedPost(t *testing.T, client *model.Client4, postID string) {
 // redacted by redactor.
 func requireRedacted(t *testing.T, env *harness.Env, user *matrixtest.User, roomID, eventID, redactor string) {
 	t.Helper()
-	path := "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/event/" + url.PathEscape(eventID)
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		result, err := env.Synapse.DoAsUser(user, http.MethodGet, path, nil)
-		if !assert.NoError(c, err) {
-			return
+		sender, err := redactedBy(env, user, roomID, eventID)
+		if assert.NoError(c, err) {
+			assert.Equal(c, redactor, sender, "redactor of event %s in room %s", eventID, roomID)
 		}
-		event, _ := result.(map[string]any)
-		unsigned, _ := event["unsigned"].(map[string]any)
-		redaction, _ := unsigned["redacted_because"].(map[string]any)
-		assert.Equal(c, redactor, redaction["sender"], "redactor of event %s in room %s", eventID, roomID)
 	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval)
+}
+
+// redactedBy returns the sender of the event's redaction, read as user, or "" while the event is
+// not redacted.
+func redactedBy(env *harness.Env, user *matrixtest.User, roomID, eventID string) (string, error) {
+	path := "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/event/" + url.PathEscape(eventID)
+	result, err := env.Synapse.DoAsUser(user, http.MethodGet, path, nil)
+	if err != nil {
+		return "", err
+	}
+	event, _ := result.(map[string]any)
+	unsigned, _ := event["unsigned"].(map[string]any)
+	redaction, _ := unsigned["redacted_because"].(map[string]any)
+	sender, _ := redaction["sender"].(string)
+	return sender, nil
 }
 
 // requireMembership polls userID's membership in the room, read as user, until it equals want.
@@ -286,6 +389,65 @@ func newMatrixOriginatedUser(t *testing.T, env *harness.Env, bridged *harness.Br
 	require.NoError(t, err, "get author %s of post %s", post.UserId, post.Id)
 	require.True(t, user.IsRemote(), "author %s of post %s is not a remote user", user.Id, post.Id)
 	return user
+}
+
+// uploadFile uploads data to the bridged channel as its Mattermost user and returns the file's
+// info, whose MimeType is what Mattermost detected.
+func uploadFile(t *testing.T, bridged *harness.BridgedChannel, name string, data []byte) *model.FileInfo {
+	t.Helper()
+	resp, _, err := bridged.MattermostClient.UploadFile(t.Context(), data, bridged.Channel.Id, name)
+	require.NoError(t, err, "upload %s to channel %s", name, bridged.Channel.Id)
+	require.Len(t, resp.FileInfos, 1, "file infos for upload %s", name)
+	return resp.FileInfos[0]
+}
+
+// waitForFileEvent returns the post's file event for the named file.
+func waitForFileEvent(t *testing.T, env *harness.Env, roomID, postID, name string) matrixtest.Event {
+	t.Helper()
+	return waitForRoomEvent(t, env, roomID, "file event "+name+" of post "+postID, func(e matrixtest.Event) bool {
+		return e.Type == "m.room.message" && e.Content["mattermost_post_id"] == postID && e.Content["body"] == name
+	})
+}
+
+// pngImage returns a small PNG whose pixels differ on every call.
+func pngImage(t *testing.T) []byte {
+	t.Helper()
+	seed := []byte(model.NewId())
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for i := range img.Pix {
+		img.Pix[i] = seed[i%len(seed)]
+	}
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// downloadMedia fetches an mxc:// URI through Synapse's authenticated media API as user and
+// returns the bytes, the Content-Type, and the Content-Disposition filename.
+func downloadMedia(t *testing.T, env *harness.Env, user *matrixtest.User, mxcURI string) (data []byte, contentType, filename string) {
+	t.Helper()
+	rest, isMXC := strings.CutPrefix(mxcURI, "mxc://")
+	server, mediaID, ok := strings.Cut(rest, "/")
+	require.True(t, isMXC && ok && server != "" && mediaID != "",
+		"not an mxc://<server>/<media id> URI: %q", mxcURI)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		env.Synapse.ServerURL+"/_matrix/client/v1/media/download/"+url.PathEscape(server)+"/"+url.PathEscape(mediaID), nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+user.AccessToken)
+	resp, err := (&http.Client{Timeout: matrixtest.DefaultWaitTimeout}).Do(req)
+	require.NoError(t, err, "download %s", mxcURI)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		require.Failf(t, "download failed", "download %s: status %d: %s", mxcURI, resp.StatusCode, body)
+	}
+
+	data, err = io.ReadAll(resp.Body)
+	require.NoError(t, err, "read %s", mxcURI)
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
+	require.NoError(t, err, "Content-Disposition of %s", mxcURI)
+	return data, resp.Header.Get("Content-Type"), params["filename"]
 }
 
 func relatesTo(e matrixtest.Event) map[string]any {
