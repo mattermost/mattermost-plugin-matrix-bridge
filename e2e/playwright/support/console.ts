@@ -21,3 +21,14 @@ export function serverRow(page: Page, serverId: string): Locator {
 export function serverStatus(row: Locator): Locator {
     return row.getByTestId('matrix-server-status');
 }
+
+export async function openServerMenuItem(row: Locator, item: string): Promise<void> {
+    await row.getByRole('button', {name: /^Actions for /}).click();
+    await row.getByRole('menuitem', {name: item}).click();
+}
+
+// dialogButton finds a dialog button by its visible text. It tells the footer "Close" apart from
+// the header's "×" button, whose accessible name is also "Close".
+export function dialogButton(dialog: Locator, text: string): Locator {
+    return dialog.getByRole('button').filter({hasText: new RegExp(`^${text}$`)});
+}

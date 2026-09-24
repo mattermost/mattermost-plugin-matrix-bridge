@@ -111,6 +111,7 @@ const MappingsPanel: React.FC<Props> = ({serverId}) => {
                         <div
                             key={mapping.channel_id}
                             style={mappingsRowStyle}
+                            data-testid='matrix-mapping-row'
                         >
                             <div style={cellStyle}>
                                 {mapping.channel_missing ? (

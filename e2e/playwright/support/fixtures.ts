@@ -1,5 +1,6 @@
 import {test as base, request, type APIRequestContext, type APIResponse} from '@playwright/test';
 
+import {emptyStorageState} from './auth';
 import {authFile, readEnv, type E2EEnv, type EnvName} from './env';
 
 export interface Api {
@@ -34,8 +35,7 @@ export const test = base.extend<Options & Fixtures>({
     api: async ({env}, use) => {
         // Contexts created inside a test inherit its storageState, and Mattermost rejects the
         // session cookie on requests without X-Requested-With, so start from an empty state.
-        const noCookies = {cookies: [], origins: []};
-        const login = await request.newContext({baseURL: env.mattermost_url, storageState: noCookies});
+        const login = await request.newContext({baseURL: env.mattermost_url, storageState: emptyStorageState});
         const resp = await login.post('/api/v4/users/login', {
             data: {login_id: env.admin_username, password: env.admin_password},
         });
@@ -47,7 +47,7 @@ export const test = base.extend<Options & Fixtures>({
 
         const context = await request.newContext({
             baseURL: env.mattermost_url,
-            storageState: noCookies,
+            storageState: emptyStorageState,
             extraHTTPHeaders: {Authorization: `Bearer ${token}`},
         });
         await use({

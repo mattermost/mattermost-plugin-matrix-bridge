@@ -7,6 +7,7 @@ import {setTimeout as sleep} from 'node:timers/promises';
 import {request} from '@playwright/test';
 
 import {stopLaunchers} from './global-teardown';
+import {loginStorageState} from './support/auth';
 import {authFile, envFile, envNames, pidsFile, readEnv, stateDir, type EnvName} from './support/env';
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -65,27 +66,18 @@ async function waitForEnv(name: EnvName, child: ChildProcess): Promise<void> {
     }
 }
 
-// storeAdminAuth logs the admin in through the API and saves the session cookies, so tests start
-// signed in without driving the login form. It also dismisses what Mattermost overlays on a first
-// admin's first visit: the onboarding task list (a user preference) and the desktop-app landing
-// page (a localStorage flag).
+// storeAdminAuth saves the admin's API-login session for the browser, and hides the onboarding task
+// list that Mattermost overlays on a first admin's first visit.
 async function storeAdminAuth(name: EnvName): Promise<void> {
     const env = readEnv(name);
-    const context = await request.newContext({baseURL: env.mattermost_url});
-    try {
-        const resp = await context.post('/api/v4/users/login', {
-            headers: {'X-Requested-With': 'XMLHttpRequest'},
-            data: {login_id: env.admin_username, password: env.admin_password},
-        });
-        if (!resp.ok()) {
-            throw new Error(`admin login to the ${name} env failed with status ${resp.status()}`);
-        }
+    const state = await loginStorageState(env.mattermost_url, env.admin_username, env.admin_password);
+    const cookie = (cookieName: string) => state.cookies.find((c) => c.name === cookieName)?.value ?? '';
+    const userId = cookie('MMUSERID');
 
-        const state = await context.storageState();
-        const csrf = state.cookies.find((cookie) => cookie.name === 'MMCSRF')?.value ?? '';
-        const userId = (await resp.json()).id as string;
+    const context = await request.newContext({baseURL: env.mattermost_url, storageState: state});
+    try {
         const prefs = await context.put(`/api/v4/users/${userId}/preferences`, {
-            headers: {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': csrf},
+            headers: {'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-Token': cookie('MMCSRF')},
             data: ['onboarding_task_list_show', 'onboarding_task_list_open'].map((pref) => ({
                 user_id: userId,
                 category: 'onboarding_task_list',
@@ -96,12 +88,8 @@ async function storeAdminAuth(name: EnvName): Promise<void> {
         if (!prefs.ok()) {
             throw new Error(`hiding the onboarding task list in the ${name} env failed with status ${prefs.status()}`);
         }
-        state.origins.push({
-            origin: new URL(env.mattermost_url).origin,
-            localStorage: [{name: '__landingPageSeen__', value: 'true'}],
-        });
-        writeFileSync(authFile(name), JSON.stringify(state));
     } finally {
         await context.dispose();
     }
+    writeFileSync(authFile(name), JSON.stringify(state));
 }
