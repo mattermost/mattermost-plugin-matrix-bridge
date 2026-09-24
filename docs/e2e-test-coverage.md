@@ -71,12 +71,12 @@ Three structural limits apply to the `server/` suites:
 | Reaction removal | ✅ | ❌ | `TestMattermostToMatrixReactionRemoval` |
 | File attachments | ✅ | ❌ | `TestMattermostToMatrixFileAttachments`: a PNG and a text file through `OnSharedChannelsAttachmentSyncMsg`, downloaded byte for byte with filename and mimetype. Multi-server (the pending-file flow is keyed per server) is untested |
 | File attachment deletion | ⚠️ | ❌ | `TestMattermostToMatrixFileAttachmentDeletion`: post deletion redacts file events; `deleteFileFromMatrix` is never reached for an already-synced attachment, because Mattermost doesn't re-sync a deleted one (the removal subtest skips) |
-| Ghost user creation | ✅ | ⚠️ | `TestGhostUserCreationAndDetection`. Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
-| Display name sync (`SyncUserToMatrix`) | ❌ | ❌ | Client only (`SetDisplayName`) |
-| Avatar sync (profile image hook) | ❌ | ❌ | Client only (`UpdateGhostUserAvatar`) |
-| DM / group DM room auto-creation | ⚠️ | ❌ | `DMRoomCreationTestSuite` checks the room's creation and name, but explicitly skips checking that the message was delivered. Multi-server DM routing (DM created on the calling server) is unit-only |
-| User joins channel → ghost joins room | ⚠️ | ❌ | `testSyncChannelMembersToMatrixRoom` re-implements the loop inside the test instead of calling `UserHasJoinedChannel` |
-| Matrix-originated user re-invited to room | ✅ | ❌ | `testInviteRemoteUserToMatrixRoom`. The rule that users are never invited to a server they didn't come from is unit-only |
+| Ghost user creation | ✅ | ⚠️ | Single: `TestMattermostToMatrixGhostCreation`; the join hook creates the ghost with the full name and joins it before the first post (also `TestGhostUserCreationAndDetection`). Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
+| Display name sync (`SyncUserToMatrix`) | ✅ | ❌ | `TestMattermostToMatrixDisplayNameSync`: first and last name; the nickname isn't used (`ShowFullName`). Mattermost sends profile changes only for users it has already synced to the remote, so the test posts first |
+| Avatar sync (profile image hook) | ✅ | ❌ | `TestMattermostToMatrixAvatarSync`: the ghost's avatar bytes equal Mattermost's re-encoded profile image. As with display names, the user posts first |
+| DM / group DM room auto-creation | ⚠️ | ❌ | e2e skipped: needs `EnableSharedChannelsDMs` (`TestMattermostToMatrixDirectMessage` asserts both 403s, then skips); room naming still only in `DMRoomCreationTestSuite`, which doesn't check message delivery. Multi-server DM routing (DM created on the calling server) is unit-only |
+| User joins channel → ghost joins room | ✅ | ❌ | `TestMattermostToMatrixUserJoinsChannel`, through the real `UserHasJoinedChannel` hook |
+| Matrix-originated user re-invited to room | ✅ | ❌ | `TestMattermostToMatrixMatrixUserReinvited`, which supersedes `testInviteRemoteUserToMatrixRoom`. The plugin invites as the AS bot, which `/matrix map` leaves at power level 0; in a `public_chat` room (invite level 50) the invite fails with 403 `M_FORBIDDEN`, so the test grants the bot the invite level. The rule that users are never invited to a server they didn't come from is unit-only |
 | Shared-channels hook routing (server resolved from `RemoteCluster`, own-remote skip) | ⚠️ | ❌ | Single: `TestSmokeMattermostToMatrix` goes through `OnSharedChannelsSyncMsg` with a real `RemoteCluster`, but the own-remote skip is unit-only (`TestServerIDForSyncMsg`) |
 
 ### Matrix → Mattermost

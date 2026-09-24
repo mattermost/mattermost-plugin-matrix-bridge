@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"image"
 	"image/png"
 	"io"
@@ -185,7 +187,8 @@ func TestMattermostToMatrixFileAttachments(t *testing.T) {
 		require.Equal(t, harness.GhostUserID(bridged.MattermostUser.Id), event.Sender)
 
 		mxcURI, _ := event.Content["url"].(string)
-		data, contentType, filename := downloadMedia(t, env, bridged.MatrixUser, mxcURI)
+		data, contentType, filename, err := downloadMedia(t.Context(), env, bridged.MatrixUser, mxcURI)
+		require.NoError(t, err)
 		require.Equal(t, u.data, data, "bytes of %s from %s", u.name, mxcURI)
 		require.Equal(t, infos[i].MimeType, contentType, "content type of %s from %s", u.name, mxcURI)
 		require.Equal(t, u.name, filename, "filename of %s", mxcURI)
@@ -243,6 +246,116 @@ func TestMattermostToMatrixFileAttachmentDeletion(t *testing.T) {
 		}
 		require.Equal(t, ghost, sender, "redactor of file event %s", removedEvent.EventID)
 	})
+}
+
+func TestMattermostToMatrixGhostCreation(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	user, client := harness.NewMattermostUser(t)
+	first, last := "First"+model.NewId()[:8], "Last"+model.NewId()[:8]
+	_, _, err := env.Admin.PatchUser(t.Context(), user.Id, &model.UserPatch{FirstName: &first, LastName: &last})
+	require.NoError(t, err, "patch name of user %s", user.Id)
+
+	_, _, err = env.Admin.AddChannelMember(t.Context(), bridged.Channel.Id, user.Id)
+	require.NoError(t, err, "add user %s to channel %s", user.Id, bridged.Channel.Id)
+
+	// UserHasJoinedChannel creates the ghost, with its display name set, and joins it before the
+	// user posts anything.
+	ghost := harness.GhostUserID(user.Id)
+	requireMembership(t, env, bridged.MatrixUser, bridged.RoomID, ghost, "join")
+	displayName, _, err := ghostProfile(env, bridged.MatrixUser, ghost)
+	require.NoError(t, err, "profile of ghost %s", ghost)
+	require.Equal(t, first+" "+last, displayName, "display name of ghost %s", ghost)
+
+	post, _, err := client.CreatePost(t.Context(), &model.Post{ChannelId: bridged.Channel.Id, Message: "first post " + model.NewId()})
+	require.NoError(t, err, "create post as user %s", user.Id)
+	event := waitForPostEvent(t, env, bridged.RoomID, post.Id)
+	require.Equal(t, ghost, event.Sender, "sender of event %s", event.EventID)
+}
+
+func TestMattermostToMatrixDisplayNameSync(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	ghost := harness.GhostUserID(bridged.MattermostUser.Id)
+	first, last := "Renamed"+model.NewId()[:8], "User"+model.NewId()[:8]
+	syncUserToRemote(t, env, bridged)
+
+	_, _, err := bridged.MattermostClient.PatchUser(t.Context(), bridged.MattermostUser.Id,
+		&model.UserPatch{FirstName: &first, LastName: &last})
+	require.NoError(t, err, "patch name of user %s", bridged.MattermostUser.Id)
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		displayName, _, err := ghostProfile(env, bridged.MatrixUser, ghost)
+		if assert.NoError(c, err) {
+			assert.Equal(c, first+" "+last, displayName, "display name of ghost %s", ghost)
+		}
+	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval)
+}
+
+func TestMattermostToMatrixAvatarSync(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	user := bridged.MattermostUser
+	ghost := harness.GhostUserID(user.Id)
+	syncUserToRemote(t, env, bridged)
+
+	_, err := bridged.MattermostClient.SetProfileImage(t.Context(), user.Id, pngImage(t))
+	require.NoError(t, err, "set profile image of user %s", user.Id)
+	// Mattermost re-encodes uploaded profile images, so the reference is what it serves back.
+	want, _, err := env.Admin.GetProfileImage(t.Context(), user.Id, "")
+	require.NoError(t, err, "get profile image of user %s", user.Id)
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, avatarURL, err := ghostProfile(env, bridged.MatrixUser, ghost)
+		if !assert.NoError(c, err) {
+			return
+		}
+		data, _, _, err := downloadMedia(t.Context(), env, bridged.MatrixUser, avatarURL)
+		if assert.NoError(c, err) {
+			assert.Equal(c, want, data, "avatar bytes of ghost %s from %s", ghost, avatarURL)
+		}
+	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval)
+}
+
+func TestMattermostToMatrixUserJoinsChannel(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	user, _ := harness.NewMattermostUser(t)
+
+	_, _, err := env.Admin.AddChannelMember(t.Context(), bridged.Channel.Id, user.Id)
+	require.NoError(t, err, "add user %s to channel %s", user.Id, bridged.Channel.Id)
+
+	requireMembership(t, env, bridged.MatrixUser, bridged.RoomID, harness.GhostUserID(user.Id), "join")
+}
+
+func TestMattermostToMatrixMatrixUserReinvited(t *testing.T) {
+	env := harness.Shared(t)
+	first := harness.NewBridgedChannel(t)
+	second := harness.NewBridgedChannel(t)
+	remote := newMatrixOriginatedUser(t, env, first)
+	// The plugin invites as the AS bot, which /matrix map leaves at power level 0; the room,
+	// created with the public_chat preset, needs 50 to invite.
+	grantInvitePower(t, env, second.MatrixUser, second.RoomID, env.Synapse.GetApplicationServiceBotUserID())
+
+	_, _, err := env.Admin.AddChannelMember(t.Context(), second.Channel.Id, remote.Id)
+	require.NoError(t, err, "add remote user %s to channel %s", remote.Id, second.Channel.Id)
+
+	requireMembership(t, env, second.MatrixUser, second.RoomID, first.MatrixUser.UserID, "invite")
+}
+
+func TestMattermostToMatrixDirectMessage(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	remote := newMatrixOriginatedUser(t, env, bridged)
+	other, _ := harness.NewMattermostUser(t)
+
+	_, _, err := bridged.MattermostClient.CreateGroupChannel(t.Context(),
+		[]string{bridged.MattermostUser.Id, other.Id, remote.Id})
+	requireRemoteRestricted(t, err, "api.channel.create_group.remote_restricted.app_error")
+	_, _, err = bridged.MattermostClient.CreateDirectChannel(t.Context(), bridged.MattermostUser.Id, remote.Id)
+	requireRemoteRestricted(t, err, "api.channel.create_channel.direct_channel.remote_restricted.app_error")
+
+	t.Skip("DMs with Matrix users need Mattermost FeatureFlags.EnableSharedChannelsDMs, off by default in 11.8; the e2e env keeps defaults")
 }
 
 // createPost posts message to the bridged channel as its Mattermost user, with fileIDs attached,
@@ -424,30 +537,89 @@ func pngImage(t *testing.T) []byte {
 
 // downloadMedia fetches an mxc:// URI through Synapse's authenticated media API as user and
 // returns the bytes, the Content-Type, and the Content-Disposition filename.
-func downloadMedia(t *testing.T, env *harness.Env, user *matrixtest.User, mxcURI string) (data []byte, contentType, filename string) {
-	t.Helper()
+func downloadMedia(ctx context.Context, env *harness.Env, user *matrixtest.User, mxcURI string) (data []byte, contentType, filename string, err error) {
 	rest, isMXC := strings.CutPrefix(mxcURI, "mxc://")
 	server, mediaID, ok := strings.Cut(rest, "/")
-	require.True(t, isMXC && ok && server != "" && mediaID != "",
-		"not an mxc://<server>/<media id> URI: %q", mxcURI)
+	if !isMXC || !ok || server == "" || mediaID == "" {
+		return nil, "", "", fmt.Errorf("not an mxc://<server>/<media id> URI: %q", mxcURI)
+	}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		env.Synapse.ServerURL+"/_matrix/client/v1/media/download/"+url.PathEscape(server)+"/"+url.PathEscape(mediaID), nil)
-	require.NoError(t, err)
+	if err != nil {
+		return nil, "", "", err
+	}
 	req.Header.Set("Authorization", "Bearer "+user.AccessToken)
 	resp, err := (&http.Client{Timeout: matrixtest.DefaultWaitTimeout}).Do(req)
-	require.NoError(t, err, "download %s", mxcURI)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("download %s: %w", mxcURI, err)
+	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		require.Failf(t, "download failed", "download %s: status %d: %s", mxcURI, resp.StatusCode, body)
+		return nil, "", "", fmt.Errorf("download %s: status %d: %s", mxcURI, resp.StatusCode, body)
 	}
 
-	data, err = io.ReadAll(resp.Body)
-	require.NoError(t, err, "read %s", mxcURI)
+	if data, err = io.ReadAll(resp.Body); err != nil {
+		return nil, "", "", fmt.Errorf("read %s: %w", mxcURI, err)
+	}
 	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
-	require.NoError(t, err, "Content-Disposition of %s", mxcURI)
-	return data, resp.Header.Get("Content-Type"), params["filename"]
+	if err != nil {
+		return nil, "", "", fmt.Errorf("parse Content-Disposition of %s: %w", mxcURI, err)
+	}
+	return data, resp.Header.Get("Content-Type"), params["filename"], nil
+}
+
+// syncUserToRemote posts twice as the bridged channel's Mattermost user and waits for both posts
+// on Matrix. Mattermost only sends later profile and avatar changes for users it has already
+// synced to the remote, which for this user first happens with their first post. That sync ends
+// by stamping LastSyncAt from the user row as it is at that moment, so a change made while that
+// sync is still running would be absorbed and never sent. Mattermost runs sync tasks one at a
+// time, so the second post arriving means the first sync, stamp included, has finished.
+func syncUserToRemote(t *testing.T, env *harness.Env, bridged *harness.BridgedChannel) {
+	t.Helper()
+	for _, message := range []string{"first post ", "sync barrier "} {
+		post := createPost(t, bridged, message+model.NewId(), "")
+		waitForPostEvent(t, env, bridged.RoomID, post.Id)
+	}
+}
+
+// grantInvitePower raises userID to the room's invite power level, acting as admin.
+func grantInvitePower(t *testing.T, env *harness.Env, admin *matrixtest.User, roomID, userID string) {
+	t.Helper()
+	path := "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/state/m.room.power_levels/"
+	result, err := env.Synapse.DoAsUser(admin, http.MethodGet, path, nil)
+	require.NoError(t, err, "read power levels of room %s", roomID)
+	levels, _ := result.(map[string]any)
+	users, _ := levels["users"].(map[string]any)
+	require.NotNil(t, users, "power levels of room %s have no users map", roomID)
+	require.Contains(t, levels, "invite", "power levels of room %s have no invite level", roomID)
+	users[userID] = levels["invite"]
+	_, err = env.Synapse.DoAsUser(admin, http.MethodPut, path, levels)
+	require.NoError(t, err, "grant invite power to %s in room %s", userID, roomID)
+}
+
+// ghostProfile reads the ghost's Matrix profile as user.
+func ghostProfile(env *harness.Env, user *matrixtest.User, ghostID string) (displayName, avatarURL string, err error) {
+	result, err := env.Synapse.DoAsUser(user, http.MethodGet, "/_matrix/client/v3/profile/"+url.PathEscape(ghostID), nil)
+	if err != nil {
+		return "", "", err
+	}
+	profile, _ := result.(map[string]any)
+	displayName, _ = profile["displayname"].(string)
+	avatarURL, _ = profile["avatar_url"].(string)
+	return displayName, avatarURL, nil
+}
+
+// requireRemoteRestricted requires Mattermost to have refused a DM or group DM with a remote
+// user with a 403 and errorID.
+func requireRemoteRestricted(t *testing.T, err error, errorID string) {
+	t.Helper()
+	var appErr *model.AppError
+	require.ErrorAs(t, err, &appErr,
+		"Mattermost now allows DMs with remote users; write the DM assertions in TestMattermostToMatrixDirectMessage")
+	require.Equal(t, http.StatusForbidden, appErr.StatusCode, "status of refused DM: %v", err)
+	require.Equal(t, errorID, appErr.Id, "error of refused DM")
 }
 
 func relatesTo(e matrixtest.Event) map[string]any {
