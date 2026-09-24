@@ -3,6 +3,8 @@ package e2e
 import (
 	"context"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -359,4 +361,139 @@ func TestLoopPreventionFiles(t *testing.T) {
 			return e.Sender != bridged.MatrixUser.UserID && e.Content["body"] == name
 		}, echoWindow)
 	})
+}
+
+// sendAsGhost sends a message into the room as ghostID through appservice impersonation and
+// returns its event ID.
+func sendAsGhost(t *testing.T, env *harness.Env, roomID, ghostID string, content map[string]any) string {
+	t.Helper()
+	endpoint := "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/send/m.room.message/" + model.NewId() +
+		"?user_id=" + url.QueryEscape(ghostID)
+	result, err := env.Synapse.DoAsUser(&matrixtest.User{AccessToken: env.Synapse.ASToken}, http.MethodPut, endpoint, content)
+	require.NoError(t, err, "send as %s to room %s", ghostID, roomID)
+	response, _ := result.(map[string]any)
+	eventID, _ := response["event_id"].(string)
+	require.NotEmpty(t, eventID, "send as %s returned no event_id: %v", ghostID, result)
+	return eventID
+}
+
+// ghostExists reports whether ghostID is registered on Synapse or has any membership in the room.
+// Only a 404 from the profile lookup proves the ghost isn't registered; any other error is
+// returned, so an unreachable Synapse can't pass for a missing ghost. It returns errors instead
+// of taking t because require.Never runs its condition in another goroutine.
+func ghostExists(env *harness.Env, bridged *harness.BridgedChannel, ghostID string) (bool, error) {
+	_, err := env.Synapse.DoAsUser(bridged.MatrixUser, http.MethodGet, "/_matrix/client/v3/profile/"+url.PathEscape(ghostID), nil)
+	if err == nil {
+		return true, nil
+	}
+	if !strings.Contains(err.Error(), "matrix API error: 404") {
+		return false, err
+	}
+
+	result, err := env.Synapse.DoAsUser(bridged.MatrixUser, http.MethodGet, "/_matrix/client/v3/rooms/"+url.PathEscape(bridged.RoomID)+"/members", nil)
+	if err != nil {
+		return false, err
+	}
+	response, _ := result.(map[string]any)
+	members, _ := response["chunk"].([]any)
+	for _, member := range members {
+		if event, _ := member.(map[string]any); event["state_key"] == ghostID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func TestLoopPreventionGhostSender(t *testing.T) {
+	env, bridged := newEchoChannel(t)
+	ghost := harness.GhostUserID(bridged.MattermostUser.Id)
+	// /matrix map already joined the ghost; its event for this post proves it's registered and in
+	// the room before the test impersonates it.
+	postAndAwaitGhostEvent(t, env, bridged, "ghost setup "+model.NewId())
+
+	message := "impersonated ghost " + model.NewId()
+	eventID := sendAsGhost(t, env, bridged.RoomID, ghost, map[string]any{"msgtype": "m.text", "body": message})
+	env.Synapse.WaitForRoomEvent(t, bridged.RoomID, func(e matrixtest.Event) bool {
+		return e.EventID == eventID && e.Sender == ghost
+	})
+	requireProcessedBefore(t, env, bridged)
+
+	harness.RequireNoPost(t, bridged.MattermostClient, bridged.Channel.Id, func(p *model.Post) bool {
+		return p.Message == message
+	}, echoWindow)
+}
+
+func TestLoopPreventionPostIDEcho(t *testing.T) {
+	env, bridged := newEchoChannel(t)
+	post, _ := postAndAwaitGhostEvent(t, env, bridged, "post ID echo target "+model.NewId())
+
+	// No mattermost_remote_id, so the remote-ID check can't mask the post-ID check.
+	message := "post ID echo " + model.NewId()
+	env.Synapse.SendEventAsUser(t, bridged.MatrixUser, bridged.RoomID, "m.room.message", map[string]any{
+		"msgtype":            "m.text",
+		"body":               message,
+		"mattermost_post_id": post.Id,
+	})
+	requireProcessedBefore(t, env, bridged)
+
+	harness.RequireNoPost(t, bridged.MattermostClient, bridged.Channel.Id, func(p *model.Post) bool {
+		return p.Message == message
+	}, echoWindow)
+}
+
+func TestLoopPreventionRemoteIDEcho(t *testing.T) {
+	env, bridged := newEchoChannel(t)
+
+	// No mattermost_post_id, so the post-ID check can't mask the remote-ID check.
+	message := "remote ID echo " + model.NewId()
+	env.Synapse.SendEventAsUser(t, bridged.MatrixUser, bridged.RoomID, "m.room.message", map[string]any{
+		"msgtype":              "m.text",
+		"body":                 message,
+		"mattermost_remote_id": env.RemoteID,
+	})
+	requireProcessedBefore(t, env, bridged)
+
+	harness.RequireNoPost(t, bridged.MattermostClient, bridged.Channel.Id, func(p *model.Post) bool {
+		return p.Message == message
+	}, echoWindow)
+}
+
+func TestLoopPreventionRemoteUserNotGhosted(t *testing.T) {
+	env, bridged := newEchoChannel(t)
+	message := "remote user check " + model.NewId()
+	env.Synapse.SendEventAsUser(t, bridged.MatrixUser, bridged.RoomID, "m.room.message", map[string]any{
+		"msgtype": "m.text",
+		"body":    message,
+	})
+	post := harness.WaitForPost(t, bridged.MattermostClient, bridged.Channel.Id, func(p *model.Post) bool {
+		return p.Message == message
+	})
+	remoteUser, _, err := env.Admin.GetUser(t.Context(), post.UserId, "")
+	require.NoError(t, err)
+	require.Equal(t, env.RemoteID, remoteUser.GetRemoteID())
+
+	// A profile update syncs a local user's ghost to Matrix. For a remote user core filters it
+	// before the plugin, so no ghost may appear.
+	name := "Loop " + model.NewId()
+	_, err = env.Synapse.DoAsUser(bridged.MatrixUser, http.MethodPut,
+		"/_matrix/client/v3/profile/"+url.PathEscape(bridged.MatrixUser.UserID)+"/displayname", map[string]any{"displayname": name})
+	require.NoError(t, err)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		user, _, err := env.Admin.GetUser(t.Context(), remoteUser.Id, "")
+		if assert.NoError(c, err) {
+			assert.Equal(c, name, user.Nickname)
+		}
+	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval, "profile change never reached user %s", remoteUser.Id)
+	// A channel sync after the profile change, so the window follows real outbound traffic.
+	postAndAwaitGhostEvent(t, env, bridged, "remote user sync "+model.NewId())
+
+	ghost := harness.GhostUserID(remoteUser.Id)
+	// Errors count as unknown here; the final check requires a real 404.
+	require.Never(t, func() bool {
+		exists, err := ghostExists(env, bridged, ghost)
+		return err == nil && exists
+	}, echoWindow, matrixtest.PollInterval, "ghost %s exists for remote user %s", ghost, remoteUser.Id)
+	exists, err := ghostExists(env, bridged, ghost)
+	require.NoError(t, err)
+	require.False(t, exists, "ghost %s exists for remote user %s", ghost, remoteUser.Id)
 }
