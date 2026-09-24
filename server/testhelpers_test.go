@@ -828,10 +828,9 @@ func generateUniqueRoomName(baseName string) string {
 	return fmt.Sprintf("%s %s", baseName, model.NewId()[:8])
 }
 
-// skipIfShort skips container-backed integration tests when running with
-// `go test -short`. CI runs `make test` without `-short`, so these suites
-// still execute there; we deliberately do NOT auto-detect Docker availability,
-// since that would let CI silently go green if Docker itself broke.
+// skipIfShort skips container-backed tests under `go test -short`; `make e2e`
+// runs them, locally and in CI. We deliberately don't auto-detect Docker, since
+// that would let CI silently go green if Docker itself broke.
 func skipIfShort(t *testing.T) {
 	t.Helper()
 	if testing.Short() {

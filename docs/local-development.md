@@ -12,6 +12,7 @@ Docker Compose.
 - [Multi-Server Testing (two homeservers)](#multi-server-testing-two-homeservers)
     - [Connecting a channel to a room on the second server](#connecting-a-channel-to-a-room-on-the-second-server)
 - [Stopping the Services](#stopping-the-services)
+- [Running tests](#running-tests)
 
 ## Prerequisites
 
@@ -192,4 +193,18 @@ To completely reset (remove all data):
 
 ```bash
 docker compose down -v
+```
+
+## Running tests
+
+- `make test` runs the unit tests only (`go test -short`) and doesn't need Docker.
+- `make e2e` needs Docker. It builds the plugin bundle and runs the whole Go test suite
+  without `-short`, including every container-backed suite. CI runs it on every PR.
+
+To run a single container-backed test, build the bundle once and point
+`E2E_PLUGIN_BUNDLE` at it:
+
+```bash
+make dist
+E2E_PLUGIN_BUNDLE=$PWD/dist/<bundle>.tar.gz go test ./... -run <TestName> -count=1
 ```
