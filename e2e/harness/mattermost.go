@@ -54,6 +54,8 @@ func startMattermost(ctx context.Context, nw *testcontainers.DockerNetwork) (*te
 			"MM_LOGSETTINGS_CONSOLELEVEL":                               "DEBUG",
 			"MM_CONNECTEDWORKSPACESSETTINGS_ENABLESHAREDCHANNELS":       "true",
 			"MM_CONNECTEDWORKSPACESSETTINGS_ENABLEREMOTECLUSTERSERVICE": "true",
+			// Every test shares one team, and each run adds users plus ghosts.
+			"MM_TEAMSETTINGS_MAXUSERSPERTEAM": "10000",
 		}),
 		testcontainers.WithExposedPorts(mattermostPort),
 		network.WithNetwork([]string{"mattermost"}, nw),

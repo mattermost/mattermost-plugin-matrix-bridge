@@ -792,6 +792,14 @@ rc_login:
   failed_attempts:
     per_second: 1000
     burst_count: 1000
+
+rc_joins:
+  local:
+    per_second: 1000
+    burst_count: 1000
+  remote:
+    per_second: 1000
+    burst_count: 1000
 `, config.ServerName)
 }
 
@@ -803,6 +811,7 @@ url: %s
 as_token: "%s"
 hs_token: "%s"
 sender_localpart: _mattermost_bot
+rate_limited: false
 
 namespaces:
   users:
