@@ -2,7 +2,9 @@ package e2e
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -10,9 +12,11 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/stretchr/testify/assert"
@@ -285,6 +289,222 @@ func solidPNG(t *testing.T, w, h int, c color.Color) []byte {
 	return buf.Bytes()
 }
 
+func TestMatrixToMattermostUserProvisioning(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+
+	user := harness.NewMatrixUser(t)
+	displayName := "Provisioned " + model.NewId()
+	setProfileField(t, user, "displayname", displayName)
+	require.NoError(t, env.Synapse.JoinRoomAsUser(t, user.UserID, bridged.RoomID), "join %s to room %s", user.UserID, bridged.RoomID)
+
+	firstEventID := sendText(t, user, bridged.RoomID, "first "+model.NewId())
+	first := waitForPostContaining(t, bridged, firstEventID, "first ")
+	secondEventID := sendText(t, user, bridged.RoomID, "second "+model.NewId())
+	second := waitForPostContaining(t, bridged, secondEventID, "second ")
+
+	provisioned := provisionedUser(t, user)
+	require.Equal(t, provisioned.Id, first.UserId, "author of post %s from event %s", first.Id, firstEventID)
+	require.Equal(t, provisioned.Id, second.UserId, "author of post %s from event %s", second.Id, secondEventID)
+	require.Equal(t, env.RemoteID, provisioned.GetRemoteID(), "remote ID of user %s", provisioned.Id)
+	require.Equal(t, displayName, provisioned.Nickname, "nickname of user %s", provisioned.Id)
+	firstName, lastName, _ := strings.Cut(displayName, " ")
+	require.Equal(t, firstName, provisioned.FirstName, "first name of user %s", provisioned.Id)
+	require.Equal(t, lastName, provisioned.LastName, "last name of user %s", provisioned.Id)
+
+	duplicates, _, err := env.Admin.GetUsersByUsernames(t.Context(), []string{provisioned.Username + "_1"})
+	require.NoError(t, err, "look up %s_1", provisioned.Username)
+	require.Empty(t, duplicates, "a second user was provisioned for %s", user.UserID)
+
+	t.Run("prefix change", func(t *testing.T) {
+		original := pluginServer(t).UsernamePrefix
+		prefix := "e2e" + model.NewId()[:6]
+		// Registered before the PATCH: a request that times out may still have been applied.
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := patchUsernamePrefix(ctx, env, original); err != nil {
+				t.Errorf("restore username prefix %q: %v", original, err)
+			}
+		})
+		require.NoError(t, patchUsernamePrefix(t.Context(), env, prefix), "set username prefix %q", prefix)
+
+		fresh := harness.NewMatrixUser(t)
+		require.NoError(t, env.Synapse.JoinRoomAsUser(t, fresh.UserID, bridged.RoomID), "join %s to room %s", fresh.UserID, bridged.RoomID)
+		eventID := sendText(t, fresh, bridged.RoomID, "prefixed "+model.NewId())
+		post := waitForPostContaining(t, bridged, eventID, "prefixed ")
+		prefixed := waitForUsername(t, prefix+":"+fresh.Username)
+		require.Equal(t, prefixed.Id, post.UserId, "author of post %s from event %s", post.Id, eventID)
+	})
+}
+
+// kickBanBug: member events are keyed by Sender instead of state_key, so a kick or ban removes the
+// kicker instead of the target (a no-op if the kicker isn't provisioned), and fails on every retry
+// when a provisioned kicker isn't a channel member.
+const kickBanBug = "bug: member kick/ban uses Sender instead of state_key; a failed txn stalls AS delivery"
+
+func TestMatrixToMattermostMembership(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	var member *matrixtest.User
+	var memberID string
+
+	t.Run("join new user", func(t *testing.T) {
+		member = joinBridgedRoom(t, bridged)
+		memberID = provisionedUser(t, member).Id
+	})
+
+	t.Run("leave", func(t *testing.T) {
+		require.NotEmpty(t, memberID, "join subtest failed")
+		matrixRoomAction(t, member, bridged.RoomID, "leave", map[string]any{})
+		requireNotChannelMember(t, bridged.Channel.Id, memberID)
+	})
+
+	t.Run("join provisioned user", func(t *testing.T) {
+		require.NotEmpty(t, memberID, "join subtest failed")
+		require.NoError(t, env.Synapse.JoinRoomAsUser(t, member.UserID, bridged.RoomID), "rejoin %s to room %s", member.UserID, bridged.RoomID)
+		requireChannelMember(t, bridged.Channel.Id, memberID)
+	})
+
+	for _, action := range []string{"kick", "ban"} {
+		t.Run(action, func(t *testing.T) {
+			t.Skip(kickBanBug)
+
+			// The room creator has power level 100, so it can kick and ban. It must be a channel
+			// member so the last assertion proves the kicker is kept, and because the plugin fails
+			// every retry when removing a non-member kicker, which stalls Synapse delivery for
+			// later tests.
+			creator := bridged.MatrixUser
+			body := "creator " + model.NewId()
+			eventID := sendText(t, creator, bridged.RoomID, body)
+			waitForPostContaining(t, bridged, eventID, body)
+			creatorID := provisionedUser(t, creator).Id
+			_, _, err := env.Admin.AddChannelMember(t.Context(), bridged.Channel.Id, creatorID)
+			require.NoError(t, err, "add creator %s to channel %s", creatorID, bridged.Channel.Id)
+
+			target := joinBridgedRoom(t, bridged)
+			targetID := provisionedUser(t, target).Id
+			matrixRoomAction(t, creator, bridged.RoomID, action, map[string]any{"user_id": target.UserID})
+			requireNotChannelMember(t, bridged.Channel.Id, targetID)
+			requireChannelMember(t, bridged.Channel.Id, creatorID)
+		})
+	}
+}
+
+func TestMatrixToMattermostProfileChange(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	user := joinBridgedRoom(t, bridged)
+	userID := provisionedUser(t, user).Id
+
+	t.Run("displayname", func(t *testing.T) {
+		displayName := "Renamed " + model.NewId()
+		setProfileField(t, user, "displayname", displayName)
+		firstName, lastName, _ := strings.Cut(displayName, " ")
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			got, _, err := env.Admin.GetUser(t.Context(), userID, "")
+			if assert.NoError(c, err) {
+				assert.Equal(c, displayName, got.Nickname)
+				assert.Equal(c, firstName, got.FirstName)
+				assert.Equal(c, lastName, got.LastName)
+			}
+		}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval,
+			"user %s never took displayname %q of %s in room %s", userID, displayName, user.UserID, bridged.RoomID)
+	})
+
+	t.Run("avatar", func(t *testing.T) {
+		avatarColor := color.RGBA{R: 17, G: 99, B: 201, A: 255}
+		defaultCenter, err := profileImageCenter(t, userID)
+		require.NoError(t, err)
+		require.NotEqual(t, avatarColor, defaultCenter, "default profile image of user %s", userID)
+		before, _, err := env.Admin.GetUser(t.Context(), userID, "")
+		require.NoError(t, err, "get user %s", userID)
+
+		mxc := harness.UploadMediaAsUser(t, user, "avatar-"+model.NewId()+".png", "image/png", solidPNG(t, 64, 64, avatarColor))
+		setProfileField(t, user, "avatar_url", mxc)
+
+		// Mattermost re-encodes profile images to a 128x128 PNG, so compare pixels, not bytes.
+		// It writes the image before LastPictureUpdate, so both are polled together.
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			center, err := profileImageCenter(t, userID)
+			if assert.NoError(c, err) {
+				assert.Equal(c, avatarColor, center)
+			}
+			after, _, err := env.Admin.GetUser(t.Context(), userID, "")
+			if assert.NoError(c, err) {
+				assert.Greater(c, after.LastPictureUpdate, before.LastPictureUpdate)
+			}
+		}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval,
+			"user %s never took avatar %s of %s in room %s", userID, mxc, user.UserID, bridged.RoomID)
+	})
+}
+
+func setProfileField(t *testing.T, user *matrixtest.User, field, value string) {
+	t.Helper()
+	path := "/_matrix/client/v3/profile/" + url.PathEscape(user.UserID) + "/" + field
+	_, err := harness.Shared(t).Synapse.DoAsUser(user, http.MethodPut, path, map[string]any{field: value})
+	require.NoError(t, err, "set %s of %s", field, user.UserID)
+}
+
+func matrixRoomAction(t *testing.T, user *matrixtest.User, roomID, action string, body map[string]any) {
+	t.Helper()
+	path := "/_matrix/client/v3/rooms/" + url.PathEscape(roomID) + "/" + action
+	_, err := harness.Shared(t).Synapse.DoAsUser(user, http.MethodPost, path, body)
+	require.NoError(t, err, "%s in room %s as %s: %v", action, roomID, user.UserID, body)
+}
+
+func requireNotChannelMember(t *testing.T, channelID, userID string) {
+	t.Helper()
+	env := harness.Shared(t)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, resp, err := env.Admin.GetChannelMember(t.Context(), channelID, userID, "")
+		if assert.Error(c, err) && assert.NotNil(c, resp) {
+			assert.Equal(c, http.StatusNotFound, resp.StatusCode)
+		}
+	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval, "user %s stayed a member of channel %s", userID, channelID)
+}
+
+func profileImageCenter(t *testing.T, userID string) (color.RGBA, error) {
+	data, _, err := harness.Shared(t).Admin.GetProfileImage(t.Context(), userID, "")
+	if err != nil {
+		return color.RGBA{}, fmt.Errorf("get profile image of user %s: %w", userID, err)
+	}
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return color.RGBA{}, fmt.Errorf("decode profile image of user %s: %w", userID, err)
+	}
+	if want := image.Rect(0, 0, 128, 128); img.Bounds() != want {
+		return color.RGBA{}, fmt.Errorf("profile image of user %s is %v, want %v", userID, img.Bounds(), want)
+	}
+	return color.RGBAModel.Convert(img.At(64, 64)).(color.RGBA), nil
+}
+
+// patchUsernamePrefix is built by hand because cleanup can't use harness.PluginRequest, which
+// sends with t.Context().
+func patchUsernamePrefix(ctx context.Context, env *harness.Env, prefix string) error {
+	body, err := json.Marshal(map[string]string{"username_prefix": prefix})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch,
+		env.Admin.URL+"/plugins/"+harness.PluginID+"/api/v1/servers/"+url.PathEscape(env.ServerID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set(model.HeaderAuth, model.HeaderBearer+" "+env.Admin.AuthToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := env.Admin.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status %d: %s", resp.StatusCode, respBody)
+	}
+	return nil
+}
+
 func sendText(t *testing.T, user *matrixtest.User, roomID, body string) string {
 	t.Helper()
 	return sendMessage(t, user, roomID, map[string]any{"msgtype": "m.text", "body": body})
@@ -359,8 +579,9 @@ func requireChannelMember(t *testing.T, channelID, userID string) {
 
 // serverView is the part of GET /api/v1/servers that these tests read.
 type serverView struct {
-	ServerID    string `json:"server_id"`
-	EventDomain string `json:"event_domain"`
+	ServerID       string `json:"server_id"`
+	EventDomain    string `json:"event_domain"`
+	UsernamePrefix string `json:"username_prefix"`
 }
 
 func pluginServer(t *testing.T) serverView {
