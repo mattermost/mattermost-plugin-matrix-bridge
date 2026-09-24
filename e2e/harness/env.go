@@ -51,6 +51,10 @@ type Env struct {
 	ServerID   string
 	ServerName string
 	RemoteID   string
+
+	// registered is the server view returned when Start registered the server; nil with
+	// WithoutServer.
+	registered map[string]any
 }
 
 type options struct {
@@ -227,7 +231,7 @@ func (e *Env) registerServer(ctx context.Context) error {
 	var status int
 	var respBody []byte
 	err := poll(ctx, 30*time.Second, func(ctx context.Context) (bool, error) {
-		resp, err := pluginRequest(ctx, e.Admin, http.MethodPost, "/api/v1/servers", body)
+		resp, err := PluginRequestContext(ctx, e.Admin, http.MethodPost, "/api/v1/servers", body)
 		if err != nil {
 			return false, err
 		}
@@ -249,23 +253,22 @@ func (e *Env) registerServer(ctx context.Context) error {
 	}
 
 	var created struct {
-		Server struct {
-			ServerID   string `json:"server_id"`
-			ServerName string `json:"server_name"`
-			RemoteID   string `json:"remote_id"`
-		} `json:"server"`
+		Server map[string]any `json:"server"`
 	}
 	if err := json.Unmarshal(respBody, &created); err != nil {
 		return fmt.Errorf("decode register response: %w", err)
 	}
-	if created.Server.ServerName != ServerName {
-		return fmt.Errorf("discovered server_name %q, want %q", created.Server.ServerName, ServerName)
+	serverName, _ := created.Server["server_name"].(string)
+	if serverName != ServerName {
+		return fmt.Errorf("discovered server_name %q, want %q", serverName, ServerName)
 	}
-	if created.Server.RemoteID == "" {
+	remoteID, _ := created.Server["remote_id"].(string)
+	if remoteID == "" {
 		return errors.New("registered server has no remote_id")
 	}
-	e.ServerID = created.Server.ServerID
-	e.RemoteID = created.Server.RemoteID
+	e.ServerID, _ = created.Server["server_id"].(string)
+	e.RemoteID = remoteID
+	e.registered = created.Server
 	return nil
 }
 
