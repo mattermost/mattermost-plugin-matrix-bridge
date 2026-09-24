@@ -41,16 +41,17 @@ Three structural limits apply to the `server/` suites:
 | `server/plugin_integration_test.go` | `PluginIntegrationTestSuite` | 1 |
 | `server/dm_room_creation_test.go` | `DMRoomCreationTestSuite` | 1 |
 | `server/user_remote_detection_test.go` | `UserRemoteDetectionIntegrationTestSuite` | 1 |
-| `server/thread_mapping_test.go` | `ThreadMappingIntegrationTestSuite` | 1 |
 | `server/matrix/test/client_test.go` | `MatrixClientTestSuite` (Matrix client only, no plugin) | 1 |
 | `server/multi_server_integration_test.go` | `MultiServerIntegrationTestSuite` (4 tests) | 2 |
 | `e2e/smoke_test.go` | `TestSmokeMattermostToMatrix`, `TestSmokeMatrixToMattermost` (real Mattermost) | 1 |
+| `e2e/matrix_to_mattermost_test.go` | `TestMatrixToMattermost*` (real Mattermost; most events sent by real Synapse users) | 1 |
 
 ## Legend
 
 - ✅ Covered: the plugin's code path runs against real Synapse and the outcome is asserted.
 - ⚠️ Partial: exercised, but the outcome isn't asserted, the test re-implements the
-  production logic, or a key step is bypassed (see notes).
+  production logic, a key step is bypassed, or part or all of the row is skipped on a known
+  plugin bug (see notes).
 - ❌ Not covered e2e. "Client only" means the underlying `matrix.Client` call is tested in
   `client_test.go`, but the plugin logic around it is not.
 - — Not applicable.
@@ -83,21 +84,21 @@ Three structural limits apply to the `server/` suites:
 
 | Feature | E2E single server | E2E multi server | Notes |
 | --- | --- | --- | --- |
-| Text message → post | ✅ | ✅ | Single: `TestSmokeMatrixToMattermost`, delivered by Synapse to a real Mattermost. Multi: `TestInboundRoutingIsolatedPerServer`, with a hand-built transaction through `ServeHTTP` |
-| HTML → Markdown conversion | ❌ | ❌ | Unit-only (`TestExtractMatrixMessageContent`) |
-| Matrix mentions → @username | ❌ | ❌ | Unit-only |
-| Replies / threads (`m.in_reply_to`, `m.thread`) | ⚠️ | ❌ | `ThreadMappingIntegrationTestSuite` only calls `getThreadRootFromPostID` against mocked posts; no event is processed |
-| Edit (`m.replace`) | ❌ | ❌ | No test at any level |
-| Reaction add | ❌ | ❌ | No test at any level |
-| Reaction removal (redaction) | ❌ | ❌ | No test at any level |
-| Message deletion (redaction) | ❌ | ❌ | No test at any level |
-| Files / images / video / audio | ❌ | ❌ | No test at any level |
-| Matrix user → Mattermost user provisioning | ⚠️ | ⚠️ | Single: `TestSmokeMatrixToMattermost` asserts the author is a remote user of the server's remote; the username prefix is only checked through `generateMattermostUsername`. Multi: `CreateUser` is mocked, and the per-server prefix or remote ID isn't asserted |
-| Member join / leave / ban → channel membership | ❌ | ❌ | No test at any level |
-| Profile change (displayname / avatar) → Mattermost user | ❌ | ❌ | No test at any level |
-| Matrix-initiated DM → Mattermost DM | ❌ | ❌ | Unit-only (`TestHandleMatrixMemberDM_*`) |
-| Webhook auth (per-server `hs_token`) | ⚠️ | ✅ | Single: `TestSmokeMatrixToMattermost` covers only the accepted token. Multi: `TestInboundRoutingIsolatedPerServer` |
-| Transaction dedupe / retry | ❌ | ❌ | Unit-only (`TestHandleMatrixTransaction`, including same txn ID from two servers) |
+| Text message → post | ✅ | ✅ | Single: `TestMatrixToMattermostTextMessage` (remote author, `from_matrix` and event ID props) and `TestSmokeMatrixToMattermost`. Multi: `TestInboundRoutingIsolatedPerServer`, with a hand-built transaction through `ServeHTTP` |
+| HTML → Markdown conversion | ✅ | ❌ | `TestMatrixToMattermostHTMLFormatting` |
+| Matrix mentions → @username | ✅ | ❌ | `TestMatrixToMattermostMentions`: pills to a ghost and to a provisioned Matrix user |
+| Replies / threads (`m.in_reply_to`, `m.thread`) | ✅ | ❌ | `TestMatrixToMattermostReplies`. An `m.in_reply_to` reply without `m.thread` becomes a thread reply under the parent's root post |
+| Edit (`m.replace`) | ✅ | ❌ | `TestMatrixToMattermostEdit` |
+| Reaction add | ✅ | ❌ | `TestMatrixToMattermostReactions`, on Matrix- and Mattermost-originated posts |
+| Reaction removal (redaction) | ✅ | ❌ | `TestMatrixToMattermostReactions` |
+| Message deletion (redaction) | ✅ | ❌ | `TestMatrixToMattermostMessageDeletion` |
+| Files / images / video / audio | ✅ | ❌ | `TestMatrixToMattermostFiles`: bytes, name and mimetype of `m.image`, `m.file`, `m.video` and `m.audio` |
+| Matrix user → Mattermost user provisioning | ✅ | ⚠️ | Single: `TestMatrixToMattermostUserProvisioning`: one remote user, reused, named from the prefix and profile, and a `username_prefix` change applies to new users. Multi: `CreateUser` is mocked, and the per-server prefix or remote ID isn't asserted |
+| Member join / leave / ban → channel membership | ⚠️ | ❌ | `TestMatrixToMattermostMembership`: join, leave and rejoin pass. Kick and ban are skipped on a plugin bug: member events use `Sender` instead of `state_key` |
+| Profile change (displayname / avatar) → Mattermost user | ✅ | ❌ | `TestMatrixToMattermostProfileChange` |
+| Matrix-initiated DM → Mattermost DM | ⚠️ | ❌ | `TestMatrixToMattermostDirectMessage` is skipped on a plugin bug: Mattermost refuses a DM with a remote user. In a manual run with Mattermost's `EnableSharedChannelsDMs` flag, the DM was created but its messages never arrived (the ghost never joins the room). Unit: `TestHandleMatrixMemberDM_*` |
+| Webhook auth (per-server `hs_token`) | ✅ | ✅ | Single: `TestMatrixToMattermostWebhookAuth` (missing or wrong token gets `401`, no post); Synapse's own deliveries prove the accepted token. Multi: `TestInboundRoutingIsolatedPerServer` |
+| Transaction dedupe / retry | ✅ | ❌ | Dedupe: `TestMatrixToMattermostTransactionDedupe`. Retry (`503` without recording the txn) stays unit-only (`TestHandleMatrixTransaction`, including same txn ID from two servers) |
 
 ### Cross-cutting
 
@@ -130,16 +131,15 @@ Out of 47 rows:
 
 | | ✅ | ⚠️ | ❌ | — |
 | --- | --- | --- | --- | --- |
-| Single server | 11 | 8 | 26 | 2 |
+| Single server | 23 | 7 | 15 | 2 |
 | Multi server | 6 | 3 | 37 | 1 |
 
 - **Mattermost → Matrix on one server is the best-covered area.** Messages, markdown,
   mentions, threads, edits and reaction-add all have real assertions. Deletions, reaction
   removal, files and profile sync do not.
-- **Matrix → Mattermost is barely covered.** Apart from one plain-text message in each of
-  the multi-server suite and the `e2e/` smoke test, no inbound event is ever processed. Edits,
-  reactions, redactions, files and membership have **no tests at any level**, not even unit
-  tests.
+- **Matrix → Mattermost on one server is covered end to end.** Real Synapse users send every
+  inbound event type to a real Mattermost. Kick/ban and Matrix-initiated DMs are skipped on
+  plugin bugs, and retry after a failed transaction is unit-only.
 - **Multi-server coverage is limited to routing and plain text messages.** The 4 multi-server
   tests prove that inbound/outbound text messages and webhook auth are isolated per server,
   that a channel can't be mapped to two servers, and the remove/re-add lifecycle (on one
@@ -147,17 +147,15 @@ Out of 47 rows:
   profile) are checked for per-server isolation.
 - **Some existing tests are weaker than their names suggest:**
   `UserRemoteDetectionIntegrationTestSuite` mostly asserts on hand-built structs,
-  `ThreadMappingIntegrationTestSuite` doesn't need the container,
   `testSyncChannelMembersToMatrixRoom` re-implements the production loop, and the DM tests
   skip checking that the message arrived.
 
 ## Suggested next steps (by priority)
 
-1. **Inbound single-server suite.** Cover Matrix → Mattermost edit, reaction add/remove,
-   message redaction, file/image, reply/thread, mentions, HTML formatting, and member
-   join/leave/profile change. Ideally, events are produced by real Synapse users (the
-   container already supports `CreateUser` / `JoinRoomAsUser`) and read back from the room,
-   not hand-built.
+1. **Fix the inbound bugs the e2e suite skips.** Member events should use `state_key`, so a
+   kick or ban removes the target instead of the kicker. Matrix-initiated DMs need a direct
+   channel Mattermost accepts with a remote user, and the ghost has to join the room so its
+   messages are delivered.
 2. **Outbound gaps on a single server.** Post deletion, reaction removal, file attachments
    through `OnSharedChannelsAttachmentSyncMsg` + `SyncPostToMatrix`, display name and avatar
    sync, and DM message delivery.

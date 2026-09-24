@@ -224,3 +224,6 @@ starts once per package run:
   another test created.
 - Wait with `harness.WaitForPost` / `RequireNoPost` and the Synapse container's
   `WaitForRoomEvent` / `RequireNoRoomEvent` instead of sleeping.
+- If a plugin bug fails an inbound transaction, Synapse retries it forever and delivers nothing
+  else to the plugin, which breaks every later test. Put `t.Skip("bug: …")` before the step
+  that triggers the failing transaction.
