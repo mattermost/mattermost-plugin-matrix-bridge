@@ -32,3 +32,14 @@ export async function openServerMenuItem(row: Locator, item: string): Promise<vo
 export function dialogButton(dialog: Locator, text: string): Locator {
     return dialog.getByRole('button').filter({hasText: new RegExp(`^${text}$`)});
 }
+
+// expectAllChecksOk waits for a Test dialog's results and expects exactly the four diagnostic checks,
+// in order, all ok.
+export async function expectAllChecksOk(dialog: Locator): Promise<void> {
+    const checks = dialog.getByRole('listitem');
+    await expect(checks).toHaveText([/Server URL/, /Matrix Client/, /Connection/, /Application Service/]);
+    for (const check of await checks.all()) {
+        await expect(check).toContainText('✅');
+        await expect(check).not.toContainText('❌');
+    }
+}

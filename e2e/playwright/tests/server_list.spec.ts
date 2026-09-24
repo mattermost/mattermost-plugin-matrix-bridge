@@ -3,7 +3,7 @@ import {expect, test} from '../support/fixtures';
 import {createChannel, executeCommand} from '../support/mattermost';
 
 test('the server row shows its name, ID, URL and live health', async ({page, env}) => {
-    // The pill reads Active before health arrives too, so the health response is checked directly.
+    // The pill also reads Active while health is unknown, so the health response is checked directly.
     const health = page.waitForResponse((resp) => resp.url().endsWith('/api/v1/servers/health'));
     await openMatrixSection(page, env);
     expect((await (await health).json()).health[env.server_id]).toBe('healthy');

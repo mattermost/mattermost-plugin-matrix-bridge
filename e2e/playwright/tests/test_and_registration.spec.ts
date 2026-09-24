@@ -1,18 +1,7 @@
 import {readFile} from 'node:fs/promises';
 
-import {type Locator} from '@playwright/test';
-
-import {dialogButton, openMatrixSection, openServerMenuItem, serverRow} from '../support/console';
+import {dialogButton, expectAllChecksOk, openMatrixSection, openServerMenuItem, serverRow} from '../support/console';
 import {expect, test} from '../support/fixtures';
-
-async function expectAllChecksOk(dialog: Locator): Promise<void> {
-    const checks = dialog.getByRole('listitem');
-    await expect(checks).toHaveText([/Server URL/, /Matrix Client/, /Connection/, /Application Service/]);
-    for (const check of await checks.all()) {
-        await expect(check).toContainText('✅');
-        await expect(check).not.toContainText('❌');
-    }
-}
 
 test('Test lists every diagnostic check as ok', async ({page, env}) => {
     await openMatrixSection(page, env);

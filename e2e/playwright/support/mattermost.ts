@@ -8,7 +8,7 @@ export interface Channel {
     display_name: string;
 }
 
-function uniqueSuffix(): string {
+export function uniqueSuffix(): string {
     return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
@@ -50,4 +50,17 @@ export async function executeCommand(api: Api, channelId: string, command: strin
     const body = await resp.text();
     expect(resp.ok(), `${command}: status ${resp.status()}: ${body}`).toBe(true);
     return JSON.parse(body).text ?? '';
+}
+
+// Server is a plugin GET /servers entry; it carries has_as_token/has_hs_token, never the tokens.
+export interface Server {
+    server_id: string;
+    server_name: string;
+    [field: string]: unknown;
+}
+
+export async function listServers(api: Api): Promise<Server[]> {
+    const resp = await api.pluginRequest('GET', '/servers');
+    expect(resp.ok(), `list servers: status ${resp.status()}`).toBe(true);
+    return (await resp.json()).servers;
 }
