@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/e2e/harness"
 	matrixtest "github.com/mattermost/mattermost-plugin-matrix-bridge/testcontainers/matrix"
@@ -104,12 +106,18 @@ func diagnose(t *testing.T, client *model.Client4, serverID string) harness.Diag
 	return diag
 }
 
+// checkStatuses lists the diagnostics as "key=status" in the order the plugin ran them.
+func checkStatuses(diag harness.Diagnostics) []string {
+	statuses := make([]string, 0, len(diag.Checks))
+	for _, check := range diag.Checks {
+		statuses = append(statuses, check.Key+"="+check.Status)
+	}
+	return statuses
+}
+
 func requireAllChecksOK(t *testing.T, diag harness.Diagnostics) {
 	t.Helper()
-	require.NotEmpty(t, diag.Checks)
-	for _, check := range diag.Checks {
-		require.Equal(t, "ok", check.Status, "check %s: %s", check.Key, check.Detail)
-	}
+	require.Equal(t, []string{"registry=ok", "client=ok", "connection=ok", "appservice=ok"}, checkStatuses(diag), "%+v", diag.Checks)
 }
 
 // transactionStatus returns the webhook's status for an empty transaction sent with token.
@@ -500,4 +508,156 @@ func requireShared(t *testing.T, env *harness.Env, channelID string, want bool) 
 			assert.Equal(c, want, shared, "channel %s shared with remote %s", channelID, env.RemoteID)
 		}
 	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval)
+}
+
+func serverHealth(t *testing.T, client *model.Client4) map[string]string {
+	t.Helper()
+	var resp struct {
+		Health map[string]string `json:"health"`
+	}
+	decodeJSON(t, requireStatus(t, client, http.MethodGet, serversPath+"/health", nil, http.StatusOK), &resp)
+	return resp.Health
+}
+
+func TestServerManagementConnectionTest(t *testing.T) {
+	env := harness.Shared(t)
+	serverPath := serversPath + "/" + env.ServerID
+	testCommands := []string{"/matrix test", "/matrix server test", "/matrix server test " + env.ServerID}
+	successLines := []string{
+		"✅ **Server URL:** " + env.Synapse.InternalURL,
+		"✅ **Matrix Client:** Initialized",
+		"✅ **Connection:** Successfully connected",
+		"✅ **Application Service:** Permissions verified",
+	}
+	channel := harness.NewBridgedChannel(t).Channel
+
+	requireHealthy := func(t *testing.T) {
+		t.Helper()
+		diag := diagnose(t, env.Admin, env.ServerID)
+		requireAllChecksOK(t, diag)
+		require.NotNil(t, diag.ServerInfo)
+		require.Equal(t, "healthy", serverHealth(t, env.Admin)[env.ServerID])
+	}
+
+	t.Run("Healthy", func(t *testing.T) {
+		requireHealthy(t)
+		for _, command := range testCommands {
+			reply := runCommand(t, env.Admin, channel.Id, command)
+			for _, line := range successLines {
+				require.Contains(t, reply, line, "%q reply", command)
+			}
+			require.NotContains(t, reply, "❌", "%q reply", command)
+		}
+	})
+
+	t.Run("WrongASToken", func(t *testing.T) {
+		preserveRegistry(t, env)
+		wrong := "e2e-wrong-" + model.NewId()
+		data := requireStatus(t, env.Admin, http.MethodPatch, serverPath, map[string]string{"as_token": wrong}, http.StatusOK)
+		requireNoTokens(t, string(data), wrong, harness.ASToken, harness.HSToken)
+
+		diag := diagnose(t, env.Admin, env.ServerID)
+		require.Equal(t, []string{"registry=ok", "client=ok", "connection=fail", "appservice=skip"}, checkStatuses(diag), "%+v", diag.Checks)
+		require.Contains(t, diag.Checks[2].Detail, "401")
+		require.Equal(t, "unhealthy", serverHealth(t, env.Admin)[env.ServerID])
+
+		for _, command := range testCommands {
+			reply := runCommand(t, env.Admin, channel.Id, command)
+			require.Contains(t, reply, "❌ **Connection:**", "%q reply", command)
+			require.NotContains(t, reply, "✅ **Application Service:**", "%q reply", command)
+		}
+
+		requireStatus(t, env.Admin, http.MethodPatch, serverPath, map[string]string{"as_token": harness.ASToken}, http.StatusOK)
+		requireHealthy(t)
+	})
+
+	t.Run("SyncAfterRestore", func(t *testing.T) {
+		requireSyncBothWays(t, env, harness.NewBridgedChannel(t), matrixtest.DefaultWaitTimeout)
+	})
+}
+
+// registration is the Application Service registration file the plugin renders for Synapse.
+type registration struct {
+	ID              string `yaml:"id"`
+	URL             string `yaml:"url"`
+	ASToken         string `yaml:"as_token"`
+	HSToken         string `yaml:"hs_token"`
+	SenderLocalpart string `yaml:"sender_localpart"`
+	RateLimited     *bool  `yaml:"rate_limited"`
+	Namespaces      struct {
+		Users   []namespace `yaml:"users"`
+		Aliases []namespace `yaml:"aliases"`
+	} `yaml:"namespaces"`
+}
+
+type namespace struct {
+	Exclusive bool
+	Regex     string
+}
+
+// TestServerManagementRegistrationYAML compares the tokens and the whole YAML with require.True,
+// so a failure never prints either.
+func TestServerManagementRegistrationYAML(t *testing.T) {
+	env := harness.Shared(t)
+	b := harness.NewBridgedChannel(t)
+	var content string
+
+	require.True(t, t.Run("REST", func(t *testing.T) {
+		ctx, cancel := helperContext()
+		defer cancel()
+		resp, err := harness.PluginRequestContext(ctx, env.Admin, http.MethodGet, serversPath+"/"+env.ServerID+"/registration", nil)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+
+		var file struct {
+			Filename string `json:"filename"`
+			Content  string `json:"content"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&file), "decode registration response")
+		require.Equal(t, "mattermost-bridge-"+env.ServerID+".yaml", file.Filename)
+		content = file.Content
+
+		var reg registration
+		require.NoError(t, yaml.Unmarshal([]byte(content), &reg), "parse registration YAML")
+
+		config, _, err := env.Admin.GetConfig(t.Context())
+		require.NoError(t, err)
+		// Synapse appends /_matrix/app/v1/... itself, so the URL is the plugin's base path.
+		require.Equal(t, *config.ServiceSettings.SiteURL+"/plugins/"+harness.PluginID, reg.URL)
+		require.True(t, reg.ASToken == harness.ASToken, "as_token does not match the registered token")
+		require.True(t, reg.HSToken == harness.HSToken, "hs_token does not match the registered token")
+		require.Equal(t, "mattermost-bridge-"+env.ServerID, reg.ID)
+		require.Equal(t, "_mattermost_bot", reg.SenderLocalpart)
+		require.NotNil(t, reg.RateLimited, "rate_limited is not set")
+		require.False(t, *reg.RateLimited)
+
+		require.Len(t, reg.Namespaces.Users, 1)
+		require.True(t, reg.Namespaces.Users[0].Exclusive)
+		users := regexp.MustCompile("^(?:" + reg.Namespaces.Users[0].Regex + ")$")
+		require.True(t, users.MatchString(harness.GhostUserID(model.NewId())))
+		require.False(t, users.MatchString("@someone:"+harness.ServerName))
+
+		require.Len(t, reg.Namespaces.Aliases, 1)
+		aliases := regexp.MustCompile("^(?:" + reg.Namespaces.Aliases[0].Regex + ")$")
+		require.True(t, aliases.MatchString("#mattermost-bridge-x:"+harness.ServerName))
+	}))
+
+	// The harness gives Synapse SiteURL + "/plugins/" + PluginID as the Application Service URL,
+	// so an inbound message proves the rendered URL is the one Synapse delivers to.
+	t.Run("InboundThroughRenderedURL", func(t *testing.T) {
+		waitInbound(t, b, sendFromMatrix(t, env, b, "registration"), matrixtest.DefaultWaitTimeout)
+	})
+
+	t.Run("Slash", func(t *testing.T) {
+		for _, command := range []string{"/matrix server registration", "/matrix server registration " + env.ServerID} {
+			reply := runCommand(t, env.Admin, b.Channel.Id, command)
+			_, rest, found := strings.Cut(reply, "```yaml\n")
+			require.True(t, found, "%q reply has no yaml code block", command)
+			yamlBlock, _, found := strings.Cut(rest, "```")
+			require.True(t, found, "%q reply has an unterminated yaml code block", command)
+			require.True(t, yamlBlock == content, "%q YAML differs from the REST registration", command)
+		}
+	})
 }
