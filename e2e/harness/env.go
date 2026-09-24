@@ -110,7 +110,10 @@ func (e *Env) start(ctx context.Context, bundle string) error {
 	if err := e.waitForPluginRunning(ctx); err != nil {
 		return err
 	}
-	return e.registerServer(ctx)
+	if err := e.registerServer(ctx); err != nil {
+		return err
+	}
+	return e.waitForRemoteOnline(ctx)
 }
 
 // Terminate stops Mattermost, Postgres, then Synapse, then removes the network.
@@ -242,6 +245,25 @@ func (e *Env) registerServer(ctx context.Context) error {
 	}
 	e.ServerID = created.Server.ServerID
 	e.RemoteID = created.Server.RemoteID
+	return nil
+}
+
+// waitForRemoteOnline waits for Mattermost's first successful ping of the plugin remote. Until
+// then Mattermost holds channel invites to it, so newly bridged channels would not sync.
+func (e *Env) waitForRemoteOnline(ctx context.Context) error {
+	lastState := "no response yet"
+	err := poll(ctx, 2*time.Minute, func(ctx context.Context) (bool, error) {
+		remote, _, err := e.Admin.GetRemoteCluster(ctx, e.RemoteID)
+		if err != nil {
+			lastState = "request failed: " + err.Error()
+			return false, nil
+		}
+		lastState = fmt.Sprintf("last ping at %d", remote.LastPingAt)
+		return remote.IsOnline(), nil
+	})
+	if err != nil {
+		return fmt.Errorf("plugin remote %s never came online (%s): %w", e.RemoteID, lastState, err)
+	}
 	return nil
 }
 
