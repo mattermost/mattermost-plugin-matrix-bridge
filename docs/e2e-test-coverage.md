@@ -40,11 +40,12 @@ Three structural limits apply to the `server/` suites:
 | `server/matrix_mentions_integration_test.go` | `TestMatrixMentionProcessing`, `TestMatrixMentionEdgeCases` | 1 |
 | `server/plugin_integration_test.go` | `PluginIntegrationTestSuite` | 1 |
 | `server/dm_room_creation_test.go` | `DMRoomCreationTestSuite` | 1 |
-| `server/user_remote_detection_test.go` | `UserRemoteDetectionIntegrationTestSuite` | 1 |
+| `server/user_remote_detection_test.go` | `UserRemoteDetectionIntegrationTestSuite` (`TestConfigurableUsernamePrefix` only) | 1 |
 | `server/thread_mapping_test.go` | `ThreadMappingIntegrationTestSuite` | 1 |
 | `server/matrix/test/client_test.go` | `MatrixClientTestSuite` (Matrix client only, no plugin) | 1 |
 | `server/multi_server_integration_test.go` | `MultiServerIntegrationTestSuite` (4 tests) | 2 |
 | `e2e/smoke_test.go` | `TestSmokeMattermostToMatrix`, `TestSmokeMatrixToMattermost` (real Mattermost) | 1 |
+| `e2e/cross_cutting_test.go` | `TestLoopPrevention*` (real Mattermost) | 1 |
 
 ## Legend
 
@@ -71,7 +72,7 @@ Three structural limits apply to the `server/` suites:
 | Reaction removal | ❌ | ❌ | `removeReactionFromMatrix` has no test |
 | File attachments | ❌ | ❌ | Client only (`TestMatrixClientWithFiles`). The hook upload + pending-file attach flow (keyed per server) is untested |
 | File attachment deletion | ❌ | ❌ | `deleteFileFromMatrix` has no test |
-| Ghost user creation | ✅ | ⚠️ | `TestGhostUserCreationAndDetection`. Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
+| Ghost user creation | ✅ | ⚠️ | `TestSmokeMattermostToMatrix` (the event's sender is the Mattermost user's ghost). Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
 | Display name sync (`SyncUserToMatrix`) | ❌ | ❌ | Client only (`SetDisplayName`) |
 | Avatar sync (profile image hook) | ❌ | ❌ | Client only (`UpdateGhostUserAvatar`) |
 | DM / group DM room auto-creation | ⚠️ | ❌ | `DMRoomCreationTestSuite` checks the room's creation and name, but explicitly skips checking that the message was delivered. Multi-server DM routing (DM created on the calling server) is unit-only |
@@ -103,7 +104,7 @@ Three structural limits apply to the `server/` suites:
 
 | Feature | E2E single server | E2E multi server | Notes |
 | --- | --- | --- | --- |
-| Loop prevention (ghost-sender skip, own-remote skip, post-ID echo) | ⚠️ | ⚠️ | `UserRemoteDetectionIntegrationTestSuite` asserts `IsRemote()` on hand-built users rather than sending an echo through the bridge. Multi only checks `isGhostUser` directly |
+| Loop prevention (ghost-sender skip, own-remote skip, post-ID and remote-ID echo) | ✅ | ⚠️ | Single: `e2e/cross_cutting_test.go` sends real echoes for messages, edits, reactions, deletions and files in both directions, and checks that a Matrix profile change doesn't ghost the remote user. Each inbound layer has a test that fails when only that layer is removed: ghost-sender skip `TestLoopPreventionGhostSender`, post-ID echo `TestLoopPreventionPostIDEcho`, remote-ID echo `TestLoopPreventionRemoteIDEcho`. The own-remote skip is proven by the unit test `TestSharedChannelsHooksSkipOwnRemote`, because on a single server Mattermost core filters items by remote before it calls the plugin. Multi only checks `isGhostUser` directly |
 | Ghost namespace isolation per server domain | — | ✅ | `TestInboundRoutingIsolatedPerServer` (`isGhostUser` for A vs B) |
 
 ### Server and channel management
@@ -130,7 +131,7 @@ Out of 47 rows:
 
 | | ✅ | ⚠️ | ❌ | — |
 | --- | --- | --- | --- | --- |
-| Single server | 11 | 8 | 26 | 2 |
+| Single server | 12 | 7 | 26 | 2 |
 | Multi server | 6 | 3 | 37 | 1 |
 
 - **Mattermost → Matrix on one server is the best-covered area.** Messages, markdown,
@@ -146,7 +147,6 @@ Out of 47 rows:
   server). None of the other actions (edit, reaction, delete, thread, mention, file, DM,
   profile) are checked for per-server isolation.
 - **Some existing tests are weaker than their names suggest:**
-  `UserRemoteDetectionIntegrationTestSuite` mostly asserts on hand-built structs,
   `ThreadMappingIntegrationTestSuite` doesn't need the container,
   `testSyncChannelMembersToMatrixRoom` re-implements the production loop, and the DM tests
   skip checking that the message arrived.
