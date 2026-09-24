@@ -22,7 +22,7 @@ has no Playwright/Cypress tests (`webapp/tests/` only holds Jest setup).
 
 Three structural limits apply to the `server/` suites:
 
-- **Outbound tests call bridge methods directly** (`SyncPostToMatrix`, `SyncReactionToMatrix`),
+- **Outbound tests call bridge methods directly** (`SyncPostToMatrix`),
   never the shared-channels hooks (`OnSharedChannelsSyncMsg`,
   `OnSharedChannelsAttachmentSyncMsg`, `OnSharedChannelsProfileImageSyncMsg`). The per-server
   routing in `serverIDForSyncMsg` and the loop-skip logic in the hooks are only unit-tested.
