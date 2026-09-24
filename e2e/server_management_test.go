@@ -53,6 +53,11 @@ type serverView struct {
 	HasHSToken     bool   `json:"has_hs_token"`
 }
 
+// apiError is the plugin's REST error body.
+type apiError struct {
+	Message string `json:"message"`
+}
+
 type serverResponse struct {
 	Server   serverView `json:"server"`
 	Warnings []string   `json:"warnings"`
@@ -70,10 +75,8 @@ func helperContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), requestTimeout)
 }
 
-// requireStatus sends a plugin request as client's user, requires the status, and returns the
-// body. The body is printed on a mismatch, so don't use it where a successful response carries
-// tokens.
-func requireStatus(t *testing.T, client *model.Client4, method, path string, body any, want int) []byte {
+// pluginCall sends a plugin request as client's user and returns the status and body.
+func pluginCall(t *testing.T, client *model.Client4, method, path string, body any) (int, []byte) {
 	t.Helper()
 	ctx, cancel := helperContext()
 	defer cancel()
@@ -82,7 +85,16 @@ func requireStatus(t *testing.T, client *model.Client4, method, path string, bod
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	require.NoError(t, err, "read %s %s response", method, path)
-	require.Equal(t, want, resp.StatusCode, "%s %s: %s", method, path, data)
+	return resp.StatusCode, data
+}
+
+// requireStatus sends a plugin request as client's user, requires the status, and returns the
+// body. The body is printed on a mismatch, so don't use it where a successful response carries
+// tokens.
+func requireStatus(t *testing.T, client *model.Client4, method, path string, body any, want int) []byte {
+	t.Helper()
+	status, data := pluginCall(t, client, method, path, body)
+	require.Equal(t, want, status, "%s %s: %s", method, path, data)
 	return data
 }
 
@@ -200,9 +212,7 @@ func TestServerManagementAddServer(t *testing.T) {
 		require.NotEmpty(t, added.ServerID, "needs the REST subtest")
 
 		data := requireStatus(t, env.Admin, http.MethodPost, serversPath, addBody, http.StatusConflict)
-		var apiErr struct {
-			Message string `json:"message"`
-		}
+		var apiErr apiError
 		decodeJSON(t, data, &apiErr)
 		require.Contains(t, apiErr.Message, "already registered at this endpoint")
 
@@ -858,4 +868,267 @@ func TestServerManagementCreateRoom(t *testing.T) {
 		MattermostUser:   members[0],
 		MattermostClient: clients[0],
 	}, matrixtest.DefaultWaitTimeout)
+}
+
+const matrixUsage = "Usage: /matrix [test|create|map|unmap|list|status|server] ..."
+
+// restRoute is one plugin REST route with a request body valid for it.
+type restRoute struct {
+	method, path string
+	body         any
+}
+
+func TestServerManagementSlashCommands(t *testing.T) {
+	env := harness.Shared(t)
+	b := harness.NewBridgedChannel(t)
+	run := func(command string) string { return runCommand(t, env.Admin, b.Channel.Id, command) }
+
+	t.Run("Usage", func(t *testing.T) {
+		require.Equal(t, matrixUsage, run("/matrix"))
+		// There is no help subcommand; it gets the unknown-subcommand list.
+		require.Equal(t, "Unknown subcommand. Use: test, create, map, unmap, list, status, or server", run("/matrix help"))
+		require.Equal(t, "Usage: /matrix server [list|add|remove|map|unmap|registration|status|test|enable|disable] ...", run("/matrix server"))
+	})
+
+	t.Run("Status", func(t *testing.T) {
+		reply := run("/matrix status")
+		require.Contains(t, reply, "**Matrix Bridge Status (1 server(s)):**")
+		require.Contains(t, reply, "• **"+harness.ServerName+"** (`"+env.ServerID+"`) - enabled, health: healthy")
+	})
+
+	t.Run("ServerList", func(t *testing.T) {
+		reply := run("/matrix server list")
+		for _, want := range []string{
+			"**Matrix Servers (1):**",
+			"• **" + harness.ServerName + "** (`" + env.ServerID + "`)",
+			"URL: " + env.Synapse.InternalURL,
+			"Username prefix: `matrix`",
+			"State: enabled",
+		} {
+			require.Contains(t, reply, want)
+		}
+	})
+
+	t.Run("ServerStatus", func(t *testing.T) {
+		// The server resolves by ID or name, or is the sole server when omitted.
+		for _, command := range []string{"/matrix server status", "/matrix server status " + env.ServerID, "/matrix server status " + harness.ServerName} {
+			reply := run(command)
+			for _, want := range []string{
+				"**Name:** " + harness.ServerName,
+				"**ID:** `" + env.ServerID + "`",
+				"**URL:** " + env.Synapse.InternalURL,
+				"**State:** enabled",
+				"**Health:** healthy",
+			} {
+				require.Contains(t, reply, want, "%q reply", command)
+			}
+		}
+	})
+
+	t.Run("ListMappings", func(t *testing.T) {
+		require.Contains(t, run("/matrix list"), "• "+b.Channel.DisplayName+" → `"+b.RoomID+"` ("+harness.ServerName+") *(current)*")
+	})
+
+	t.Run("NonAdmin", func(t *testing.T) {
+		// Restores the server if a broken permission check lets remove or disable through.
+		preserveRegistry(t, env)
+		before := listServers(t, env.Admin)
+		for _, command := range []string{
+			"/matrix test",
+			"/matrix create x",
+			"/matrix map #x:" + harness.ServerName,
+			"/matrix unmap",
+			"/matrix list",
+			"/matrix status",
+			"/matrix server",
+			"/matrix server list",
+			"/matrix server add " + env.Synapse.InternalURL + " a b",
+			"/matrix server remove " + env.ServerID,
+			"/matrix server map #x:" + harness.ServerName,
+			"/matrix server unmap",
+			"/matrix server registration",
+			"/matrix server status",
+			"/matrix server test",
+			"/matrix server enable " + env.ServerID,
+			"/matrix server disable " + env.ServerID,
+		} {
+			reply := runCommand(t, b.MattermostClient, b.Channel.Id, command)
+			requireNoTokens(t, reply, harness.ASToken, harness.HSToken)
+			require.Equal(t, "❌ You must be a System Admin to use Matrix bridge commands.", reply, "%q reply", command)
+		}
+		// The usage reply comes before the permission check.
+		require.Equal(t, matrixUsage, runCommand(t, b.MattermostClient, b.Channel.Id, "/matrix"))
+
+		require.Equal(t, before, listServers(t, env.Admin))
+		requireMapped(t, env, b.Channel, b.RoomID)
+		requireSyncBothWays(t, env, b, matrixtest.DefaultWaitTimeout)
+	})
+}
+
+// sendAsNewMatrixUser joins a new Matrix user to the room, sends a message as them, and returns
+// the user and the bridged post's author.
+func sendAsNewMatrixUser(t *testing.T, env *harness.Env, b *harness.BridgedChannel) (*matrixtest.User, *model.User) {
+	t.Helper()
+	user := harness.NewMatrixUser(t)
+	require.NoError(t, env.Synapse.JoinRoomAsUser(t, user.UserID, b.RoomID))
+	sender := *b
+	sender.MatrixUser = user
+	post := waitInbound(t, b, sendFromMatrix(t, env, &sender, "prefix"), matrixtest.DefaultWaitTimeout)
+	author, _, err := env.Admin.GetUser(t.Context(), post.UserId, "")
+	require.NoError(t, err)
+	return user, author
+}
+
+func TestServerManagementRESTAPI(t *testing.T) {
+	env := harness.Shared(t)
+	serverPath := serversPath + "/" + env.ServerID
+
+	t.Run("ListFields", func(t *testing.T) {
+		data := requireStatus(t, env.Admin, http.MethodGet, serversPath, nil, http.StatusOK)
+		requireNoTokens(t, string(data), harness.ASToken, harness.HSToken)
+		require.Equal(t, []serverView{{
+			ServerID:       env.ServerID,
+			ServerURL:      env.Synapse.InternalURL,
+			ServerName:     harness.ServerName,
+			Endpoint:       "synapse:18008",
+			EventDomain:    "synapse_18008",
+			UsernamePrefix: "matrix",
+			Enabled:        true,
+			RemoteID:       env.RemoteID,
+			HasASToken:     true,
+			HasHSToken:     true,
+		}}, listServers(t, env.Admin))
+	})
+
+	t.Run("PatchUsernamePrefix", func(t *testing.T) {
+		preserveRegistry(t, env)
+		b := harness.NewBridgedChannel(t)
+		prefix := "e2e" + model.NewId()[:6]
+
+		var resp serverResponse
+		decodeJSON(t, requireStatus(t, env.Admin, http.MethodPatch, serverPath, map[string]string{"username_prefix": prefix}, http.StatusOK), &resp)
+		require.Equal(t, prefix, resp.Server.UsernamePrefix)
+		require.True(t, slices.ContainsFunc(resp.Warnings, func(w string) bool { return strings.Contains(w, "username prefix") }),
+			"warnings: %v", resp.Warnings)
+
+		user, author := sendAsNewMatrixUser(t, env, b)
+		require.Equal(t, prefix+":"+user.Username, author.Username)
+
+		requireStatus(t, env.Admin, http.MethodPatch, serverPath, map[string]string{"username_prefix": "matrix"}, http.StatusOK)
+		user, author = sendAsNewMatrixUser(t, env, b)
+		require.Equal(t, "matrix:"+user.Username, author.Username)
+	})
+
+	t.Run("PatchHSToken", func(t *testing.T) {
+		preserveRegistry(t, env)
+		b := harness.NewBridgedChannel(t)
+		// Synapse delivers transactions in order, so once this arrives nothing from the setup is
+		// still queued for the window below.
+		waitInbound(t, b, sendFromMatrix(t, env, b, "before-swap"), matrixtest.DefaultWaitTimeout)
+		newToken := "e2e-hs-" + model.NewId()
+
+		data := requireStatus(t, env.Admin, http.MethodPatch, serverPath, map[string]string{"hs_token": newToken}, http.StatusOK)
+		requireNoTokens(t, string(data), newToken, harness.ASToken, harness.HSToken)
+		var resp serverResponse
+		decodeJSON(t, data, &resp)
+		require.True(t, resp.Server.HasHSToken)
+
+		// Synapse still sends the harness token, so the test sends no Matrix events until it is
+		// restored.
+		require.Equal(t, http.StatusUnauthorized, transactionStatus(t, env, harness.HSToken))
+		require.Equal(t, http.StatusOK, transactionStatus(t, env, newToken))
+
+		requireStatus(t, env.Admin, http.MethodPatch, serverPath, map[string]string{"hs_token": harness.HSToken}, http.StatusOK)
+		require.Equal(t, http.StatusOK, transactionStatus(t, env, harness.HSToken))
+		// A delivery that hit the window got a 401, which puts Synapse into backoff.
+		requireSyncBothWays(t, env, b, synapseRecoveryTimeout)
+	})
+
+	t.Run("PatchValidation", func(t *testing.T) {
+		preserveRegistry(t, env)
+		before := listServers(t, env.Admin)
+		requireStatus(t, env.Admin, http.MethodPatch, serverPath, map[string]string{"as_token": ""}, http.StatusBadRequest)
+		// A wrong-type body: PluginRequestContext can only send valid JSON.
+		requireStatus(t, env.Admin, http.MethodPatch, serverPath, "not an object", http.StatusBadRequest)
+		require.Equal(t, before, listServers(t, env.Admin))
+	})
+
+	t.Run("Mappings", func(t *testing.T) {
+		first, second := harness.NewBridgedChannel(t), harness.NewBridgedChannel(t)
+
+		var page struct {
+			TotalCount int           `json:"total_count"`
+			Mappings   []mappingView `json:"mappings"`
+		}
+		decodeJSON(t, requireStatus(t, env.Admin, http.MethodGet, serverPath+"/mappings?per_page=1&page=0", nil, http.StatusOK), &page)
+		require.Len(t, page.Mappings, 1)
+		require.GreaterOrEqual(t, page.TotalCount, 2)
+
+		all := serverMappings(t, env.Admin, env.ServerID)
+		require.Len(t, all, page.TotalCount)
+		for _, b := range []*harness.BridgedChannel{first, second} {
+			mapping, found := findMapping(all, b.Channel.Id)
+			require.True(t, found, "channel %s is not in the paged mappings", b.Channel.Id)
+			require.Equal(t, b.RoomID, mapping.RoomID)
+			require.Equal(t, env.Team.Name, mapping.TeamName)
+		}
+	})
+
+	t.Run("UnknownServer", func(t *testing.T) {
+		before := listServers(t, env.Admin)
+		unknown := serversPath + "/" + model.NewId()
+		for _, route := range []restRoute{
+			{http.MethodPatch, unknown, map[string]string{"username_prefix": "e2e"}},
+			{http.MethodDelete, unknown, nil},
+			{http.MethodPut, unknown + "/enabled", map[string]bool{"enabled": true}},
+			{http.MethodPost, unknown + "/test", nil},
+			{http.MethodGet, unknown + "/registration", nil},
+			{http.MethodGet, unknown + "/mappings", nil},
+		} {
+			var apiErr apiError
+			decodeJSON(t, requireStatus(t, env.Admin, route.method, route.path, route.body, http.StatusNotFound), &apiErr)
+			require.NotEmpty(t, apiErr.Message, "%s %s", route.method, route.path)
+		}
+		require.Equal(t, before, listServers(t, env.Admin))
+	})
+
+	t.Run("NonAdmin", func(t *testing.T) {
+		// Restores the server if a broken gate lets the requests below through.
+		preserveRegistry(t, env)
+		before := listServers(t, env.Admin)
+		_, client := harness.NewMattermostUser(t)
+
+		// Every admin route, with a well-formed request, so an open gate would answer something
+		// other than 403.
+		for _, route := range []restRoute{
+			{http.MethodGet, serversPath, nil},
+			{http.MethodPost, serversPath, map[string]string{
+				"server_url":  env.Synapse.InternalURL,
+				"as_token":    harness.ASToken,
+				"hs_token":    harness.HSToken,
+				"server_name": "nonadmin.e2e.local",
+			}},
+			{http.MethodGet, serversPath + "/health", nil},
+			{http.MethodPatch, serverPath, map[string]string{"username_prefix": "nonadmin"}},
+			{http.MethodDelete, serverPath, nil},
+			{http.MethodPut, serverPath + "/enabled", map[string]bool{"enabled": false}},
+			{http.MethodPost, serverPath + "/test", nil},
+			{http.MethodGet, serverPath + "/registration", nil},
+			{http.MethodGet, serverPath + "/mappings", nil},
+			{http.MethodGet, "/api/v1/autocomplete/servers", nil},
+		} {
+			// Checked for tokens before anything prints it: an open registration route returns both.
+			status, data := pluginCall(t, client, route.method, route.path, route.body)
+			requireNoTokens(t, string(data), harness.ASToken, harness.HSToken)
+			require.Equal(t, http.StatusForbidden, status, "%s %s: %s", route.method, route.path, data)
+			require.NotContains(t, string(data), env.ServerID)
+			require.NotContains(t, string(data), env.Synapse.InternalURL)
+			var apiErr apiError
+			decodeJSON(t, data, &apiErr)
+			require.Equal(t, "you must be a System Admin to use this endpoint", apiErr.Message, "%s %s", route.method, route.path)
+		}
+
+		requireStatus(t, model.NewAPIv4Client(env.Admin.URL), http.MethodGet, serversPath, nil, http.StatusUnauthorized)
+		require.Equal(t, before, listServers(t, env.Admin))
+	})
 }
