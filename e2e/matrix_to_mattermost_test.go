@@ -721,14 +721,14 @@ func requireChannelMember(t *testing.T, channelID, userID string) {
 	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval, "user %s never became a member of channel %s", userID, channelID)
 }
 
-// serverView is the part of GET /api/v1/servers that these tests read.
-type serverView struct {
+// inboundServerView is the part of GET /api/v1/servers that these tests read.
+type inboundServerView struct {
 	ServerID       string `json:"server_id"`
 	EventDomain    string `json:"event_domain"`
 	UsernamePrefix string `json:"username_prefix"`
 }
 
-func pluginServer(t *testing.T) serverView {
+func pluginServer(t *testing.T) inboundServerView {
 	t.Helper()
 	env := harness.Shared(t)
 	resp := harness.PluginRequest(t, env.Admin, http.MethodGet, "/api/v1/servers", nil)
@@ -737,10 +737,10 @@ func pluginServer(t *testing.T) serverView {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "list servers: %s", body)
 
 	var list struct {
-		Servers []serverView `json:"servers"`
+		Servers []inboundServerView `json:"servers"`
 	}
 	require.NoError(t, json.Unmarshal(body, &list), "decode server list: %s", body)
-	i := slices.IndexFunc(list.Servers, func(s serverView) bool { return s.ServerID == env.ServerID })
+	i := slices.IndexFunc(list.Servers, func(s inboundServerView) bool { return s.ServerID == env.ServerID })
 	require.GreaterOrEqual(t, i, 0, "server %s not in server list", env.ServerID)
 	return list.Servers[i]
 }
