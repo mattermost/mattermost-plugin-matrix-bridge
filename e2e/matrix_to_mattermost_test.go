@@ -439,6 +439,67 @@ func TestMatrixToMattermostProfileChange(t *testing.T) {
 	})
 }
 
+// dmCreationBug: without Mattermost's EnableSharedChannelsDMs feature flag, the plugin's
+// GetDirectChannel call with the provisioned (remote) user fails, and the transaction fails on
+// every retry.
+const dmCreationBug = "bug: Matrix-initiated DM fails: Mattermost refuses a DM with a remote user; a failed txn stalls AS delivery"
+
+// dmMessageBug: the plugin never joins the invited ghost to the room, and Synapse only sends an
+// application service messages from rooms where one of its users has joined.
+const dmMessageBug = "bug: the ghost never joins a Matrix-initiated DM room, so its messages never reach Mattermost"
+
+func TestMatrixToMattermostDirectMessage(t *testing.T) {
+	// Skipped before acting, so the failing transaction never stalls later tests.
+	t.Skip(dmCreationBug)
+
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+	user := harness.NewMatrixUser(t)
+	ghost := harness.GhostUserID(bridged.MattermostUser.Id)
+
+	result, err := env.Synapse.DoAsUser(user, http.MethodPost, "/_matrix/client/v3/createRoom", map[string]any{
+		"is_direct": true,
+		"preset":    "trusted_private_chat",
+		"invite":    []string{ghost},
+	})
+	require.NoError(t, err, "create DM room as %s inviting %s", user.UserID, ghost)
+	roomID, _ := result.(map[string]any)["room_id"].(string)
+	require.NotEmpty(t, roomID, "createRoom response: %v", result)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("DM room %s created by %s, inviting %s for Mattermost user %s", roomID, user.UserID, ghost, bridged.MattermostUser.Id)
+		}
+	})
+
+	var dm *model.Channel
+	var provisionedID string
+	t.Run("creates DM channel", func(t *testing.T) {
+		provisionedID = provisionedUser(t, user).Id
+		dmName := model.GetDMNameFromIds(bridged.MattermostUser.Id, provisionedID)
+		// A read-only lookup: CreateDirectChannel would create the channel this asserts on.
+		require.EventuallyWithT(t, func(c *assert.CollectT) {
+			channels, _, err := bridged.MattermostClient.GetChannelsForTeamForUser(t.Context(), env.Team.Id, bridged.MattermostUser.Id, false, "")
+			if !assert.NoError(c, err) {
+				return
+			}
+			i := slices.IndexFunc(channels, func(ch *model.Channel) bool { return ch.Name == dmName })
+			if assert.GreaterOrEqual(c, i, 0, "no channel named %s", dmName) {
+				dm = channels[i]
+			}
+		}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval,
+			"no DM %s between %s and %s for room %s", dmName, bridged.MattermostUser.Id, provisionedID, roomID)
+	})
+
+	t.Run("delivers message", func(t *testing.T) {
+		t.Skip(dmMessageBug)
+		require.NotNil(t, dm, "DM creation subtest failed")
+		message := "direct " + model.NewId()
+		eventID := sendText(t, user, roomID, message)
+		post := harness.WaitForPost(t, bridged.MattermostClient, dm.Id, func(p *model.Post) bool { return p.Message == message })
+		require.Equal(t, provisionedID, post.UserId, "author of post %s from event %s in room %s", post.Id, eventID, roomID)
+	})
+}
+
 func setProfileField(t *testing.T, user *matrixtest.User, field, value string) {
 	t.Helper()
 	path := "/_matrix/client/v3/profile/" + url.PathEscape(user.UserID) + "/" + field
