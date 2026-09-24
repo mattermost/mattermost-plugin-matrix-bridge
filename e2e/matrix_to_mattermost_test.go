@@ -1,8 +1,14 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"io"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -219,6 +225,64 @@ func TestMatrixToMattermostMessageDeletion(t *testing.T) {
 		}
 	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval,
 		"post %s in channel %s was not deleted after redacting event %s in room %s", post.Id, bridged.Channel.Id, eventID, bridged.RoomID)
+}
+
+func TestMatrixToMattermostFiles(t *testing.T) {
+	env := harness.Shared(t)
+	bridged := harness.NewBridgedChannel(t)
+
+	// The plugin forwards only bytes and filename, so Mattermost derives MimeType from the
+	// extension and decodes the PNG for its dimensions.
+	files := []struct {
+		msgtype, ext, mimetype string
+		data                   []byte
+		info                   map[string]any
+	}{
+		{"m.image", ".png", "image/png", solidPNG(t, 16, 16, color.RGBA{R: 200, G: 30, B: 90, A: 255}), map[string]any{"w": 16, "h": 16}},
+		{"m.file", ".json", "application/json", []byte(`{"e2e":"` + model.NewId() + `"}`), nil},
+		{"m.video", ".mp4", "video/mp4", []byte("not really a video " + model.NewId()), nil},
+		{"m.audio", ".mp3", "audio/mpeg", []byte("not really audio " + model.NewId()), nil},
+	}
+
+	for _, f := range files {
+		t.Run(f.msgtype, func(t *testing.T) {
+			name := "e2e-" + model.NewId() + f.ext
+			mxc := harness.UploadMediaAsUser(t, bridged.MatrixUser, name, f.mimetype, f.data)
+			info := map[string]any{"mimetype": f.mimetype, "size": len(f.data)}
+			maps.Copy(info, f.info)
+			eventID := sendMessage(t, bridged.MatrixUser, bridged.RoomID, map[string]any{
+				"msgtype": f.msgtype, "body": name, "url": mxc, "info": info,
+			})
+
+			post := waitForBridgedPost(t, bridged, eventID, func(p *model.Post) bool {
+				return p.Metadata != nil && slices.ContainsFunc(p.Metadata.Files, func(fi *model.FileInfo) bool { return fi.Name == name })
+			})
+			require.Equal(t, provisionedUser(t, bridged.MatrixUser).Id, post.UserId, "author of post %s from event %s", post.Id, eventID)
+			require.Len(t, post.FileIds, 1, "files on post %s from event %s", post.Id, eventID)
+			fileID := post.FileIds[0]
+
+			data, _, err := env.Admin.GetFile(t.Context(), fileID)
+			require.NoError(t, err, "download file %s of post %s", fileID, post.Id)
+			require.Equal(t, f.data, data, "bytes of file %s", fileID)
+
+			fileInfo, _, err := env.Admin.GetFileInfo(t.Context(), fileID)
+			require.NoError(t, err, "get info of file %s", fileID)
+			require.Equal(t, name, fileInfo.Name, "name of file %s", fileID)
+			require.Equal(t, f.mimetype, fileInfo.MimeType, "mimetype of file %s", fileID)
+			if w, ok := f.info["w"]; ok {
+				require.Equal(t, []any{w, f.info["h"]}, []any{fileInfo.Width, fileInfo.Height}, "dimensions of file %s", fileID)
+			}
+		})
+	}
+}
+
+func solidPNG(t *testing.T, w, h int, c color.Color) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: c}, image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
 }
 
 func sendText(t *testing.T, user *matrixtest.User, roomID, body string) string {
