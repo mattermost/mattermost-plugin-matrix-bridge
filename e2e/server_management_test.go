@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -162,14 +163,7 @@ func TestServerManagementAddServer(t *testing.T) {
 	}
 	addCommand := "/matrix server add " + env.Synapse.InternalURL + " " + harness.ASToken + " " + harness.HSToken
 
-	id := model.NewId()
-	channel, _, err := env.Admin.CreateChannel(t.Context(), &model.Channel{
-		TeamId:      env.Team.Id,
-		Name:        "servers-" + id,
-		DisplayName: "Servers " + id,
-		Type:        model.ChannelTypeOpen,
-	})
-	require.NoError(t, err)
+	channel, _, _ := newChannel(t, env, "Servers "+model.NewId(), 0)
 
 	var added serverView
 
@@ -660,4 +654,208 @@ func TestServerManagementRegistrationYAML(t *testing.T) {
 			require.True(t, yamlBlock == content, "%q YAML differs from the REST registration", command)
 		}
 	})
+}
+
+// newChannel creates an open channel in the env's team, with the admin as its creator and the
+// given number of new Mattermost members. It returns the channel and the members' users and
+// clients.
+func newChannel(t *testing.T, env *harness.Env, name string, members int) (*model.Channel, []*model.User, []*model.Client4) {
+	t.Helper()
+	channel, _, err := env.Admin.CreateChannel(t.Context(), &model.Channel{
+		TeamId:      env.Team.Id,
+		Name:        strings.ToLower(strings.ReplaceAll(name, " ", "-")),
+		DisplayName: name,
+		Type:        model.ChannelTypeOpen,
+	})
+	require.NoError(t, err, "create channel %s", name)
+
+	users := make([]*model.User, 0, members)
+	clients := make([]*model.Client4, 0, members)
+	for range members {
+		user, client := harness.NewMattermostUser(t)
+		_, _, err := env.Admin.AddChannelMember(t.Context(), channel.Id, user.Id)
+		require.NoError(t, err, "add user %s to channel %s", user.Id, channel.Id)
+		users = append(users, user)
+		clients = append(clients, client)
+	}
+	return channel, users, clients
+}
+
+// requireJoined waits until every user in userIDs has joined the room, as seen by viewer.
+func requireJoined(t *testing.T, env *harness.Env, viewer *matrixtest.User, roomID string, userIDs ...string) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		result, err := env.Synapse.DoAsUser(viewer, http.MethodGet, "/_matrix/client/v3/rooms/"+url.PathEscape(roomID)+"/joined_members", nil)
+		if !assert.NoError(c, err) {
+			return
+		}
+		body, _ := result.(map[string]any)
+		joined, _ := body["joined"].(map[string]any)
+		for _, userID := range userIDs {
+			assert.Contains(c, joined, userID, "user has not joined room %s", roomID)
+		}
+	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval)
+}
+
+func resolveAlias(t *testing.T, env *harness.Env, alias string) string {
+	t.Helper()
+	roomID, err := env.Synapse.Client.ResolveRoomAlias(alias)
+	require.NoError(t, err, "resolve alias %s", alias)
+	return roomID
+}
+
+func requireMapped(t *testing.T, env *harness.Env, channel *model.Channel, roomID string) {
+	t.Helper()
+	mapping, found := findMapping(serverMappings(t, env.Admin, env.ServerID), channel.Id)
+	require.True(t, found, "channel %s is not in the server's mappings", channel.Id)
+	require.Equal(t, roomID, mapping.RoomID)
+	require.Equal(t, channel.DisplayName, mapping.ChannelName)
+	require.Equal(t, env.Team.Name, mapping.TeamName)
+}
+
+func requireNotMapped(t *testing.T, env *harness.Env, channelID string) {
+	t.Helper()
+	_, found := findMapping(serverMappings(t, env.Admin, env.ServerID), channelID)
+	require.False(t, found, "channel %s is still in the server's mappings", channelID)
+}
+
+func TestServerManagementMapChannel(t *testing.T) {
+	env := harness.Shared(t)
+	bot := env.Synapse.GetApplicationServiceBotUserID()
+
+	for _, tc := range []struct {
+		name     string
+		byRoomID bool
+	}{
+		{"ByAlias", false},
+		{"ByRoomID", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := model.NewId()
+			channel, members, clients := newChannel(t, env, "Map "+tc.name+" "+id, 2)
+			matrixUser := harness.NewMatrixUser(t)
+			localpart := "map-" + id
+			roomID, alias := env.Synapse.CreateRoomAsUser(t, matrixUser, "Map "+id, localpart)
+			// The plugin names its bridge alias after the alias localpart, or for a room ID, after
+			// the channel display name lowercased with spaces and "_" turned into "-". For these
+			// underscore-free names that is channel.Name.
+			identifier, bridgeName := alias, localpart
+			if tc.byRoomID {
+				identifier, bridgeName = roomID, channel.Name
+			}
+
+			reply := runCommand(t, env.Admin, channel.Id, "/matrix map "+identifier)
+			require.Contains(t, reply, "Mapping Saved")
+			require.Contains(t, reply, "Channel sharing enabled")
+			require.NotContains(t, reply, "Could not auto-join")
+
+			requireJoined(t, env, matrixUser, roomID, bot, harness.GhostUserID(channel.CreatorId),
+				harness.GhostUserID(members[0].Id), harness.GhostUserID(members[1].Id))
+			require.Equal(t, roomID, resolveAlias(t, env, "#mattermost-bridge-"+bridgeName+":"+harness.ServerName))
+			requireMapped(t, env, channel, roomID)
+			requireShared(t, env, channel.Id, true)
+
+			requireSyncBothWays(t, env, &harness.BridgedChannel{
+				Channel:          channel,
+				RoomID:           roomID,
+				MatrixUser:       matrixUser,
+				MattermostUser:   members[0],
+				MattermostClient: clients[0],
+			}, matrixtest.DefaultWaitTimeout)
+		})
+	}
+
+	t.Run("InvalidIdentifier", func(t *testing.T) {
+		channel, _, _ := newChannel(t, env, "Map Invalid "+model.NewId(), 0)
+		require.Contains(t, runCommand(t, env.Admin, channel.Id, "/matrix map not-a-room"), "Invalid room identifier format")
+		requireNotMapped(t, env, channel.Id)
+	})
+
+	t.Run("NonexistentRoom", func(t *testing.T) {
+		t.Skip("bug: /matrix map to a nonexistent room saves the mapping")
+		channel, _, _ := newChannel(t, env, "Map Missing "+model.NewId(), 0)
+		reply := runCommand(t, env.Admin, channel.Id, "/matrix map #missing-"+model.NewId()+":"+harness.ServerName)
+		require.NotContains(t, reply, "Mapping Saved")
+		requireNotMapped(t, env, channel.Id)
+	})
+}
+
+// requireUnmapped runs /matrix unmap in the bridged channel and checks the mapping, the share,
+// the room's bridge state, and sync in both directions are gone.
+func requireUnmapped(t *testing.T, env *harness.Env, b *harness.BridgedChannel) {
+	t.Helper()
+	require.Contains(t, runCommand(t, env.Admin, b.Channel.Id, "/matrix unmap"), "✅ **Mapping Removed**")
+	requireNotMapped(t, env, b.Channel.Id)
+	requireShared(t, env, b.Channel.Id, false)
+
+	// User-created rooms start without this state, and a fix for the user-owned-room bug may skip
+	// clearing it, so it only has to be empty when present.
+	state := env.Synapse.GetRoomState(t, b.RoomID)
+	if i := slices.IndexFunc(state, func(e matrixtest.Event) bool { return e.Type == "com.mattermost.bridge.channel" }); i >= 0 {
+		require.Empty(t, state[i].Content, "room %s still names its Mattermost channel", b.RoomID)
+	}
+
+	// The plugin answers 200 for events from unmapped rooms, so Synapse drops the message instead
+	// of backing off, and it is never redelivered.
+	requireNoSyncEitherWay(t, env, b)
+}
+
+func TestServerManagementUnmapChannel(t *testing.T) {
+	env := harness.Shared(t)
+
+	t.Run("CreatedRoom", func(t *testing.T) {
+		id := model.NewId()
+		channel, members, clients := newChannel(t, env, "Unmap "+id, 1)
+		reply := runCommand(t, env.Admin, channel.Id, "/matrix create e2e-unmap-"+id+" publish=true")
+		require.Contains(t, reply, "Room Created & Mapped")
+		roomID := resolveAlias(t, env, "#mattermost-bridge-e2e-unmap-"+id+":"+harness.ServerName)
+		requireShared(t, env, channel.Id, true)
+
+		matrixUser := harness.NewMatrixUser(t)
+		require.NoError(t, env.Synapse.JoinRoomAsUser(t, matrixUser.UserID, roomID))
+		b := &harness.BridgedChannel{
+			Channel:          channel,
+			RoomID:           roomID,
+			MatrixUser:       matrixUser,
+			MattermostUser:   members[0],
+			MattermostClient: clients[0],
+		}
+		requireSyncBothWays(t, env, b, matrixtest.DefaultWaitTimeout)
+
+		requireUnmapped(t, env, b)
+	})
+
+	// The bot joins a user-created room at power level 0, so Synapse forbids its write of the
+	// empty com.mattermost.bridge.channel state and unmap aborts.
+	t.Run("UserOwnedRoom", func(t *testing.T) {
+		t.Skip("bug: /matrix unmap fails on user-created rooms (bot lacks power to clear room state)")
+		requireUnmapped(t, env, harness.NewBridgedChannel(t))
+	})
+}
+
+func TestServerManagementCreateRoom(t *testing.T) {
+	env := harness.Shared(t)
+	id := model.NewId()
+	name := "e2e-create-" + id
+	channel, members, clients := newChannel(t, env, "Create "+id, 1)
+
+	require.Contains(t, runCommand(t, env.Admin, channel.Id, "/matrix create "+name+" publish=true"), "Room Created & Mapped")
+
+	roomID := resolveAlias(t, env, "#_mattermost_"+name+":"+harness.ServerName)
+	require.Equal(t, roomID, resolveAlias(t, env, "#mattermost-bridge-"+name+":"+harness.ServerName))
+	require.Equal(t, name, env.Synapse.GetRoomName(t, roomID))
+
+	matrixUser := harness.NewMatrixUser(t)
+	require.NoError(t, env.Synapse.JoinRoomAsUser(t, matrixUser.UserID, roomID))
+	requireJoined(t, env, matrixUser, roomID, harness.GhostUserID(channel.CreatorId), harness.GhostUserID(members[0].Id))
+	requireMapped(t, env, channel, roomID)
+	requireShared(t, env, channel.Id, true)
+
+	requireSyncBothWays(t, env, &harness.BridgedChannel{
+		Channel:          channel,
+		RoomID:           roomID,
+		MatrixUser:       matrixUser,
+		MattermostUser:   members[0],
+		MattermostClient: clients[0],
+	}, matrixtest.DefaultWaitTimeout)
 }
