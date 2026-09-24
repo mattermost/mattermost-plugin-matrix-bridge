@@ -47,7 +47,7 @@ func startMattermost(ctx context.Context, nw *testcontainers.DockerNetwork) (*te
 			"MM_SQLSETTINGS_DRIVERNAME": "postgres",
 			"MM_SQLSETTINGS_DATASOURCE": "postgres://mmuser:mmpassword@db:5432/mattermost?sslmode=disable",
 			// Must match Synapse's AppServiceURL: the plugin renders its registration YAML from SiteURL.
-			"MM_SERVICESETTINGS_SITEURL":                                mattermostInternalURL,
+			"MM_SERVICESETTINGS_SITEURL":                                SiteURL,
 			"MM_SERVICEENVIRONMENT":                                     model.ServiceEnvironmentTest,
 			"MM_PLUGINSETTINGS_ENABLEUPLOADS":                           "true",
 			"MM_PLUGINSETTINGS_AUTOMATICPREPACKAGEDPLUGINS":             "false",
@@ -71,11 +71,11 @@ func (e *Env) setupMattermost(ctx context.Context, bundle string) error {
 		return fmt.Errorf("get Mattermost URL: %w", err)
 	}
 	e.Admin = model.NewAPIv4Client(url)
-	admin := &model.User{Email: "admin@example.com", Username: adminUsername, Password: adminPassword}
+	admin := &model.User{Email: "admin@example.com", Username: AdminUsername, Password: AdminPassword}
 	if _, _, err := e.Admin.CreateUser(ctx, admin); err != nil {
 		return fmt.Errorf("create admin: %w", err)
 	}
-	if _, _, err := e.Admin.Login(ctx, adminUsername, adminPassword); err != nil {
+	if _, _, err := e.Admin.Login(ctx, AdminUsername, AdminPassword); err != nil {
 		return fmt.Errorf("log in as admin: %w", err)
 	}
 

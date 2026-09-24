@@ -23,18 +23,19 @@ import (
 const (
 	HSToken       = "e2e_hs_token"
 	ASToken       = "e2e_as_token"
-	adminUsername = "admin"
-	adminPassword = "e2e-admin-password"
+	AdminUsername = "admin"
+	AdminPassword = "e2e-admin-password"
 )
 
 const (
 	PluginID = "com.mattermost.plugin-matrix-bridge"
 	// ServerName is Synapse's server_name, which the plugin discovers when registering it.
 	ServerName = "e2e.matrix.local"
+	// SiteURL is Mattermost's URL inside the Docker network. Synapse reaches the plugin through it.
+	SiteURL = "http://mattermost:8065"
 
-	teamName              = "test"
-	mattermostInternalURL = "http://mattermost:8065"
-	synapseAlias          = "synapse"
+	teamName     = "test"
+	synapseAlias = "synapse"
 
 	mattermostLogLines = 100
 	synapseLogLines    = 50
@@ -108,7 +109,7 @@ func (e *Env) start(ctx context.Context, bundle string, o options) error {
 		HSToken:       HSToken,
 		Network:       e.Network,
 		NetworkAlias:  synapseAlias,
-		AppServiceURL: mattermostInternalURL + "/plugins/" + PluginID,
+		AppServiceURL: SiteURL + "/plugins/" + PluginID,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("start Synapse: %w", err)
