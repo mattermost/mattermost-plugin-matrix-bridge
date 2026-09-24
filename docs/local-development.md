@@ -224,3 +224,54 @@ starts once per package run:
   another test created.
 - Wait with `harness.WaitForPost` / `RequireNoPost` and the Synapse container's
   `WaitForRoomEvent` / `RequireNoRoomEvent` instead of sleeping.
+
+### Running UI e2e tests
+
+`e2e/playwright/` holds Playwright tests for the "Matrix homeservers" System Console section.
+They run in Chromium as the System Admin against a real Mattermost and Synapse:
+
+```bash
+make e2e-ui
+```
+
+This builds the bundle, installs `e2e/playwright`'s npm dependencies and Chromium, type-checks
+the suite, and runs every spec. It needs Docker. In CI, the `e2e-ui` job uploads `test-results/`
+and `playwright-report/` when it fails.
+
+To iterate on one spec, build the bundle once and run Playwright directly:
+
+```bash
+make dist
+cd e2e/playwright
+E2E_PLUGIN_BUNDLE=$(ls $PWD/../../dist/*.tar.gz) npx playwright test tests/<file>.spec.ts [--headed|--ui]
+```
+
+A failing test keeps a trace in `e2e/playwright/test-results/`. Open it with
+`npx playwright show-trace test-results/<test>/trace.zip`.
+
+The environment comes from the Go harness, not from Node:
+
+- Global setup builds `e2e/cmd/e2e-env` and starts it twice: `default` has one registered
+  homeserver, and `noServer` (`--no-server`) has none.
+- Each launcher writes its connection details (URLs, admin credentials, tokens, `server_id`) to
+  `e2e/playwright/.e2e/<env>.json`. Global teardown sends it `SIGTERM`, which removes its
+  containers.
+- The admin is logged in through the API, and each env gets its own stored auth state. Setup also
+  hides the onboarding task list and the desktop-app landing page.
+
+To poke at an environment by hand, run the launcher yourself and stop it with Ctrl-C:
+
+```bash
+go build -o bin/e2e-env ./e2e/cmd/e2e-env
+E2E_PLUGIN_BUNDLE=$(ls $PWD/dist/*.tar.gz) ./bin/e2e-env [--no-server] [--out env.json]
+```
+
+When writing UI tests:
+
+- Import `test` and `expect` from `support/fixtures`. Tests use the `default` env; pick the other
+  one with `test.use({envName: 'noServer'})`. A browser context only ever uses one env.
+- Use the `api` fixture for REST setup and cleanup, and restore any shared state you change, even
+  when the test fails.
+- Select elements by role and label first. Add a `data-testid` to the webapp only when that isn't
+  enough.
+- Wait on locators and responses, never with `waitForTimeout`.

@@ -20,3 +20,9 @@ server/server.test
 
 # Matrix bridge registration file
 docker/mattermost-bridge-registration*.yaml
+
+# Playwright UI e2e tests
+e2e/playwright/node_modules/
+e2e/playwright/test-results/
+e2e/playwright/playwright-report/
+e2e/playwright/.e2e/
