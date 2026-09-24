@@ -45,6 +45,7 @@ Three structural limits apply to the `server/` suites:
 | `server/matrix/test/client_test.go` | `MatrixClientTestSuite` (Matrix client only, no plugin) | 1 |
 | `server/multi_server_integration_test.go` | `MultiServerIntegrationTestSuite` (4 tests) | 2 |
 | `e2e/smoke_test.go` | `TestSmokeMattermostToMatrix`, `TestSmokeMatrixToMattermost` (real Mattermost) | 1 |
+| `e2e/server_management_test.go` | `TestServerManagement*` (real Mattermost) | 1 |
 
 ## Legend
 
@@ -54,6 +55,7 @@ Three structural limits apply to the `server/` suites:
 - ❌ Not covered e2e. "Client only" means the underlying `matrix.Client` call is tested in
   `client_test.go`, but the plugin logic around it is not.
 - — Not applicable.
+- 🚫 Out of scope: deliberately not tested e2e; the reason is in the notes.
 
 ## Coverage table
 
@@ -110,32 +112,32 @@ Three structural limits apply to the `server/` suites:
 
 | Feature | E2E single server | E2E multi server | Notes |
 | --- | --- | --- | --- |
-| Add server + `server_name` discovery | ✅ | ❌ | `TestReAdoptionRoundTrip` uses the real `servers.Add` and discovery, but with only one server. Adding a second server next to a live one (uniqueness checks) isn't tested e2e |
-| Remove + re-adopt server (mappings and ghosts preserved) | ✅ | ❌ | Same test. Nothing checks that server B keeps syncing while A is removed |
-| Enable / disable server | ❌ | ❌ | Unit-only (`hooks_test.go`, `api_test.go`) |
-| Connection / AS permission check (`/matrix test`, ping, health) | ❌ | ❌ | Client only (`TestConnection`, `TestApplicationServicePermissions`) |
-| Registration YAML generation | ❌ | ❌ | Unit-only |
-| Map channel to room | ⚠️ | ✅ | Single: only used as test setup. Multi: `MapChannelToServer` on both servers |
+| Add server + `server_name` discovery | ✅ | ❌ | `TestServerManagementAddServer`, on a dedicated env with no server: REST and `/matrix server add`, discovery, no token leak, duplicate `409`, and the `server_name` override. Adding a second server next to a live one (uniqueness checks) isn't tested e2e |
+| Remove + re-adopt server (mappings and ghosts preserved) | ✅ | ❌ | `TestServerManagementRemoveAndReadopt`: re-adding with `--server-id` restores the mappings, the same remote, and inbound sync, and Synapse redelivers the message sent while removed. Mattermost drops the channel's invite on remove, so outbound resumes only after `/matrix map` is re-run, as the same ghost. Nothing checks that server B keeps syncing while A is removed |
+| Enable / disable server | ✅ | ❌ | `TestServerManagementEnableDisable`, over REST and `/matrix server disable`/`enable`: nothing syncs while disabled, the webhook answers `503`, and Synapse redelivers the missed Matrix message after enable |
+| Connection / AS permission check (`/matrix test`, ping, health) | ✅ | ❌ | `TestServerManagementConnectionTest`: `POST …/test`, `GET /servers/health`, `/matrix test`, and `/matrix server test`. A wrong `as_token` fails the connection check (`401`) and skips the appservice check |
+| Registration YAML generation | ✅ | ❌ | `TestServerManagementRegistrationYAML`: REST and `/matrix server registration` render the same YAML, with the plugin base URL, the tokens, and the namespaces. Loading it into a fresh `docker compose` Synapse is a manual check |
+| Map channel to room | ✅ | ✅ | Single: `TestServerManagementMapChannel`, by alias and by room ID, and the invalid-identifier error. Mapping a nonexistent room is a skipped bug: it saves the mapping. "Already mapped" can't happen on one server, where re-mapping overwrites; `TestChannelMappingRejectsSecondServer` covers it. Multi: `MapChannelToServer` on both servers |
 | One server per channel enforcement | — | ✅ | `TestChannelMappingRejectsSecondServer` |
-| Unmap channel | ❌ | ❌ | Unit-only (`channel_mapping_test.go`) |
-| `/matrix create` (create room and map) | ❌ | ❌ | Client only (`CreateRoom`) |
-| Slash commands (`/matrix …`, `/matrix server …`) | ❌ | ❌ | Unit-only against a mock plugin (`command_test.go`) |
-| System Console UI + REST API (`/api/v1/servers…`) | ❌ | ❌ | REST is unit-only (`api_servers_test.go`); no UI tests |
-| KV migration to the multi-server layout | ❌ | — | Unit-only (`migrations_test.go`) |
-| Cluster broadcast of registry changes | ❌ | ❌ | No e2e |
+| Unmap channel | ✅ | ❌ | `TestServerManagementUnmapChannel`, on a `/matrix create` room: mapping, share, and room state cleared, and nothing syncs either way. Unmapping a user-created room is a skipped bug: the bot lacks power to clear the room state |
+| `/matrix create` (create room and map) | ✅ | ❌ | `TestServerManagementCreateRoom`: aliases, mapping, and sync both ways |
+| Slash commands (`/matrix …`, `/matrix server …`) | ✅ | ❌ | `TestServerManagementSlashCommands` (admin gate on every command), plus the command paths in the other `TestServerManagement*` tests. There is no `help` subcommand |
+| System Console UI + REST API (`/api/v1/servers…`) | ⚠️ | ❌ | REST API ✅ (`TestServerManagementRESTAPI`); UI pending PR 5 |
+| KV migration to the multi-server layout | 🚫 | — | Needs a pre-multi-server release bundle downloaded from GitHub, then an upgrade. Unit-covered (`migrations_test.go`), and the download is flaky |
+| Cluster broadcast of registry changes | 🚫 | ❌ | The e2e Mattermost runs in Entry mode, which has no HA |
 
 ## Summary
 
 Out of 47 rows:
 
-| | ✅ | ⚠️ | ❌ | — |
-| --- | --- | --- | --- | --- |
-| Single server | 11 | 8 | 26 | 2 |
-| Multi server | 6 | 3 | 37 | 1 |
+| | ✅ | ⚠️ | ❌ | — | 🚫 |
+| --- | --- | --- | --- | --- | --- |
+| Single server | 18 | 8 | 17 | 2 | 2 |
+| Multi server | 6 | 3 | 37 | 1 | 0 |
 
-- **Mattermost → Matrix on one server is the best-covered area.** Messages, markdown,
-  mentions, threads, edits and reaction-add all have real assertions. Deletions, reaction
-  removal, files and profile sync do not.
+- **Mattermost → Matrix is the best-covered sync direction on one server.** Messages,
+  markdown, mentions, threads, edits and reaction-add all have real assertions. Deletions,
+  reaction removal, files and profile sync do not.
 - **Matrix → Mattermost is barely covered.** Apart from one plain-text message in each of
   the multi-server suite and the `e2e/` smoke test, no inbound event is ever processed. Edits,
   reactions, redactions, files and membership have **no tests at any level**, not even unit
@@ -147,9 +149,8 @@ Out of 47 rows:
   profile) are checked for per-server isolation.
 - **Some existing tests are weaker than their names suggest:**
   `UserRemoteDetectionIntegrationTestSuite` mostly asserts on hand-built structs,
-  `ThreadMappingIntegrationTestSuite` doesn't need the container,
-  `testSyncChannelMembersToMatrixRoom` re-implements the production loop, and the DM tests
-  skip checking that the message arrived.
+  `ThreadMappingIntegrationTestSuite` doesn't need the container, and the DM tests skip
+  checking that the message arrived.
 
 ## Suggested next steps (by priority)
 
@@ -173,5 +174,4 @@ Out of 47 rows:
    - disabling or removing A doesn't affect B;
    - adding a second server through `servers.Add` while one is live.
 5. **Grow the real Mattermost e2e suite.** `e2e/harness` runs a real Mattermost server;
-   slash commands, the REST API, and the System Console server management UI (with
-   Playwright) still need tests there.
+   the System Console server management UI (with Playwright) still needs tests there.
