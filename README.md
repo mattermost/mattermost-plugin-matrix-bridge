@@ -184,8 +184,11 @@ unreachable (the command warns if it detects this).
 # Build everything
 make all
 
-# Run tests
+# Run unit tests
 make test
+
+# Run all Go tests, including container-backed e2e tests (requires Docker)
+make e2e
 
 # Deploy to local Mattermost
 make deploy

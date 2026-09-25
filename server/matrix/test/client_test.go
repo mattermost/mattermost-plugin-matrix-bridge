@@ -1445,9 +1445,8 @@ func (suite *MatrixClientTestSuite) testAdvancedRoomOperations() {
 
 // Test runner functions to connect the suite to Go's testing framework
 func TestMatrixClientTestSuite(t *testing.T) {
-	// Skip this container-backed integration suite in -short mode. CI runs `make test`
-	// without -short, so it still executes there; we deliberately don't auto-detect
-	// Docker availability, since that would let CI silently go green if Docker broke.
+	// `make e2e` runs this suite without -short, locally and in CI. We deliberately don't
+	// auto-detect Docker, since that would let CI silently go green if Docker broke.
 	if testing.Short() {
 		t.Skip("skipping container-backed integration test in -short mode")
 	}
