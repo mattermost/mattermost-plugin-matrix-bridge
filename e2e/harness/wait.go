@@ -18,6 +18,12 @@ const recentPosts = 100
 // returns it.
 func WaitForPost(t *testing.T, client *model.Client4, channelID string, match func(*model.Post) bool) *model.Post {
 	t.Helper()
+	return WaitForPostWithin(t, client, channelID, match, matrixtest.DefaultWaitTimeout)
+}
+
+// WaitForPostWithin is WaitForPost with a caller-chosen timeout.
+func WaitForPostWithin(t *testing.T, client *model.Client4, channelID string, match func(*model.Post) bool, timeout time.Duration) *model.Post {
+	t.Helper()
 	var found *model.Post
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		post, err := findPost(t.Context(), client, channelID, match)
@@ -29,7 +35,7 @@ func WaitForPost(t *testing.T, client *model.Client4, channelID string, match fu
 			return
 		}
 		found = post
-	}, matrixtest.DefaultWaitTimeout, matrixtest.PollInterval)
+	}, timeout, matrixtest.PollInterval)
 	return found
 }
 

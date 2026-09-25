@@ -32,9 +32,15 @@ func GhostUserID(mmUserID string) string {
 // ExecuteCommand runs a slash command in the channel as the client's user.
 func ExecuteCommand(t *testing.T, client *model.Client4, channelID, command string) *model.CommandResponse {
 	t.Helper()
-	resp, _, err := client.ExecuteCommand(t.Context(), channelID, command)
+	resp, err := ExecuteCommandContext(t.Context(), client, channelID, command)
 	require.NoError(t, err, "execute %q in channel %s", command, channelID)
 	return resp
+}
+
+// ExecuteCommandContext is ExecuteCommand with a caller-chosen context, for use in cleanups.
+func ExecuteCommandContext(ctx context.Context, client *model.Client4, channelID, command string) (*model.CommandResponse, error) {
+	resp, _, err := client.ExecuteCommand(ctx, channelID, command)
+	return resp, err
 }
 
 // NewBridgedChannel creates a channel, a Matrix room, and a user on each side, then maps them
@@ -77,7 +83,7 @@ func NewBridgedChannel(t *testing.T) *BridgedChannel {
 		"bot %s never joined room %s for channel %s after %q; command response: %s", bot, roomID, channel.Id, command, resp.Text)
 
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		shared, err := sharedWithRemote(t.Context(), env, channel.Id)
+		shared, err := SharedWithRemote(t.Context(), env, channel.Id)
 		if assert.NoError(c, err) {
 			assert.True(c, shared, "channel %s not confirmed as shared yet", channel.Id)
 		}
@@ -94,9 +100,9 @@ func NewBridgedChannel(t *testing.T) *BridgedChannel {
 	}
 }
 
-// sharedWithRemote reports whether the env's remote has a confirmed invite to the channel. The
+// SharedWithRemote reports whether the env's remote has a confirmed invite to the channel. The
 // endpoint ignores a channel filter, so it pages through every channel shared with the remote.
-func sharedWithRemote(ctx context.Context, env *Env, channelID string) (bool, error) {
+func SharedWithRemote(ctx context.Context, env *Env, channelID string) (bool, error) {
 	const perPage = 200
 	for page := 0; ; page++ {
 		remotes, _, err := env.Admin.GetSharedChannelRemotesByRemoteCluster(ctx, env.RemoteID,

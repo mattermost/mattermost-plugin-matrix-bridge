@@ -22,7 +22,7 @@ import (
 //nolint:gosec // test fixture credentials, not real secrets
 const (
 	HSToken       = "e2e_hs_token"
-	asToken       = "e2e_as_token"
+	ASToken       = "e2e_as_token"
 	adminUsername = "admin"
 	adminPassword = "e2e-admin-password"
 )
@@ -51,19 +51,41 @@ type Env struct {
 	ServerID   string
 	ServerName string
 	RemoteID   string
+
+	// registered is the server view returned when Start registered the server; nil with
+	// WithoutServer.
+	registered map[string]any
 }
 
-// Start boots the environment and registers Synapse through the plugin's REST API. It needs the
-// plugin bundle path in E2E_PLUGIN_BUNDLE. On failure it tears down whatever already started and
-// returns an error that includes the container log tails.
-func Start(ctx context.Context) (*Env, error) {
+type options struct {
+	withoutServer bool
+}
+
+// Option configures Start.
+type Option func(*options)
+
+// WithoutServer starts the environment with no Matrix server registered, leaving ServerID and
+// RemoteID empty.
+func WithoutServer() Option {
+	return func(o *options) { o.withoutServer = true }
+}
+
+// Start boots the environment and, unless WithoutServer is given, registers Synapse through the
+// plugin's REST API. It needs the plugin bundle path in E2E_PLUGIN_BUNDLE. On failure it tears
+// down whatever already started and returns an error that includes the container log tails.
+func Start(ctx context.Context, opts ...Option) (*Env, error) {
 	bundle, err := bundlePath()
 	if err != nil {
 		return nil, err
 	}
 
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	env := &Env{ServerName: ServerName}
-	if err := env.start(ctx, bundle); err != nil {
+	if err := env.start(ctx, bundle, o); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		// Startup usually fails before the plugin logs anything, so keep every Mattermost line.
@@ -78,7 +100,7 @@ func Start(ctx context.Context) (*Env, error) {
 	return env, nil
 }
 
-func (e *Env) start(ctx context.Context, bundle string) error {
+func (e *Env) start(ctx context.Context, bundle string, o options) error {
 	var err error
 	if e.Network, err = network.New(ctx); err != nil {
 		return fmt.Errorf("create docker network: %w", err)
@@ -86,7 +108,7 @@ func (e *Env) start(ctx context.Context, bundle string) error {
 
 	e.Synapse, err = matrixtest.Start(ctx, matrixtest.MatrixTestConfig{
 		ServerName:    ServerName,
-		ASToken:       asToken,
+		ASToken:       ASToken,
 		HSToken:       HSToken,
 		Network:       e.Network,
 		NetworkAlias:  synapseAlias,
@@ -109,6 +131,9 @@ func (e *Env) start(ctx context.Context, bundle string) error {
 	}
 	if err := e.waitForPluginRunning(ctx); err != nil {
 		return err
+	}
+	if o.withoutServer {
+		return nil
 	}
 	if err := e.registerServer(ctx); err != nil {
 		return err
@@ -199,14 +224,14 @@ func (e *Env) waitForPluginRunning(ctx context.Context) error {
 func (e *Env) registerServer(ctx context.Context) error {
 	body := map[string]string{
 		"server_url": e.Synapse.InternalURL,
-		"as_token":   asToken,
+		"as_token":   ASToken,
 		"hs_token":   HSToken,
 	}
 
 	var status int
 	var respBody []byte
 	err := poll(ctx, 30*time.Second, func(ctx context.Context) (bool, error) {
-		resp, err := pluginRequest(ctx, e.Admin, http.MethodPost, "/api/v1/servers", body)
+		resp, err := PluginRequestContext(ctx, e.Admin, http.MethodPost, "/api/v1/servers", body)
 		if err != nil {
 			return false, err
 		}
@@ -228,23 +253,22 @@ func (e *Env) registerServer(ctx context.Context) error {
 	}
 
 	var created struct {
-		Server struct {
-			ServerID   string `json:"server_id"`
-			ServerName string `json:"server_name"`
-			RemoteID   string `json:"remote_id"`
-		} `json:"server"`
+		Server map[string]any `json:"server"`
 	}
 	if err := json.Unmarshal(respBody, &created); err != nil {
 		return fmt.Errorf("decode register response: %w", err)
 	}
-	if created.Server.ServerName != ServerName {
-		return fmt.Errorf("discovered server_name %q, want %q", created.Server.ServerName, ServerName)
+	serverName, _ := created.Server["server_name"].(string)
+	if serverName != ServerName {
+		return fmt.Errorf("discovered server_name %q, want %q", serverName, ServerName)
 	}
-	if created.Server.RemoteID == "" {
+	remoteID, _ := created.Server["remote_id"].(string)
+	if remoteID == "" {
 		return errors.New("registered server has no remote_id")
 	}
-	e.ServerID = created.Server.ServerID
-	e.RemoteID = created.Server.RemoteID
+	e.ServerID, _ = created.Server["server_id"].(string)
+	e.RemoteID = remoteID
+	e.registered = created.Server
 	return nil
 }
 
