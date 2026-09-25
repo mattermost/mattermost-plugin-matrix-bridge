@@ -125,7 +125,10 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
 
     return (
         <>
-            <div style={rowStyle}>
+            <div
+                style={rowStyle}
+                data-testid='matrix-server-row'
+            >
                 <div style={cellStyle}>
                     <div style={nameStyle}>{server.server_name}</div>
                     <button
@@ -165,6 +168,7 @@ const ServerRow: React.FC<Props> = ({server, health, expanded, onToggleExpand, o
                     <span
                         style={pillStyle(pill.variant)}
                         title={pill.title}
+                        data-testid='matrix-server-status'
                     >
                         <span style={pillDotStyle(pill.variant)}/>
                         {pill.label}

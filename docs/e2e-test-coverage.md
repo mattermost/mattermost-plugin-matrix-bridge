@@ -7,8 +7,9 @@ rows covered by the `e2e/` package are updated as its tests land.
 ## What "e2e" means in this repo
 
 There are two container-backed harnesses. Both skip under `-short`, so `make test` runs
-neither; `make e2e` (and the CI `e2e` job) builds the plugin bundle and runs both. The webapp
-has no Playwright/Cypress tests (`webapp/tests/` only holds Jest setup).
+neither; `make e2e` (and the CI `e2e` job) builds the plugin bundle and runs both. Browser tests
+of the System Console section live in `e2e/playwright` and run with `make e2e-ui` (and the CI
+`e2e-ui` job) against the `e2e/harness` environment.
 
 - **`server/` suites: real Synapse, mocked Mattermost.** Go integration tests run against a
   real Synapse started with testcontainers (`testcontainers/matrix`), while Mattermost is a
@@ -120,7 +121,7 @@ Three structural limits apply to the `server/` suites:
 | Unmap channel | ❌ | ❌ | Unit-only (`channel_mapping_test.go`) |
 | `/matrix create` (create room and map) | ❌ | ❌ | Client only (`CreateRoom`) |
 | Slash commands (`/matrix …`, `/matrix server …`) | ❌ | ❌ | Unit-only against a mock plugin (`command_test.go`) |
-| System Console UI + REST API (`/api/v1/servers…`) | ❌ | ❌ | REST is unit-only (`api_servers_test.go`); no UI tests |
+| System Console UI + REST API (`/api/v1/servers…`) | ⚠️ | ❌ | UI covered by `e2e/playwright` (list, add, edit, test, enable/disable, registration, remove, bridged channels, admin-only access). REST has no dedicated e2e tests; `api_servers_test.go` is unit-only |
 | KV migration to the multi-server layout | ❌ | — | Unit-only (`migrations_test.go`) |
 | Cluster broadcast of registry changes | ❌ | ❌ | No e2e |
 
@@ -130,7 +131,7 @@ Out of 47 rows:
 
 | | ✅ | ⚠️ | ❌ | — |
 | --- | --- | --- | --- | --- |
-| Single server | 11 | 8 | 26 | 2 |
+| Single server | 11 | 9 | 25 | 2 |
 | Multi server | 6 | 3 | 37 | 1 |
 
 - **Mattermost → Matrix on one server is the best-covered area.** Messages, markdown,
@@ -173,5 +174,4 @@ Out of 47 rows:
    - disabling or removing A doesn't affect B;
    - adding a second server through `servers.Add` while one is live.
 5. **Grow the real Mattermost e2e suite.** `e2e/harness` runs a real Mattermost server;
-   slash commands, the REST API, and the System Console server management UI (with
-   Playwright) still need tests there.
+   slash commands and the REST API still need tests there.

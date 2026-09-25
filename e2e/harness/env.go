@@ -22,19 +22,20 @@ import (
 //nolint:gosec // test fixture credentials, not real secrets
 const (
 	HSToken       = "e2e_hs_token"
-	asToken       = "e2e_as_token"
-	adminUsername = "admin"
-	adminPassword = "e2e-admin-password"
+	ASToken       = "e2e_as_token"
+	AdminUsername = "admin"
+	AdminPassword = "e2e-admin-password"
 )
 
 const (
 	PluginID = "com.mattermost.plugin-matrix-bridge"
 	// ServerName is Synapse's server_name, which the plugin discovers when registering it.
 	ServerName = "e2e.matrix.local"
+	// SiteURL is Mattermost's URL inside the Docker network. Synapse reaches the plugin through it.
+	SiteURL = "http://mattermost:8065"
 
-	teamName              = "test"
-	mattermostInternalURL = "http://mattermost:8065"
-	synapseAlias          = "synapse"
+	teamName     = "test"
+	synapseAlias = "synapse"
 
 	mattermostLogLines = 100
 	synapseLogLines    = 50
@@ -53,17 +54,35 @@ type Env struct {
 	RemoteID   string
 }
 
-// Start boots the environment and registers Synapse through the plugin's REST API. It needs the
-// plugin bundle path in E2E_PLUGIN_BUNDLE. On failure it tears down whatever already started and
-// returns an error that includes the container log tails.
-func Start(ctx context.Context) (*Env, error) {
+// Option changes how Start builds the environment.
+type Option func(*options)
+
+type options struct {
+	withoutServer bool
+}
+
+// WithoutServer starts Synapse but doesn't register it with the plugin, so the plugin has no
+// servers. ServerID and RemoteID stay empty.
+func WithoutServer() Option {
+	return func(o *options) { o.withoutServer = true }
+}
+
+// Start boots the environment and, unless WithoutServer is given, registers Synapse through the
+// plugin's REST API. It needs the plugin bundle path in E2E_PLUGIN_BUNDLE. On failure it tears
+// down whatever already started and returns an error that includes the container log tails.
+func Start(ctx context.Context, opts ...Option) (*Env, error) {
 	bundle, err := bundlePath()
 	if err != nil {
 		return nil, err
 	}
 
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	env := &Env{ServerName: ServerName}
-	if err := env.start(ctx, bundle); err != nil {
+	if err := env.start(ctx, bundle, o); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		// Startup usually fails before the plugin logs anything, so keep every Mattermost line.
@@ -78,7 +97,7 @@ func Start(ctx context.Context) (*Env, error) {
 	return env, nil
 }
 
-func (e *Env) start(ctx context.Context, bundle string) error {
+func (e *Env) start(ctx context.Context, bundle string, o options) error {
 	var err error
 	if e.Network, err = network.New(ctx); err != nil {
 		return fmt.Errorf("create docker network: %w", err)
@@ -86,11 +105,11 @@ func (e *Env) start(ctx context.Context, bundle string) error {
 
 	e.Synapse, err = matrixtest.Start(ctx, matrixtest.MatrixTestConfig{
 		ServerName:    ServerName,
-		ASToken:       asToken,
+		ASToken:       ASToken,
 		HSToken:       HSToken,
 		Network:       e.Network,
 		NetworkAlias:  synapseAlias,
-		AppServiceURL: mattermostInternalURL + "/plugins/" + PluginID,
+		AppServiceURL: SiteURL + "/plugins/" + PluginID,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("start Synapse: %w", err)
@@ -109,6 +128,9 @@ func (e *Env) start(ctx context.Context, bundle string) error {
 	}
 	if err := e.waitForPluginRunning(ctx); err != nil {
 		return err
+	}
+	if o.withoutServer {
+		return nil
 	}
 	if err := e.registerServer(ctx); err != nil {
 		return err
@@ -199,7 +221,7 @@ func (e *Env) waitForPluginRunning(ctx context.Context) error {
 func (e *Env) registerServer(ctx context.Context) error {
 	body := map[string]string{
 		"server_url": e.Synapse.InternalURL,
-		"as_token":   asToken,
+		"as_token":   ASToken,
 		"hs_token":   HSToken,
 	}
 

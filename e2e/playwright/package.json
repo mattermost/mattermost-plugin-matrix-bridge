@@ -1,0 +1,13 @@
+{
+  "name": "matrix-bridge-e2e-playwright",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "check-types": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.6",
+    "typescript": "5.9.3"
+  }
+}
