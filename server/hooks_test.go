@@ -8,10 +8,12 @@ import (
 
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/servers"
 	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/store/kvstore"
 )
@@ -227,16 +229,18 @@ func TestServerIDForSyncMsg(t *testing.T) {
 
 		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		require.Error(t, err, "a KV read failure must surface as an error so Mattermost retries the batch instead of dropping it")
+		assert.False(t, isPermanentSyncError(err))
 		assert.False(t, shouldSync)
 	})
 
-	t.Run("corrupt channel mapping JSON is an operational error, not a silent no-op", func(t *testing.T) {
+	t.Run("corrupt channel mapping JSON is a permanent error", func(t *testing.T) {
 		plugin := newTestPluginForHooks(t)
 		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
 		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey("channel1"), []byte("not-json")))
 
 		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		require.Error(t, err)
+		assert.True(t, isPermanentSyncError(err))
 		assert.False(t, shouldSync)
 	})
 
@@ -248,6 +252,31 @@ func TestServerIDForSyncMsg(t *testing.T) {
 
 		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		require.Error(t, err)
+		assert.False(t, isPermanentSyncError(err))
+		assert.False(t, shouldSync)
+	})
+
+	t.Run("a channel that does not exist is a permanent error", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		_, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		api := plugin.API.(*plugintest.API)
+		api.On("GetChannel", "channel1").Return(nil, model.NewAppError("GetChannel", "id", nil, "missing", http.StatusNotFound))
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.Error(t, err)
+		assert.True(t, isPermanentSyncError(err))
+		assert.False(t, shouldSync)
+	})
+
+	t.Run("a server removed from the registry behind a stale remote cache is a permanent error", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		require.NoError(t, plugin.kvstore.Set(kvstore.KeyServersConfig, []byte("[]")))
+		delete(plugin.serverConfigs, serverID)
+
+		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
+		require.Error(t, err)
+		assert.True(t, isPermanentSyncError(err))
 		assert.False(t, shouldSync)
 	})
 
@@ -337,8 +366,173 @@ func TestServerIDForSyncMsg(t *testing.T) {
 
 		_, shouldSync, err := plugin.serverIDForSyncMsg("channel1", &model.RemoteCluster{RemoteId: remoteID})
 		require.Error(t, err, "a failed cache refresh must surface as an error, not be conflated with 'not one of our remotes'")
+		assert.False(t, isPermanentSyncError(err))
 		assert.False(t, shouldSync)
 	})
+}
+
+// newHomeserverStub answers whoami while healthy reports true and 503 otherwise, and
+// rejects every other request with M_NOT_FOUND, so any room alias fails to resolve.
+func newHomeserverStub(t *testing.T, healthy func() bool) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/_matrix/client/v3/account/whoami" {
+			if !healthy() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(`{"user_id":"@bridge:a.example.com"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"errcode":"M_NOT_FOUND","error":"Room alias not found"}`))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func alwaysHealthy() bool { return true }
+
+// setupSyncMsgTest registers one server whose client talks to serverURL and maps a new
+// channel to roomIdentifier on it.
+func setupSyncMsgTest(t *testing.T, serverURL, roomIdentifier string) (plugin *Plugin, rc *model.RemoteCluster, serverID, channelID string) {
+	t.Helper()
+	plugin = newTestPluginForHooks(t)
+	client := createMatrixClientWithTestLogger(t, serverURL, "as", "")
+	serverID, remoteID := registerTestServer(t, plugin, serverURL, "a.example.com", client)
+
+	channelID = model.NewId()
+	mappingData, err := buildSingleChannelMapping(serverID, roomIdentifier)
+	require.NoError(t, err)
+	require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingData))
+
+	return plugin, &model.RemoteCluster{RemoteId: remoteID}, serverID, channelID
+}
+
+func newSyncTestPost(channelID string) *model.Post {
+	return &model.Post{Id: model.NewId(), ChannelId: channelID, UserId: model.NewId(), Message: "hello"}
+}
+
+func TestOnSharedChannelsSyncMsg(t *testing.T) {
+	t.Run("a transient routing failure asks Mattermost to retry the batch", func(t *testing.T) {
+		plugin, rc, _, channelID := setupSyncMsgTest(t, unreachableURL, "!room:a.example.com")
+		plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.BuildChannelMappingKey(channelID)}
+
+		_, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID)}}, rc)
+		require.Error(t, err)
+	})
+
+	t.Run("a batch that can never be routed is skipped", func(t *testing.T) {
+		plugin, rc, _, channelID := setupSyncMsgTest(t, unreachableURL, "!room:a.example.com")
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), []byte("not-json")))
+
+		resp, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID)}}, rc)
+		require.NoError(t, err, "a held cursor would resend this batch on every sync of the channel")
+		assert.Empty(t, resp.PostErrors)
+	})
+
+	t.Run("a missing Matrix client asks Mattermost to retry the batch", func(t *testing.T) {
+		plugin := newTestPluginForHooks(t)
+		serverID, remoteID := registerTestServer(t, plugin, "https://a.example.com", "a.example.com", nil)
+		channelID := model.NewId()
+		mappingData, err := buildSingleChannelMapping(serverID, "!room:a.example.com")
+		require.NoError(t, err)
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), mappingData))
+		rc := &model.RemoteCluster{RemoteId: remoteID}
+
+		_, err = plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID)}}, rc)
+		require.Error(t, err)
+		assert.False(t, plugin.OnSharedChannelsPing(rc), "ping must also report the missing client, so the remote is paused rather than retried")
+	})
+
+	t.Run("posts that fail on their own are reported in PostErrors", func(t *testing.T) {
+		stub := newHomeserverStub(t, alwaysHealthy)
+		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#missing:a.example.com")
+		post1 := newSyncTestPost(channelID)
+		post2 := newSyncTestPost(channelID)
+
+		resp, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{post1, post2}}, rc)
+		require.NoError(t, err, "a per-post failure must not hold the cursor for the whole batch")
+		assert.ElementsMatch(t, []string{post1.Id, post2.Id}, resp.PostErrors)
+		assert.True(t, plugin.OnSharedChannelsPing(rc))
+	})
+
+	t.Run("a homeserver outage fails the whole batch instead of reporting PostErrors", func(t *testing.T) {
+		plugin, rc, _, channelID := setupSyncMsgTest(t, unreachableURL, "#room:a.example.com")
+
+		resp, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID), newSyncTestPost(channelID)}}, rc)
+		require.Error(t, err)
+		assert.Empty(t, resp.PostErrors, "per-post retries would be spent while the homeserver is down")
+		assert.False(t, plugin.OnSharedChannelsPing(rc), "ping must agree, so the remote is paused until the homeserver is back")
+	})
+
+	t.Run("an outage partway through a batch drops PostErrors already collected", func(t *testing.T) {
+		var probes atomic.Int32
+		stub := newHomeserverStub(t, func() bool { return probes.Add(1) == 1 })
+		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#missing:a.example.com")
+
+		resp, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID), newSyncTestPost(channelID)}}, rc)
+		require.Error(t, err)
+		assert.Empty(t, resp.PostErrors, "the whole batch is resent, so no post may also be queued for an individual retry")
+	})
+
+	t.Run("a user sync failure during an outage fails the batch", func(t *testing.T) {
+		plugin, rc, serverID, channelID := setupSyncMsgTest(t, unreachableURL, "!room:a.example.com")
+		user := &model.User{Id: model.NewId(), Username: "alice", FirstName: "Alice"}
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildGhostUserKey(serverID, user.Id), []byte("@_mattermost_alice:a.example.com")))
+
+		_, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Users: map[string]*model.User{user.Id: user}}, rc)
+		require.Error(t, err)
+	})
+
+	t.Run("a reaction sync failure during an outage fails the batch", func(t *testing.T) {
+		plugin, rc, _, channelID := setupSyncMsgTest(t, unreachableURL, "#room:a.example.com")
+		reaction := &model.Reaction{UserId: model.NewId(), PostId: model.NewId(), EmojiName: "smile"}
+
+		_, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Reactions: []*model.Reaction{reaction}}, rc)
+		require.Error(t, err)
+	})
+
+	t.Run("a reaction that fails on its own is skipped", func(t *testing.T) {
+		stub := newHomeserverStub(t, alwaysHealthy)
+		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#missing:a.example.com")
+		reaction := &model.Reaction{UserId: model.NewId(), PostId: model.NewId(), EmojiName: "smile"}
+
+		resp, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Reactions: []*model.Reaction{reaction}}, rc)
+		require.NoError(t, err)
+		assert.Empty(t, resp.PostErrors)
+	})
+}
+
+func TestOnSharedChannelsAttachmentSyncMsgRouting(t *testing.T) {
+	t.Run("a transient routing failure asks Mattermost to retry", func(t *testing.T) {
+		plugin, rc, _, channelID := setupSyncMsgTest(t, unreachableURL, "!room:a.example.com")
+		plugin.kvstore = &erroringKVStore{KVStore: plugin.kvstore, errOnGetKey: kvstore.BuildChannelMappingKey(channelID)}
+
+		err := plugin.OnSharedChannelsAttachmentSyncMsg(&model.FileInfo{Id: model.NewId()}, newSyncTestPost(channelID), rc)
+		require.Error(t, err)
+	})
+
+	t.Run("an attachment that can never be routed is skipped", func(t *testing.T) {
+		plugin, rc, _, channelID := setupSyncMsgTest(t, unreachableURL, "!room:a.example.com")
+		require.NoError(t, plugin.kvstore.Set(kvstore.BuildChannelMappingKey(channelID), []byte("not-json")))
+
+		err := plugin.OnSharedChannelsAttachmentSyncMsg(&model.FileInfo{Id: model.NewId()}, newSyncTestPost(channelID), rc)
+		require.NoError(t, err)
+	})
+}
+
+func TestHomeserverUnavailable(t *testing.T) {
+	stub := newHomeserverStub(t, alwaysHealthy)
+	healthy := createMatrixClientWithTestLogger(t, stub.URL, "as", "")
+	down := createMatrixClientWithTestLogger(t, unreachableURL, "as", "")
+	itemErr := errors.New("item failed")
+	rateLimited := errors.Wrap(&matrix.Error{StatusCode: http.StatusTooManyRequests, ErrCode: "M_LIMIT_EXCEEDED"}, "send")
+
+	assert.False(t, homeserverUnavailable(healthy, itemErr))
+	assert.True(t, homeserverUnavailable(healthy, rateLimited))
+	assert.True(t, homeserverUnavailable(down, itemErr))
 }
 
 // TestOnSharedChannelsPing covers §5.1's ping requirements: healthy-but-idle for every
