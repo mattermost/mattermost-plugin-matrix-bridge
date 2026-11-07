@@ -232,3 +232,49 @@ func (pft *PendingFileTracker) Size() int {
 	}
 	return total
 }
+
+const (
+	maxSyncBatchRetries = 3
+
+	syncRetryCounterMaxEntries = 10000
+)
+
+// syncRetryCounter counts the transient failures of each sync item. Its zero value is
+// ready to use.
+type syncRetryCounter struct {
+	mutex   sync.Mutex
+	entries map[string]syncRetryCount
+}
+
+type syncRetryCount struct {
+	count    int
+	lastSeen time.Time
+}
+
+// add records one more failure for key and returns the total. A count unused for an hour
+// starts over.
+func (c *syncRetryCounter) add(key string) int {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	now := time.Now()
+	if c.entries == nil {
+		c.entries = make(map[string]syncRetryCount)
+	}
+	if len(c.entries) >= syncRetryCounterMaxEntries {
+		for k, entry := range c.entries {
+			if now.Sub(entry.lastSeen) > time.Hour {
+				delete(c.entries, k)
+			}
+		}
+	}
+
+	entry := c.entries[key]
+	if now.Sub(entry.lastSeen) > time.Hour {
+		entry.count = 0
+	}
+	entry.count++
+	entry.lastSeen = now
+	c.entries[key] = entry
+	return entry.count
+}

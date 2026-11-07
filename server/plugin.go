@@ -70,6 +70,8 @@ type Plugin struct {
 	// pendingFiles tracks uploaded files awaiting their posts
 	pendingFiles *PendingFileTracker
 
+	syncBatchRetries syncRetryCounter
+
 	backgroundJob *cluster.Job
 
 	// configurationLock synchronizes access to the configuration.
@@ -522,12 +524,13 @@ func (p *Plugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermost
 // resolves exactly one server from rc and the caller acts on that server alone.
 //
 // The returned error distinguishes an intentional no-op from an operational failure.
-// Both outbound hooks (server/hooks.go) must propagate a non-nil error rather than
+// Both outbound hooks (server/hooks.go) must propagate a transient error rather than
 // swallow it: Mattermost only retains the shared-channels sync cursor and retries the
 // batch when the hook returns an error (the inbound webhook path applies the same
 // principle with its 503/Retry-After response for the analogous cache-lag case). Turning
 // an operational failure into a quiet (_, false, nil) would advance the cursor past
-// posts, reactions and files that were never actually delivered.
+// posts, reactions and files that were never actually delivered. Failures that no retry
+// can fix are marked with permanentSyncError, and the hooks skip those batches.
 //
 // Resolution:
 //  1. rc == nil || rc.RemoteId == "" -> (defensive; should not happen in production) no-op.
@@ -539,19 +542,22 @@ func (p *Plugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermost
 //     build this server's client. A registry read or refresh failure is an operational
 //     failure - never conflated with "not ours", which would advance the cursor past
 //     undelivered posts.
-//  3. serverConfigForRouting fails -> operational failure (registry read failure).
+//  3. serverConfigForRouting fails -> operational failure (registry read failure), or
+//     permanent if the server has been removed from the registry.
 //  4. The resolved server is disabled -> skip. This is the only thing stopping outbound
 //     traffic for a disabled server (§3.11) - its remote stays registered and invited,
 //     so the hooks keep firing, and this check is what makes that a no-op.
-//  5. getChannelServerMappings fails -> operational failure (KV read/parse failure).
+//  5. getChannelServerMappings fails -> operational failure (KV read failure), or
+//     permanent if the stored mapping cannot be parsed.
 //  6. Membership (not equality) against channelID's mappings, counting only mappings
 //     whose server is still registered - a removed server leaves its entry behind, and
 //     treating that as "owned elsewhere" would strand the channel forever: mapped to
 //     this server -> use it; mapped to another registered server -> skip (that remote is
 //     still invited but its server is no longer mapped, do not relay its traffic
 //     elsewhere); unmapped, or mapped only to removed servers -> isChannelDirect fails
-//     -> operational failure; and the channel is a DM -> use this server anyway, so the
-//     DM room can be auto-created on it; and not a DM -> skip.
+//     -> operational failure, or permanent if the channel does not exist; and the
+//     channel is a DM -> use this server anyway, so the DM room can be auto-created on
+//     it; and not a DM -> skip.
 func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (serverID string, shouldSync bool, err error) {
 	if rc == nil || rc.RemoteId == "" {
 		p.logger.LogWarn("SyncMsg received without a usable RemoteCluster; skipping")
@@ -577,6 +583,9 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 	}
 
 	server, err := p.serverConfigForRouting(serverID)
+	if errors.Is(err, servers.ErrNotRegistered) {
+		return "", false, permanentSyncError{errors.Wrap(err, "get server configuration for routing")}
+	}
 	if err != nil {
 		return "", false, errors.Wrap(err, "get server configuration for routing")
 	}
@@ -611,6 +620,10 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 	}
 
 	isDM, err := p.isChannelDirect(channelID)
+	var appErr *model.AppError
+	if errors.As(err, &appErr) && appErr.StatusCode == http.StatusNotFound {
+		return "", false, permanentSyncError{errors.Wrap(err, "get channel type")}
+	}
 	if err != nil {
 		return "", false, errors.Wrap(err, "get channel type")
 	}
@@ -619,6 +632,20 @@ func (p *Plugin) serverIDForSyncMsg(channelID string, rc *model.RemoteCluster) (
 	}
 
 	return "", false, nil
+}
+
+// permanentSyncError marks an outbound sync failure that resending the same batch
+// cannot fix.
+type permanentSyncError struct {
+	err error
+}
+
+func (e permanentSyncError) Error() string { return e.err.Error() }
+func (e permanentSyncError) Unwrap() error { return e.err }
+
+func isPermanentSyncError(err error) bool {
+	var permanent permanentSyncError
+	return errors.As(err, &permanent)
 }
 
 // isChannelDirect reports whether channelID is a direct or group-direct channel.
@@ -638,13 +665,18 @@ func (p *Plugin) userOriginatesFromServer(user *model.User, serverID string) boo
 }
 
 // getChannelServerMappings reads and parses a channel's server mappings. A missing key
-// returns (nil, nil) - "unmapped" - which is not an error; a corrupt value is.
+// returns (nil, nil) - "unmapped" - which is not an error; a corrupt value is a
+// permanentSyncError.
 func (p *Plugin) getChannelServerMappings(channelID string) ([]kvstore.ChannelServerMapping, error) {
 	data, err := p.kvstore.Get(kvstore.BuildChannelMappingKey(channelID))
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to read channel server mapping")
 	}
-	return kvstore.ParseChannelServerMappings(data)
+	mappings, err := kvstore.ParseChannelServerMappings(data)
+	if err != nil {
+		return nil, permanentSyncError{err}
+	}
+	return mappings, nil
 }
 
 // UserHasJoinedChannel is called when a user joins or is added to a channel. There is no

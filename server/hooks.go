@@ -1,17 +1,28 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
+
+	"github.com/mattermost/mattermost-plugin-matrix-bridge/server/matrix"
 )
 
 // OnSharedChannelsSyncMsg is called when messages need to be synced from Mattermost to
 // Matrix. One shared-channels remote is registered per homeserver, and the platform
 // invokes this once per invited remote, so it resolves exactly one target server from
 // rc and does no fan-out - see serverIDForSyncMsg.
+//
+// An error makes Mattermost hold the sync cursor and resend the batch, so it is
+// returned only for failures a resend can fix.
 func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteCluster) (model.SyncResponse, error) {
 	serverID, shouldSync, err := p.serverIDForSyncMsg(msg.ChannelId, rc)
 	if err != nil {
+		if isPermanentSyncError(err) {
+			p.logger.LogError("SyncMsg cannot be routed to a Matrix server; skipping batch", "channel_id", msg.ChannelId, "error", err)
+			return model.SyncResponse{}, nil
+		}
 		p.logger.LogError("Failed to resolve server for SyncMsg; asking Mattermost to retry", "channel_id", msg.ChannelId, "error", err)
 		return model.SyncResponse{}, err
 	}
@@ -25,7 +36,19 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 		return model.SyncResponse{}, errors.Wrap(err, "matrix client not initialized")
 	}
 
-	// Process user sync events first (display name changes, etc.)
+	resp, err := p.syncMsgToMatrix(bridge, serverID, msg)
+	if err != nil {
+		// PostErrors already collected are dropped, as the whole batch is resent.
+		return model.SyncResponse{}, err
+	}
+	return resp, nil
+}
+
+func (p *Plugin) syncMsgToMatrix(bridge *MattermostToMatrixBridge, serverID string, msg *model.SyncMsg) (model.SyncResponse, error) {
+	var resp model.SyncResponse
+
+	// Users never hold the cursor, so a transient failure does not stop the other users.
+	var userErr error
 	for _, user := range msg.Users {
 		if user.IsRemote() {
 			// Matrix-originated users are only re-invited to the homeserver they
@@ -34,15 +57,21 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 				continue
 			}
 			if err := p.inviteRemoteUserToMatrixRoom(serverID, user, msg.ChannelId); err != nil {
-				p.logger.LogError("Failed to invite remote user to Matrix room", "error", err, "user_id", user.Id, "username", user.Username, "channel_id", msg.ChannelId, "server_id", serverID)
+				if err := p.syncItemFailed(bridge, "invite:"+user.Id, err, "Failed to invite remote user to Matrix room", "user_id", user.Id, "username", user.Username, "channel_id", msg.ChannelId, "server_id", serverID); err != nil && userErr == nil {
+					userErr = err
+				}
 			}
 			continue
 		}
 
 		if err := bridge.SyncUserToMatrix(user); err != nil {
-			p.logger.LogError("Failed to sync user to Matrix", "error", err, "user_id", user.Id, "username", user.Username, "server_id", serverID)
-			continue
+			if err := p.syncItemFailed(bridge, "user:"+user.Id, err, "Failed to sync user to Matrix", "user_id", user.Id, "username", user.Username, "server_id", serverID); err != nil && userErr == nil {
+				userErr = err
+			}
 		}
+	}
+	if userErr != nil {
+		return resp, userErr
 	}
 
 	// Then process post sync events
@@ -54,8 +83,10 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 		}
 
 		if err := bridge.SyncPostToMatrix(post, msg.ChannelId); err != nil {
-			p.logger.LogError("Failed to sync post to Matrix", "error", err, "post_id", post.Id, "server_id", serverID)
-			continue
+			if err := p.syncItemFailed(bridge, "post:"+post.Id, err, "Failed to sync post to Matrix", "post_id", post.Id, "channel_id", msg.ChannelId, "server_id", serverID); err != nil {
+				return resp, err
+			}
+			resp.PostErrors = append(resp.PostErrors, post.Id)
 		}
 	}
 
@@ -66,13 +97,44 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 			continue
 		}
 
+		itemKey := "reaction:" + reaction.PostId + ":" + reaction.UserId + ":" + reaction.EmojiName
 		if err := bridge.SyncReactionToMatrix(reaction, msg.ChannelId); err != nil {
-			p.logger.LogError("Failed to sync reaction to Matrix", "error", err, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName, "server_id", serverID)
-			continue
+			if err := p.syncItemFailed(bridge, itemKey, err, "Failed to sync reaction to Matrix", "post_id", reaction.PostId, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName, "channel_id", msg.ChannelId, "server_id", serverID); err != nil {
+				return resp, err
+			}
 		}
 	}
 
-	return model.SyncResponse{}, nil
+	return resp, nil
+}
+
+// syncItemFailed returns err if the whole batch should be retried, and otherwise logs it
+// as a failure of this item alone and returns nil.
+func (p *Plugin) syncItemFailed(bridge *MattermostToMatrixBridge, itemKey string, err error, message string, keyValuePairs ...any) error {
+	keyValuePairs = append([]any{"error", err}, keyValuePairs...)
+	if isTransientSyncError(err) && p.mayRetrySyncBatch(bridge, itemKey) {
+		p.logger.LogWarn(message+"; asking Mattermost to retry the batch", keyValuePairs...)
+		return errors.Wrap(err, message)
+	}
+	p.logger.LogError(message, keyValuePairs...)
+	return nil
+}
+
+// mayRetrySyncBatch reports whether an item's transient failure may hold the sync cursor
+// again. Past maxSyncBatchRetries it may only while the homeserver is unreachable.
+func (p *Plugin) mayRetrySyncBatch(bridge *MattermostToMatrixBridge, itemKey string) bool {
+	if p.syncBatchRetries.add(trackerKey(bridge.serverID, itemKey)) <= maxSyncBatchRetries {
+		return true
+	}
+	return bridge.matrixClient.TestConnection() != nil
+}
+
+func isTransientSyncError(err error) bool {
+	if matrix.IsTransientError(err) {
+		return true
+	}
+	var appErr *model.AppError
+	return errors.As(err, &appErr) && appErr.StatusCode >= http.StatusInternalServerError
 }
 
 // OnSharedChannelsPing is called to check if the bridge is healthy and ready to process
@@ -115,6 +177,10 @@ func (p *Plugin) OnSharedChannelsPing(rc *model.RemoteCluster) bool {
 func (p *Plugin) OnSharedChannelsAttachmentSyncMsg(fi *model.FileInfo, post *model.Post, rc *model.RemoteCluster) error {
 	serverID, shouldSync, err := p.serverIDForSyncMsg(post.ChannelId, rc)
 	if err != nil {
+		if isPermanentSyncError(err) {
+			p.logger.LogError("Attachment SyncMsg cannot be routed to a Matrix server; skipping", "channel_id", post.ChannelId, "file_id", fi.Id, "error", err)
+			return nil
+		}
 		p.logger.LogError("Failed to resolve server for attachment SyncMsg; asking Mattermost to retry", "channel_id", post.ChannelId, "file_id", fi.Id, "error", err)
 		return err
 	}

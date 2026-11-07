@@ -3,6 +3,10 @@ package matrix
 
 import (
 	"context"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"slices"
 	"sync"
 	"time"
@@ -463,4 +467,19 @@ func IsRateLimitError(err error) bool {
 		return matrixErr.StatusCode == 429 || matrixErr.ErrCode == "M_LIMIT_EXCEEDED"
 	}
 	return false
+}
+
+// IsTransientError reports whether retrying the same request may succeed.
+func IsTransientError(err error) bool {
+	if IsRateLimitError(err) {
+		return true
+	}
+	var matrixErr *Error
+	if errors.As(err, &matrixErr) {
+		return matrixErr.StatusCode >= http.StatusInternalServerError
+	}
+	var urlErr *url.Error
+	var opErr *net.OpError
+	return errors.As(err, &urlErr) || errors.As(err, &opErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.DeadlineExceeded)
 }
