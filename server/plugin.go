@@ -528,8 +528,7 @@ func (p *Plugin) GetMatrixUserIDFromMattermostUserForServer(serverID, mattermost
 // principle with its 503/Retry-After response for the analogous cache-lag case). Turning
 // an operational failure into a quiet (_, false, nil) would advance the cursor past
 // posts, reactions and files that were never actually delivered. Failures that no retry
-// can fix are marked with permanentSyncError instead, and the hooks skip those batches:
-// with the cursor held, they would otherwise be resent on every sync of the channel.
+// can fix are marked with permanentSyncError, and the hooks skip those batches.
 //
 // Resolution:
 //  1. rc == nil || rc.RemoteId == "" -> (defensive; should not happen in production) no-op.

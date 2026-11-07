@@ -398,7 +398,7 @@ func (c *Client) RedactEventAsGhost(roomID, eventID, ghostUserID string) (*SendE
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("matrix redaction API error: %d %s", resp.StatusCode, string(body))
+		return nil, errors.Wrap(parseMatrixError(resp.StatusCode, body), "matrix redaction API error")
 	}
 
 	var response SendEventResponse
@@ -440,7 +440,7 @@ func (c *Client) GetEvent(roomID, eventID string) (map[string]any, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get event: %d %s", resp.StatusCode, string(body))
+		return nil, errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to get event")
 	}
 
 	var event map[string]any
@@ -483,7 +483,7 @@ func (c *Client) GetEventRelationsAsUser(roomID, eventID, userID string) ([]map[
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get event relations: %d %s", resp.StatusCode, string(body))
+		return nil, errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to get event relations")
 	}
 
 	var response struct {
@@ -615,7 +615,7 @@ func (c *Client) JoinRoom(roomIdentifier string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to join room: %d %s", resp.StatusCode, string(body))
+		return errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to join room")
 	}
 
 	return nil
@@ -661,7 +661,7 @@ func (c *Client) JoinRoomAsUser(roomIdentifier, userID string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to join room as user: %d %s", resp.StatusCode, string(body))
+		return errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to join room as user")
 	}
 
 	return nil
@@ -760,7 +760,7 @@ func (c *Client) GetRoomJoinRule(roomID string) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to get join rules: %d %s", resp.StatusCode, string(body))
+		return "", errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to get join rules")
 	}
 
 	var joinRuleEvent struct {
@@ -1163,7 +1163,7 @@ func (c *Client) CreateDirectRoom(ghostUserIDs []string, roomName string) (strin
 
 	if resp.StatusCode != http.StatusOK {
 		c.logger.LogError("Matrix DM room creation failed", "status_code", resp.StatusCode, "response", string(body), "users", ghostUserIDs)
-		return "", fmt.Errorf("failed to create DM room: %d %s", resp.StatusCode, string(body))
+		return "", errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to create DM room")
 	}
 
 	var response struct {
@@ -1252,7 +1252,7 @@ func (c *Client) AddRoomAlias(roomID, alias string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		c.logger.LogError("Failed to add room alias", "status_code", resp.StatusCode, "response", string(body), "alias", alias, "room_id", roomID)
-		return fmt.Errorf("failed to add room alias: %d %s", resp.StatusCode, string(body))
+		return errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to add room alias")
 	}
 
 	c.logger.LogDebug("Successfully added room alias", "room_id", roomID, "alias", alias)
@@ -1322,7 +1322,7 @@ func (c *Client) CreateGhostUser(mattermostUserID, displayName string, avatarDat
 
 	// 200 = created, 400 with M_USER_IN_USE = already exists (both are fine)
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusBadRequest {
-		return nil, fmt.Errorf("failed to create ghost user: %d %s", resp.StatusCode, string(body))
+		return nil, errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to create ghost user")
 	}
 
 	// Check if it's a "user already exists" error
@@ -1331,7 +1331,7 @@ func (c *Client) CreateGhostUser(mattermostUserID, displayName string, avatarDat
 			Errcode string `json:"errcode"`
 		}
 		if err := json.Unmarshal(body, &errorResp); err != nil || errorResp.Errcode != "M_USER_IN_USE" {
-			return nil, fmt.Errorf("failed to create ghost user: %d %s", resp.StatusCode, string(body))
+			return nil, errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to create ghost user")
 		}
 		// User already exists, that's fine - continue with profile setup
 	}
@@ -1425,7 +1425,7 @@ func (c *Client) SetDisplayName(userID, displayName string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to set display name: %d %s", resp.StatusCode, string(body))
+		return errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to set display name")
 	}
 
 	return nil
@@ -1478,7 +1478,7 @@ func (c *Client) SetAvatarURL(userID, avatarURL string) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to set avatar URL: %d %s", resp.StatusCode, string(body))
+		return errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to set avatar URL")
 	}
 
 	return nil
@@ -1521,7 +1521,7 @@ func (c *Client) UploadMedia(data []byte, filename, contentType string) (string,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to upload media: %d %s", resp.StatusCode, string(body))
+		return "", errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to upload media")
 	}
 
 	var response struct {
@@ -1833,7 +1833,7 @@ func (c *Client) sendEventAsUser(roomID, eventType string, content any, userID s
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(body))
+		return nil, parseMatrixError(resp.StatusCode, body)
 	}
 
 	var response SendEventResponse
@@ -1878,7 +1878,7 @@ func (c *Client) ResolveRoomAlias(roomAlias string) (string, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("failed to resolve room alias: %d %s", resp.StatusCode, string(body))
+		return "", errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to resolve room alias")
 	}
 
 	var response struct {
@@ -2125,7 +2125,7 @@ func (c *Client) PublishRoomToDirectory(roomID string, publish bool) error {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to set directory visibility: %d %s", resp.StatusCode, string(body))
+		return errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to set directory visibility")
 	}
 
 	return nil
@@ -2199,7 +2199,7 @@ func (c *Client) sendCustomEventAsUser(roomID, eventType string, content any, us
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(body))
+		return parseMatrixError(resp.StatusCode, body)
 	}
 
 	return nil
@@ -2490,7 +2490,7 @@ func (c *Client) makeMatrixRequest(method, endpoint string, data any, token stri
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("matrix API error: %d %s", resp.StatusCode, string(responseBody))
+		return nil, parseMatrixError(resp.StatusCode, responseBody)
 	}
 
 	if len(responseBody) == 0 {
@@ -2534,7 +2534,7 @@ func (c *Client) GetMattermostChannelID(roomID string) (string, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("failed to get room state: %d %s", resp.StatusCode, string(body))
+		return "", errors.Wrap(parseMatrixError(resp.StatusCode, body), "failed to get room state")
 	}
 
 	body, err := io.ReadAll(resp.Body)

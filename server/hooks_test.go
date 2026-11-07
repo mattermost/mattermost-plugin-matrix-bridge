@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 
@@ -371,28 +373,29 @@ func TestServerIDForSyncMsg(t *testing.T) {
 	})
 }
 
-// newHomeserverStub answers whoami while healthy reports true and 503 otherwise, and
-// rejects every other request with M_NOT_FOUND, so any room alias fails to resolve.
-func newHomeserverStub(t *testing.T, healthy func() bool) *httptest.Server {
+// newHomeserverStub answers whoami successfully and fails every other request with the
+// status returned by status, so any room alias fails to resolve.
+func newHomeserverStub(t *testing.T, status func() int) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/_matrix/client/v3/account/whoami" {
-			if !healthy() {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
 			_, _ = w.Write([]byte(`{"user_id":"@bridge:a.example.com"}`))
 			return
 		}
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"errcode":"M_NOT_FOUND","error":"Room alias not found"}`))
+		code := status()
+		w.WriteHeader(code)
+		if code == http.StatusNotFound {
+			_, _ = w.Write([]byte(`{"errcode":"M_NOT_FOUND","error":"Room alias not found"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"errcode":"M_UNKNOWN","error":"Internal server error"}`))
 	}))
 	t.Cleanup(server.Close)
 	return server
 }
 
-func alwaysHealthy() bool { return true }
+func respondWith(code int) func() int { return func() int { return code } }
 
 // setupSyncMsgTest registers one server whose client talks to serverURL and maps a new
 // channel to roomIdentifier on it.
@@ -447,7 +450,7 @@ func TestOnSharedChannelsSyncMsg(t *testing.T) {
 	})
 
 	t.Run("posts that fail on their own are reported in PostErrors", func(t *testing.T) {
-		stub := newHomeserverStub(t, alwaysHealthy)
+		stub := newHomeserverStub(t, respondWith(http.StatusNotFound))
 		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#missing:a.example.com")
 		post1 := newSyncTestPost(channelID)
 		post2 := newSyncTestPost(channelID)
@@ -467,9 +470,24 @@ func TestOnSharedChannelsSyncMsg(t *testing.T) {
 		assert.False(t, plugin.OnSharedChannelsPing(rc), "ping must agree, so the remote is paused until the homeserver is back")
 	})
 
+	t.Run("a homeserver error response fails the whole batch while whoami still succeeds", func(t *testing.T) {
+		stub := newHomeserverStub(t, respondWith(http.StatusBadGateway))
+		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#room:a.example.com")
+
+		resp, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID), newSyncTestPost(channelID)}}, rc)
+		require.Error(t, err)
+		assert.Empty(t, resp.PostErrors)
+		assert.True(t, plugin.OnSharedChannelsPing(rc))
+	})
+
 	t.Run("an outage partway through a batch drops PostErrors already collected", func(t *testing.T) {
-		var probes atomic.Int32
-		stub := newHomeserverStub(t, func() bool { return probes.Add(1) == 1 })
+		var requests atomic.Int32
+		stub := newHomeserverStub(t, func() int {
+			if requests.Add(1) == 1 {
+				return http.StatusNotFound
+			}
+			return http.StatusServiceUnavailable
+		})
 		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#missing:a.example.com")
 
 		resp, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID), newSyncTestPost(channelID)}}, rc)
@@ -495,7 +513,7 @@ func TestOnSharedChannelsSyncMsg(t *testing.T) {
 	})
 
 	t.Run("a reaction that fails on its own is skipped", func(t *testing.T) {
-		stub := newHomeserverStub(t, alwaysHealthy)
+		stub := newHomeserverStub(t, respondWith(http.StatusNotFound))
 		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#missing:a.example.com")
 		reaction := &model.Reaction{UserId: model.NewId(), PostId: model.NewId(), EmojiName: "smile"}
 
@@ -523,16 +541,26 @@ func TestOnSharedChannelsAttachmentSyncMsgRouting(t *testing.T) {
 	})
 }
 
-func TestHomeserverUnavailable(t *testing.T) {
-	stub := newHomeserverStub(t, alwaysHealthy)
-	healthy := createMatrixClientWithTestLogger(t, stub.URL, "as", "")
-	down := createMatrixClientWithTestLogger(t, unreachableURL, "as", "")
-	itemErr := errors.New("item failed")
-	rateLimited := errors.Wrap(&matrix.Error{StatusCode: http.StatusTooManyRequests, ErrCode: "M_LIMIT_EXCEEDED"}, "send")
-
-	assert.False(t, homeserverUnavailable(healthy, itemErr))
-	assert.True(t, homeserverUnavailable(healthy, rateLimited))
-	assert.True(t, homeserverUnavailable(down, itemErr))
+func TestIsTransientSyncError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		transient bool
+	}{
+		{"plain error", errors.New("item failed"), false},
+		{"rate limited", errors.Wrap(&matrix.Error{StatusCode: http.StatusTooManyRequests, ErrCode: "M_LIMIT_EXCEEDED"}, "send"), true},
+		{"homeserver 5xx", errors.Wrap(&matrix.Error{StatusCode: http.StatusBadGateway, ErrCode: "UNKNOWN"}, "send"), true},
+		{"homeserver 4xx", errors.Wrap(&matrix.Error{StatusCode: http.StatusForbidden, ErrCode: "M_FORBIDDEN"}, "send"), false},
+		{"unreachable", errors.Wrap(&url.Error{Op: "Get", URL: unreachableURL, Err: errors.New("connection refused")}, "send"), true},
+		{"client rate limiter timed out", errors.Wrap(context.DeadlineExceeded, "send rate limited"), true},
+		{"Mattermost 5xx", errors.Wrap(model.NewAppError("GetUser", "id", nil, "", http.StatusInternalServerError), "get user"), true},
+		{"Mattermost 4xx", errors.Wrap(model.NewAppError("GetUser", "id", nil, "", http.StatusNotFound), "get user"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.transient, isTransientSyncError(tt.err))
+		})
+	}
 }
 
 // TestOnSharedChannelsPing covers §5.1's ping requirements: healthy-but-idle for every

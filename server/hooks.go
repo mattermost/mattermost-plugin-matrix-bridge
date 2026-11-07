@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/pkg/errors"
 
@@ -12,32 +14,39 @@ import (
 // invokes this once per invited remote, so it resolves exactly one target server from
 // rc and does no fan-out - see serverIDForSyncMsg.
 //
-// Returning an error makes Mattermost hold the sync cursor and resend the whole batch,
-// so it is reserved for failures that a resend can fix: a transient routing failure, or
-// the homeserver being unreachable or throttling. A post that fails on its own is
-// listed in PostErrors instead, which Mattermost retries individually a bounded number
-// of times, and a batch that can never be routed is skipped.
+// An error makes Mattermost hold the sync cursor and resend the batch, so it is
+// returned only for failures a resend can fix.
 func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteCluster) (model.SyncResponse, error) {
-	var resp model.SyncResponse
-
 	serverID, shouldSync, err := p.serverIDForSyncMsg(msg.ChannelId, rc)
 	if err != nil {
 		if isPermanentSyncError(err) {
 			p.logger.LogError("SyncMsg cannot be routed to a Matrix server; skipping batch", "channel_id", msg.ChannelId, "error", err)
-			return resp, nil
+			return model.SyncResponse{}, nil
 		}
 		p.logger.LogError("Failed to resolve server for SyncMsg; asking Mattermost to retry", "channel_id", msg.ChannelId, "error", err)
-		return resp, err
+		return model.SyncResponse{}, err
 	}
 	if !shouldSync {
-		return resp, nil
+		return model.SyncResponse{}, nil
 	}
 
 	bridge, err := p.newMattermostToMatrixBridge(serverID)
 	if err != nil {
 		p.logger.LogError("Matrix client not initialized for server", "server_id", serverID, "error", err)
-		return resp, errors.Wrap(err, "matrix client not initialized")
+		return model.SyncResponse{}, errors.Wrap(err, "matrix client not initialized")
 	}
+
+	resp, err := p.syncMsgToMatrix(bridge, serverID, msg)
+	if err != nil {
+		p.logger.LogWarn("Transient failure syncing to Matrix; asking Mattermost to retry the batch", "server_id", serverID, "channel_id", msg.ChannelId, "error", err)
+		// PostErrors already collected are dropped, as the whole batch is resent.
+		return model.SyncResponse{}, err
+	}
+	return resp, nil
+}
+
+func (p *Plugin) syncMsgToMatrix(bridge *MattermostToMatrixBridge, serverID string, msg *model.SyncMsg) (model.SyncResponse, error) {
+	var resp model.SyncResponse
 
 	// Process user sync events first (display name changes, etc.)
 	for _, user := range msg.Users {
@@ -48,20 +57,17 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 				continue
 			}
 			if err := p.inviteRemoteUserToMatrixRoom(serverID, user, msg.ChannelId); err != nil {
-				if homeserverUnavailable(bridge.matrixClient, err) {
-					return p.retrySyncBatch(serverID, msg.ChannelId, errors.Wrap(err, "failed to invite remote user to Matrix room"))
+				if err := p.syncItemFailed(err, "Failed to invite remote user to Matrix room", "user_id", user.Id, "username", user.Username, "channel_id", msg.ChannelId, "server_id", serverID); err != nil {
+					return resp, err
 				}
-				p.logger.LogError("Failed to invite remote user to Matrix room", "error", err, "user_id", user.Id, "username", user.Username, "channel_id", msg.ChannelId, "server_id", serverID)
 			}
 			continue
 		}
 
 		if err := bridge.SyncUserToMatrix(user); err != nil {
-			if homeserverUnavailable(bridge.matrixClient, err) {
-				return p.retrySyncBatch(serverID, msg.ChannelId, errors.Wrap(err, "failed to sync user to Matrix"))
+			if err := p.syncItemFailed(err, "Failed to sync user to Matrix", "user_id", user.Id, "username", user.Username, "server_id", serverID); err != nil {
+				return resp, err
 			}
-			p.logger.LogError("Failed to sync user to Matrix", "error", err, "user_id", user.Id, "username", user.Username, "server_id", serverID)
-			continue
 		}
 	}
 
@@ -74,10 +80,9 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 		}
 
 		if err := bridge.SyncPostToMatrix(post, msg.ChannelId); err != nil {
-			if homeserverUnavailable(bridge.matrixClient, err) {
-				return p.retrySyncBatch(serverID, msg.ChannelId, errors.Wrap(err, "failed to sync post to Matrix"))
+			if err := p.syncItemFailed(err, "Failed to sync post to Matrix", "post_id", post.Id, "server_id", serverID); err != nil {
+				return resp, err
 			}
-			p.logger.LogError("Failed to sync post to Matrix", "error", err, "post_id", post.Id, "server_id", serverID)
 			resp.PostErrors = append(resp.PostErrors, post.Id)
 		}
 	}
@@ -90,29 +95,31 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 		}
 
 		if err := bridge.SyncReactionToMatrix(reaction, msg.ChannelId); err != nil {
-			if homeserverUnavailable(bridge.matrixClient, err) {
-				return p.retrySyncBatch(serverID, msg.ChannelId, errors.Wrap(err, "failed to sync reaction to Matrix"))
+			if err := p.syncItemFailed(err, "Failed to sync reaction to Matrix", "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName, "server_id", serverID); err != nil {
+				return resp, err
 			}
-			p.logger.LogError("Failed to sync reaction to Matrix", "error", err, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName, "server_id", serverID)
-			continue
 		}
 	}
 
 	return resp, nil
 }
 
-// retrySyncBatch fails the whole SyncMsg with an empty response, so no item is also
-// queued for an individual retry of a batch that is about to be resent.
-func (p *Plugin) retrySyncBatch(serverID, channelID string, err error) (model.SyncResponse, error) {
-	p.logger.LogWarn("Matrix homeserver unavailable; asking Mattermost to retry the batch", "server_id", serverID, "channel_id", channelID, "error", err)
-	return model.SyncResponse{}, err
+// syncItemFailed returns err if the whole batch should be retried, and otherwise logs it
+// as a failure of this item alone and returns nil.
+func (p *Plugin) syncItemFailed(err error, message string, keyValuePairs ...any) error {
+	if isTransientSyncError(err) {
+		return errors.Wrap(err, message)
+	}
+	p.logger.LogError(message, append([]any{"error", err}, keyValuePairs...)...)
+	return nil
 }
 
-// homeserverUnavailable reports whether an item failed because the homeserver is
-// throttling or unreachable, rather than because of the item itself. Reachability uses
-// the same probe as OnSharedChannelsPing.
-func homeserverUnavailable(client *matrix.Client, err error) bool {
-	return matrix.IsRateLimitError(err) || client.TestConnection() != nil
+func isTransientSyncError(err error) bool {
+	if matrix.IsTransientError(err) {
+		return true
+	}
+	var appErr *model.AppError
+	return errors.As(err, &appErr) && appErr.StatusCode >= http.StatusInternalServerError
 }
 
 // OnSharedChannelsPing is called to check if the bridge is healthy and ready to process
