@@ -448,6 +448,10 @@ func (b *MattermostToMatrixBridge) createPostInMatrix(post *model.Post, matrixRo
 
 	sendResponse, err := b.matrixClient.SendMessage(messageRequest)
 	if err != nil {
+		// GetFiles consumed them, and Mattermost does not resend attachments with a retried post.
+		for _, file := range pendingFiles {
+			b.fileTracker.AddFile(b.serverID, post.Id, file)
+		}
 		return errors.Wrap(err, "failed to send message as ghost user")
 	}
 

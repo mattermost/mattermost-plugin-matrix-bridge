@@ -38,7 +38,6 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 
 	resp, err := p.syncMsgToMatrix(bridge, serverID, msg)
 	if err != nil {
-		p.logger.LogWarn("Transient failure syncing to Matrix; asking Mattermost to retry the batch", "server_id", serverID, "channel_id", msg.ChannelId, "error", err)
 		// PostErrors already collected are dropped, as the whole batch is resent.
 		return model.SyncResponse{}, err
 	}
@@ -48,7 +47,8 @@ func (p *Plugin) OnSharedChannelsSyncMsg(msg *model.SyncMsg, rc *model.RemoteClu
 func (p *Plugin) syncMsgToMatrix(bridge *MattermostToMatrixBridge, serverID string, msg *model.SyncMsg) (model.SyncResponse, error) {
 	var resp model.SyncResponse
 
-	// Process user sync events first (display name changes, etc.)
+	// Users never hold the cursor, so a transient failure does not stop the other users.
+	var userErr error
 	for _, user := range msg.Users {
 		if user.IsRemote() {
 			// Matrix-originated users are only re-invited to the homeserver they
@@ -57,18 +57,21 @@ func (p *Plugin) syncMsgToMatrix(bridge *MattermostToMatrixBridge, serverID stri
 				continue
 			}
 			if err := p.inviteRemoteUserToMatrixRoom(serverID, user, msg.ChannelId); err != nil {
-				if err := p.syncItemFailed(err, "Failed to invite remote user to Matrix room", "user_id", user.Id, "username", user.Username, "channel_id", msg.ChannelId, "server_id", serverID); err != nil {
-					return resp, err
+				if err := p.syncItemFailed(bridge, "invite:"+user.Id, err, "Failed to invite remote user to Matrix room", "user_id", user.Id, "username", user.Username, "channel_id", msg.ChannelId, "server_id", serverID); err != nil && userErr == nil {
+					userErr = err
 				}
 			}
 			continue
 		}
 
 		if err := bridge.SyncUserToMatrix(user); err != nil {
-			if err := p.syncItemFailed(err, "Failed to sync user to Matrix", "user_id", user.Id, "username", user.Username, "server_id", serverID); err != nil {
-				return resp, err
+			if err := p.syncItemFailed(bridge, "user:"+user.Id, err, "Failed to sync user to Matrix", "user_id", user.Id, "username", user.Username, "server_id", serverID); err != nil && userErr == nil {
+				userErr = err
 			}
 		}
+	}
+	if userErr != nil {
+		return resp, userErr
 	}
 
 	// Then process post sync events
@@ -80,7 +83,7 @@ func (p *Plugin) syncMsgToMatrix(bridge *MattermostToMatrixBridge, serverID stri
 		}
 
 		if err := bridge.SyncPostToMatrix(post, msg.ChannelId); err != nil {
-			if err := p.syncItemFailed(err, "Failed to sync post to Matrix", "post_id", post.Id, "server_id", serverID); err != nil {
+			if err := p.syncItemFailed(bridge, "post:"+post.Id, err, "Failed to sync post to Matrix", "post_id", post.Id, "channel_id", msg.ChannelId, "server_id", serverID); err != nil {
 				return resp, err
 			}
 			resp.PostErrors = append(resp.PostErrors, post.Id)
@@ -94,8 +97,9 @@ func (p *Plugin) syncMsgToMatrix(bridge *MattermostToMatrixBridge, serverID stri
 			continue
 		}
 
+		itemKey := "reaction:" + reaction.PostId + ":" + reaction.UserId + ":" + reaction.EmojiName
 		if err := bridge.SyncReactionToMatrix(reaction, msg.ChannelId); err != nil {
-			if err := p.syncItemFailed(err, "Failed to sync reaction to Matrix", "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName, "server_id", serverID); err != nil {
+			if err := p.syncItemFailed(bridge, itemKey, err, "Failed to sync reaction to Matrix", "post_id", reaction.PostId, "reaction_user_id", reaction.UserId, "reaction_emoji", reaction.EmojiName, "channel_id", msg.ChannelId, "server_id", serverID); err != nil {
 				return resp, err
 			}
 		}
@@ -106,12 +110,23 @@ func (p *Plugin) syncMsgToMatrix(bridge *MattermostToMatrixBridge, serverID stri
 
 // syncItemFailed returns err if the whole batch should be retried, and otherwise logs it
 // as a failure of this item alone and returns nil.
-func (p *Plugin) syncItemFailed(err error, message string, keyValuePairs ...any) error {
-	if isTransientSyncError(err) {
+func (p *Plugin) syncItemFailed(bridge *MattermostToMatrixBridge, itemKey string, err error, message string, keyValuePairs ...any) error {
+	keyValuePairs = append([]any{"error", err}, keyValuePairs...)
+	if isTransientSyncError(err) && p.mayRetrySyncBatch(bridge, itemKey) {
+		p.logger.LogWarn(message+"; asking Mattermost to retry the batch", keyValuePairs...)
 		return errors.Wrap(err, message)
 	}
-	p.logger.LogError(message, append([]any{"error", err}, keyValuePairs...)...)
+	p.logger.LogError(message, keyValuePairs...)
 	return nil
+}
+
+// mayRetrySyncBatch reports whether an item's transient failure may hold the sync cursor
+// again. Past maxSyncBatchRetries it may only while the homeserver is unreachable.
+func (p *Plugin) mayRetrySyncBatch(bridge *MattermostToMatrixBridge, itemKey string) bool {
+	if p.syncBatchRetries.add(trackerKey(bridge.serverID, itemKey)) <= maxSyncBatchRetries {
+		return true
+	}
+	return bridge.matrixClient.TestConnection() != nil
 }
 
 func isTransientSyncError(err error) bool {

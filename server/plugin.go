@@ -70,6 +70,8 @@ type Plugin struct {
 	// pendingFiles tracks uploaded files awaiting their posts
 	pendingFiles *PendingFileTracker
 
+	syncBatchRetries syncRetryCounter
+
 	backgroundJob *cluster.Job
 
 	// configurationLock synchronizes access to the configuration.

@@ -3,6 +3,8 @@ package matrix
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -477,5 +479,7 @@ func IsTransientError(err error) bool {
 		return matrixErr.StatusCode >= http.StatusInternalServerError
 	}
 	var urlErr *url.Error
-	return errors.As(err, &urlErr) || errors.Is(err, context.DeadlineExceeded)
+	var opErr *net.OpError
+	return errors.As(err, &urlErr) || errors.As(err, &opErr) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.DeadlineExceeded)
 }

@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/mattermost/mattermost/server/public/model"
@@ -480,6 +486,58 @@ func TestOnSharedChannelsSyncMsg(t *testing.T) {
 		assert.True(t, plugin.OnSharedChannelsPing(rc))
 	})
 
+	t.Run("a post that keeps failing while the homeserver is up stops holding the batch", func(t *testing.T) {
+		stub := newHomeserverStub(t, respondWith(http.StatusBadGateway))
+		plugin, rc, _, channelID := setupSyncMsgTest(t, stub.URL, "#room:a.example.com")
+		post := newSyncTestPost(channelID)
+		msg := &model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{post}}
+
+		for range maxSyncBatchRetries {
+			_, err := plugin.OnSharedChannelsSyncMsg(msg, rc)
+			require.Error(t, err)
+		}
+		resp, err := plugin.OnSharedChannelsSyncMsg(msg, rc)
+		require.NoError(t, err)
+		assert.Equal(t, []string{post.Id}, resp.PostErrors)
+	})
+
+	t.Run("a post keeps holding the batch while the homeserver is unreachable", func(t *testing.T) {
+		plugin, rc, _, channelID := setupSyncMsgTest(t, unreachableURL, "#room:a.example.com")
+		msg := &model.SyncMsg{ChannelId: channelID, Posts: []*model.Post{newSyncTestPost(channelID)}}
+
+		for range maxSyncBatchRetries + 2 {
+			_, err := plugin.OnSharedChannelsSyncMsg(msg, rc)
+			require.Error(t, err)
+		}
+	})
+
+	t.Run("a transient user failure does not stop the other users", func(t *testing.T) {
+		var mu sync.Mutex
+		var paths []string
+		stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			paths = append(paths, r.URL.Path)
+			mu.Unlock()
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		t.Cleanup(stub.Close)
+		plugin, rc, serverID, channelID := setupSyncMsgTest(t, stub.URL, "!room:a.example.com")
+		users := map[string]*model.User{}
+		for _, name := range []string{"alice", "bob"} {
+			user := &model.User{Id: model.NewId(), Username: name, FirstName: name}
+			users[user.Id] = user
+			require.NoError(t, plugin.kvstore.Set(kvstore.BuildGhostUserKey(serverID, user.Id), []byte("@_mattermost_"+name+":a.example.com")))
+		}
+
+		_, err := plugin.OnSharedChannelsSyncMsg(&model.SyncMsg{ChannelId: channelID, Users: users}, rc)
+		require.Error(t, err)
+		mu.Lock()
+		defer mu.Unlock()
+		for _, name := range []string{"alice", "bob"} {
+			assert.True(t, slices.ContainsFunc(paths, func(p string) bool { return strings.Contains(p, "@_mattermost_"+name) }), "no request for %s", name)
+		}
+	})
+
 	t.Run("an outage partway through a batch drops PostErrors already collected", func(t *testing.T) {
 		var requests atomic.Int32
 		stub := newHomeserverStub(t, func() int {
@@ -555,6 +613,8 @@ func TestIsTransientSyncError(t *testing.T) {
 		{"client rate limiter timed out", errors.Wrap(context.DeadlineExceeded, "send rate limited"), true},
 		{"Mattermost 5xx", errors.Wrap(model.NewAppError("GetUser", "id", nil, "", http.StatusInternalServerError), "get user"), true},
 		{"Mattermost 4xx", errors.Wrap(model.NewAppError("GetUser", "id", nil, "", http.StatusNotFound), "get user"), false},
+		{"connection reset while reading the body", errors.Wrap(&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, "read body"), true},
+		{"response body cut short", errors.Wrap(io.ErrUnexpectedEOF, "read body"), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -683,4 +743,28 @@ func TestUserHasJoinedChannelPerServerEnablement(t *testing.T) {
 
 	assert.Positive(t, atomic.LoadInt32(&aRequests), "enabled server A must be acted on")
 	assert.Zero(t, atomic.LoadInt32(&bRequests), "disabled server B must never be contacted - this is what would fail if the Enabled check were removed")
+}
+
+func TestCreatePostInMatrixRequeuesFilesWhenSendFails(t *testing.T) {
+	stub := newHomeserverStub(t, respondWith(http.StatusBadGateway))
+	plugin, _, serverID, channelID := setupSyncMsgTest(t, stub.URL, "!room:a.example.com")
+	plugin.pendingFiles = NewPendingFileTracker()
+	bridge, err := plugin.newMattermostToMatrixBridge(serverID)
+	require.NoError(t, err)
+
+	const roomID = "!room:a.example.com"
+	user := &model.User{Id: model.NewId(), Username: "alice"}
+	require.NoError(t, plugin.kvstore.Set(kvstore.BuildGhostUserKey(serverID, user.Id), []byte("@_mattermost_alice:a.example.com")))
+	require.NoError(t, plugin.kvstore.Set(kvstore.BuildGhostRoomKey(serverID, user.Id, roomID), []byte("joined")))
+	post := newSyncTestPost(channelID)
+	post.UserId = user.Id
+	file := &PendingFile{FileID: model.NewId(), Filename: "a.png", MxcURI: "mxc://a.example.com/abc", MimeType: "image/png"}
+	plugin.pendingFiles.AddFile(serverID, post.Id, file)
+
+	err = bridge.createPostInMatrix(post, roomID, user, "matrix_event_id")
+	require.Error(t, err)
+
+	files := plugin.pendingFiles.GetFiles(serverID, post.Id)
+	require.Len(t, files, 1)
+	assert.Equal(t, file.FileID, files[0].FileID)
 }
