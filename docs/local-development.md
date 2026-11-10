@@ -12,6 +12,8 @@ Docker Compose.
 - [Multi-Server Testing (two homeservers)](#multi-server-testing-two-homeservers)
     - [Connecting a channel to a room on the second server](#connecting-a-channel-to-a-room-on-the-second-server)
 - [Stopping the Services](#stopping-the-services)
+- [Running tests](#running-tests)
+    - [Writing e2e tests](#writing-e2e-tests)
 
 ## Prerequisites
 
@@ -193,3 +195,32 @@ To completely reset (remove all data):
 ```bash
 docker compose down -v
 ```
+
+## Running tests
+
+- `make test` runs the unit tests only (`go test -short`) and doesn't need Docker.
+- `make e2e` needs Docker. It builds the plugin bundle and runs the whole Go test suite
+  without `-short`, including every container-backed suite. CI runs it on every PR.
+
+To run a single container-backed test, build the bundle once and point
+`E2E_PLUGIN_BUNDLE` at it:
+
+```bash
+make dist
+E2E_PLUGIN_BUNDLE=$PWD/dist/<bundle>.tar.gz go test ./... -run <TestName> -count=1
+```
+
+### Writing e2e tests
+
+Tests in `e2e/` run against a real Mattermost server (Enterprise Edition, unlicensed, amd64
+only, so emulated on Apple Silicon) and a real Synapse on one Docker network. The environment
+starts once per package run:
+
+- Call `harness.Shared(t)` to get the environment. It skips the test under `-short` and, if the
+  test fails, logs the tail of the plugin's Mattermost log and of the Synapse log.
+- Call `harness.NewBridgedChannel(t)` for a channel mapped to its own Matrix room through
+  `/matrix map`, with a Mattermost user in the channel and the Matrix user who created the room.
+- Give each test its own channels, rooms and users with unique names, and never depend on data
+  another test created.
+- Wait with `harness.WaitForPost` / `RequireNoPost` and the Synapse container's
+  `WaitForRoomEvent` / `RequireNoRoomEvent` instead of sleeping.

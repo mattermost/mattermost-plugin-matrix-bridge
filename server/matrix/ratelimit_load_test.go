@@ -453,9 +453,6 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 		expectedThrottleDelay = time.Duration(float64(time.Second) / config.Messages.Rate)
 	}
 
-	// Use 80% of expected delay as threshold to account for timing variations
-	throttleThreshold := time.Duration(float64(expectedThrottleDelay) * 0.8)
-
 	// Simulate the rapid operations that were causing failures
 	const rapidOperations = 20
 
@@ -467,6 +464,7 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 	}
 
 	var messageDurations []time.Duration
+	sendStart := time.Now()
 	for range rapidOperations {
 		start := time.Now()
 		_, err := client.SendMessage(messageReq)
@@ -478,32 +476,33 @@ func TestClient_RateLimitingEffectiveness_Integration(t *testing.T) {
 		assert.Error(t, err, "Expected network error")
 	}
 
+	totalDuration := time.Since(sendStart)
+
 	// Analyze the timing pattern
 	immediateCount := 0
-	throttledCount := 0
 
 	for i, duration := range messageDurations {
 		if duration < 50*time.Millisecond {
 			immediateCount++
-		} else if duration > throttleThreshold {
-			throttledCount++
 		}
 
 		t.Logf("Message %d: %v", i+1, duration)
 	}
 
+	// Tokens refill during the burst, so individual waits vary, but the messages beyond the burst
+	// still take at least one delay each overall. The 20% is a safety margin.
+	expectedThrottled := max(0, rapidOperations-config.Messages.BurstSize)
+	minTotalDuration := time.Duration(float64(expectedThrottled) * float64(expectedThrottleDelay) * 0.8)
+
 	t.Logf("Integration test results:")
 	t.Logf("  Rate limit config: %v messages/sec, burst: %d", config.Messages.Rate, config.Messages.BurstSize)
-	t.Logf("  Expected throttle delay: %v, threshold: %v", expectedThrottleDelay, throttleThreshold)
+	t.Logf("  Expected throttle delay: %v", expectedThrottleDelay)
 	t.Logf("  Immediate messages (burst): %d", immediateCount)
-	t.Logf("  Throttled messages: %d", throttledCount)
+	t.Logf("  Total duration: %v, minimum expected: %v", totalDuration, minTotalDuration)
 
 	// Verify that rate limiting is working as designed
 	assert.Greater(t, immediateCount, 0, "Should allow some immediate messages (burst)")
-	// With current test config (1.0 msgs/sec, burst 15), we expect most messages to be immediate
-	// and only messages beyond the burst to be throttled
-	expectedThrottled := max(0, rapidOperations-config.Messages.BurstSize)
-	assert.GreaterOrEqual(t, throttledCount, expectedThrottled, "Should throttle messages beyond burst capacity")
+	assert.GreaterOrEqual(t, totalDuration, minTotalDuration, "Should throttle messages beyond burst capacity")
 
 	// Most importantly: if we were actually hitting a Matrix server, these delays
 	// should prevent 429 M_LIMIT_EXCEEDED errors because we're self-limiting
