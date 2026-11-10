@@ -22,7 +22,7 @@ has no Playwright/Cypress tests (`webapp/tests/` only holds Jest setup).
 
 Three structural limits apply to the `server/` suites:
 
-- **Outbound tests call bridge methods directly** (`SyncPostToMatrix`, `SyncReactionToMatrix`),
+- **Outbound tests call bridge methods directly** (`SyncPostToMatrix`),
   never the shared-channels hooks (`OnSharedChannelsSyncMsg`,
   `OnSharedChannelsAttachmentSyncMsg`, `OnSharedChannelsProfileImageSyncMsg`). The per-server
   routing in `serverIDForSyncMsg` and the loop-skip logic in the hooks are only unit-tested.
@@ -36,7 +36,6 @@ Three structural limits apply to the `server/` suites:
 
 | File | Suite | Servers |
 | --- | --- | --- |
-| `server/sync_to_matrix_integration_test.go` | `MatrixSyncTestSuite` | 1 |
 | `server/matrix_mentions_integration_test.go` | `TestMatrixMentionProcessing`, `TestMatrixMentionEdgeCases` | 1 |
 | `server/plugin_integration_test.go` | `PluginIntegrationTestSuite` | 1 |
 | `server/dm_room_creation_test.go` | `DMRoomCreationTestSuite` | 1 |
@@ -45,6 +44,7 @@ Three structural limits apply to the `server/` suites:
 | `server/matrix/test/client_test.go` | `MatrixClientTestSuite` (Matrix client only, no plugin) | 1 |
 | `server/multi_server_integration_test.go` | `MultiServerIntegrationTestSuite` (4 tests) | 2 |
 | `e2e/smoke_test.go` | `TestSmokeMattermostToMatrix`, `TestSmokeMatrixToMattermost` (real Mattermost) | 1 |
+| `e2e/mattermost_to_matrix_test.go` | `TestMattermostToMatrix*`: `TextMessage`, `Markdown`, `Mentions`, `ThreadReply`, `PostEdit`, `PostDeletion`, `ReactionAdd`, `ReactionRemoval`, `FileAttachments`, `FileAttachmentDeletion`, `GhostCreation`, `DisplayNameSync`, `AvatarSync`, `UserJoinsChannel`, `MatrixUserReinvited`, `DirectMessage` (real Mattermost) | 1 |
 
 ## Legend
 
@@ -61,23 +61,23 @@ Three structural limits apply to the `server/` suites:
 
 | Feature | E2E single server | E2E multi server | Notes |
 | --- | --- | --- | --- |
-| Text message sync | ✅ | ✅ | `TestBasicMessageSync`, and `TestSmokeMattermostToMatrix` through the real shared-channels hook; `TestOutboundSyncIsolatedPerServer` checks the post reaches only the mapped server |
-| Markdown → HTML formatting | ✅ | ❌ | `TestMarkdownMessageSync` |
-| @mentions → Matrix pills / `m.mentions` | ✅ | ❌ | `TestMessageWithMentions`, `TestMatrixMentionProcessing`, `TestMatrixMentionEdgeCases`. Multi-server should check that the mention uses the target server's ghost domain |
-| Thread replies | ✅ | ❌ | `TestThreadedMessage`; the parent's Matrix event ID is injected into `Props` by hand |
-| Post edit | ✅ | ❌ | `TestMessageEdit`; event ID in `Props` injected by hand |
-| Post deletion → redaction | ❌ | ❌ | Client only (`RedactEvent`); `deletePostFromMatrix` never runs |
-| Reaction add | ✅ | ❌ | `TestReactionSync` |
-| Reaction removal | ❌ | ❌ | `removeReactionFromMatrix` has no test |
-| File attachments | ❌ | ❌ | Client only (`TestMatrixClientWithFiles`). The hook upload + pending-file attach flow (keyed per server) is untested |
-| File attachment deletion | ❌ | ❌ | `deleteFileFromMatrix` has no test |
-| Ghost user creation | ✅ | ⚠️ | `TestGhostUserCreationAndDetection`. Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
-| Display name sync (`SyncUserToMatrix`) | ❌ | ❌ | Client only (`SetDisplayName`) |
-| Avatar sync (profile image hook) | ❌ | ❌ | Client only (`UpdateGhostUserAvatar`) |
-| DM / group DM room auto-creation | ⚠️ | ❌ | `DMRoomCreationTestSuite` checks the room's creation and name, but explicitly skips checking that the message was delivered. Multi-server DM routing (DM created on the calling server) is unit-only |
-| User joins channel → ghost joins room | ⚠️ | ❌ | `testSyncChannelMembersToMatrixRoom` re-implements the loop inside the test instead of calling `UserHasJoinedChannel` |
-| Matrix-originated user re-invited to room | ✅ | ❌ | `testInviteRemoteUserToMatrixRoom`. The rule that users are never invited to a server they didn't come from is unit-only |
-| Shared-channels hook routing (server resolved from `RemoteCluster`, own-remote skip) | ⚠️ | ❌ | Single: `TestSmokeMattermostToMatrix` goes through `OnSharedChannelsSyncMsg` with a real `RemoteCluster`, but the own-remote skip is unit-only (`TestServerIDForSyncMsg`) |
+| Text message sync | ✅ | ✅ | Single: `TestMattermostToMatrixTextMessage` and `TestSmokeMattermostToMatrix`, through the real shared-channels hook. Multi: `TestOutboundSyncIsolatedPerServer` checks the post reaches only the mapped server |
+| Markdown → HTML formatting | ✅ | ❌ | `TestMattermostToMatrixMarkdown`: bold, italic, link, fenced code block; list items stay `- ` lines joined by `<br>` |
+| @mentions → Matrix pills / `m.mentions` | ✅ | ❌ | `TestMattermostToMatrixMentions` (a Mattermost member's ghost and a Matrix-originated user's own ID), plus the mocked-Mattermost `TestMatrixMentionProcessing` and `TestMatrixMentionEdgeCases` in `server/`. Multi-server should check that the mention uses the target server's ghost domain |
+| Thread replies | ✅ | ❌ | `TestMattermostToMatrixThreadReply` |
+| Post edit | ✅ | ❌ | `TestMattermostToMatrixPostEdit` |
+| Post deletion → redaction | ✅ | ❌ | `TestMattermostToMatrixPostDeletion` |
+| Reaction add | ✅ | ❌ | `TestMattermostToMatrixReactionAdd` |
+| Reaction removal | ✅ | ❌ | `TestMattermostToMatrixReactionRemoval` |
+| File attachments | ✅ | ❌ | `TestMattermostToMatrixFileAttachments`: a PNG and a text file through `OnSharedChannelsAttachmentSyncMsg`, downloaded byte for byte with filename and mimetype. Multi-server (the pending-file flow is keyed per server) is untested |
+| File attachment deletion | ⚠️ | ❌ | `TestMattermostToMatrixFileAttachmentDeletion`: post deletion redacts file events; `deleteFileFromMatrix` is never reached for an already-synced attachment, because Mattermost doesn't re-sync a deleted one (the removal subtest skips) |
+| Ghost user creation | ✅ | ⚠️ | Single: `TestMattermostToMatrixGhostCreation`; the join hook creates the ghost with the full name and joins it before the first post (also `TestGhostUserCreationAndDetection`). Multi: a ghost is created on server A only; nothing checks that one Mattermost user gets separate ghosts on A and B |
+| Display name sync (`SyncUserToMatrix`) | ✅ | ❌ | `TestMattermostToMatrixDisplayNameSync`: first and last name; the nickname isn't used (`ShowFullName`). Mattermost sends profile changes only for users it has already synced to the remote, so the test posts first |
+| Avatar sync (profile image hook) | ✅ | ❌ | `TestMattermostToMatrixAvatarSync`: the ghost's avatar bytes equal Mattermost's re-encoded profile image. As with display names, the user posts first |
+| DM / group DM room auto-creation | ⚠️ | ❌ | e2e skipped: needs `EnableSharedChannelsDMs` (`TestMattermostToMatrixDirectMessage` asserts both 403s, then skips); room naming still only in `DMRoomCreationTestSuite`, which doesn't check message delivery. Multi-server DM routing (DM created on the calling server) is unit-only |
+| User joins channel → ghost joins room | ✅ | ❌ | `TestMattermostToMatrixUserJoinsChannel`, through the real `UserHasJoinedChannel` hook |
+| Matrix-originated user re-invited to room | ✅ | ❌ | `TestMattermostToMatrixMatrixUserReinvited`, which supersedes `testInviteRemoteUserToMatrixRoom`. The plugin invites as the AS bot, which `/matrix map` leaves at power level 0; in a `public_chat` room (invite level 50) the invite fails with 403 `M_FORBIDDEN`, so the test grants the bot the invite level. The rule that users are never invited to a server they didn't come from is unit-only |
+| Shared-channels hook routing (server resolved from `RemoteCluster`, own-remote skip) | ✅ | ❌ | Single: the message, file and profile rows above go through the `OnSharedChannelsSyncMsg`, attachment and profile-image hooks with a real `RemoteCluster`; the ghost creation, user join and re-invite rows go through `UserHasJoinedChannel`. The own-remote skip is unit-only (`TestServerIDForSyncMsg`); see Loop prevention under Cross-cutting |
 
 ### Matrix → Mattermost
 
@@ -130,12 +130,12 @@ Out of 47 rows:
 
 | | ✅ | ⚠️ | ❌ | — |
 | --- | --- | --- | --- | --- |
-| Single server | 11 | 8 | 26 | 2 |
+| Single server | 18 | 7 | 20 | 2 |
 | Multi server | 6 | 3 | 37 | 1 |
 
-- **Mattermost → Matrix on one server is the best-covered area.** Messages, markdown,
-  mentions, threads, edits and reaction-add all have real assertions. Deletions, reaction
-  removal, files and profile sync do not.
+- **Mattermost → Matrix on one server is the best-covered area.** Every row except DMs runs
+  through the real shared-channels and join hooks in `e2e/mattermost_to_matrix_test.go`. Two
+  rows are partial (DMs, attachment deletion); see their notes.
 - **Matrix → Mattermost is barely covered.** Apart from one plain-text message in each of
   the multi-server suite and the `e2e/` smoke test, no inbound event is ever processed. Edits,
   reactions, redactions, files and membership have **no tests at any level**, not even unit
@@ -148,8 +148,8 @@ Out of 47 rows:
 - **Some existing tests are weaker than their names suggest:**
   `UserRemoteDetectionIntegrationTestSuite` mostly asserts on hand-built structs,
   `ThreadMappingIntegrationTestSuite` doesn't need the container,
-  `testSyncChannelMembersToMatrixRoom` re-implements the production loop, and the DM tests
-  skip checking that the message arrived.
+  `testSyncChannelMembersToMatrixRoom` re-implements the production loop, and
+  `DMRoomCreationTestSuite` skips checking that the message arrived.
 
 ## Suggested next steps (by priority)
 
@@ -158,9 +158,9 @@ Out of 47 rows:
    join/leave/profile change. Ideally, events are produced by real Synapse users (the
    container already supports `CreateUser` / `JoinRoomAsUser`) and read back from the room,
    not hand-built.
-2. **Outbound gaps on a single server.** Post deletion, reaction removal, file attachments
-   through `OnSharedChannelsAttachmentSyncMsg` + `SyncPostToMatrix`, display name and avatar
-   sync, and DM message delivery.
+2. **Outbound gaps on a single server.** DM and group DM delivery with
+   `EnableSharedChannelsDMs` on, and attachment deletion if Mattermost ever re-syncs a deleted
+   attachment.
 3. **Move `server/` suite cases onto the real entrypoints.** Those suites call the bridge
    directly and hand-build inbound transactions; the `e2e/` harness drives the shared-channels
    hooks and has Synapse deliver transactions itself.
